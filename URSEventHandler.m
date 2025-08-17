@@ -27,7 +27,7 @@
         return nil;
     }
 
-    connection = [XCBConnection sharedConnection];
+    connection = [XCBConnection sharedConnectionAsWindowManager:YES];
 
     return self;
 }
@@ -40,16 +40,17 @@
 
 
     selectionManagerWindow = [connection createWindowWithDepth:[screen screen]->root_depth
-                                                                     withParentWindow:[screen rootWindow]
-                                                                        withXPosition:-1
-                                                                        withYPosition:-1
-                                                                            withWidth:1
-                                                                           withHeight:1
-                                                                     withBorrderWidth:0
-                                                                         withXCBClass:XCB_COPY_FROM_PARENT
-                                                                         withVisualId:visual
-                                                                        withValueMask:0
-                                                                        withValueList:NULL];
+                                                     withParentWindow:[screen rootWindow]
+                                                        withXPosition:-1
+                                                        withYPosition:-1
+                                                            withWidth:1
+                                                           withHeight:1
+                                                     withBorrderWidth:0
+                                                         withXCBClass:XCB_COPY_FROM_PARENT
+                                                         withVisualId:visual
+                                                        withValueMask:0
+                                                        withValueList:NULL
+                                                      registerWindow:YES];
 
     [connection registerAsWindowManager:YES screenId:1 selectionWindow:selectionManagerWindow];
 

@@ -10,7 +10,7 @@ TOOL_NAME = uroswm
 uroswm_APPLICATION_ICON =
 export TOOL_NAME
 
-$(TOOL_NAME)_LD_FLAGS += -L./XCBKit/XCBKit.framkework/
+$(TOOL_NAME)_LD_FLAGS += -L./XCBKit/XCBKit.framework/
 
 $(TOOL_NAME)_OBJC_FILES = \
 		main.m \
