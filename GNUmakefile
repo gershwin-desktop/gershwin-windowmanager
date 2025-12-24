@@ -18,13 +18,17 @@ $(APP_NAME)_LD_FLAGS += -L./XCBKit/XCBKit.framework/
 $(APP_NAME)_OBJC_FILES = \
 		main.m \
 		URSHybridEventHandler.m \
-		UROSWMApplication.m
+		UROSWMApplication.m \
+		URSThemeIntegration.m \
+		GSThemeTitleBar.m
 
 $(APP_NAME)_HEADER_FILES = \
 		URSHybridEventHandler.h \
-		UROSWMApplication.h
+		UROSWMApplication.h \
+		URSThemeIntegration.h \
+		GSThemeTitleBar.h
 
-$(APP_NAME)_GUI_LIBS = -lXCBKit -lxcb
+$(APP_NAME)_GUI_LIBS = -lXCBKit -lxcb $(shell pkg-config --libs cairo xcb)
 
 ADDITIONAL_OBJCFLAGS = -std=c99 -g -O0 -fobjc-arc -Wall -Wno-typedef-redefinition #-Wno-unused -Werror -Wall
 

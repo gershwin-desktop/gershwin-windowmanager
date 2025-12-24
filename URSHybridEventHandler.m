@@ -13,6 +13,8 @@
 #import <XCBKit/XCBScreen.h>
 #import <xcb/xcb.h>
 #import <XCBKit/services/EWMHService.h>
+#import <XCBKit/XCBFrame.h>
+#import "URSThemeIntegration.h"
 
 @implementation URSHybridEventHandler
 
@@ -60,6 +62,10 @@
 
     // Setup XCB event integration with NSRunLoop
     [self setupXCBEventIntegration];
+
+    // Setup simple timer-based theme integration
+    [self setupPeriodicThemeIntegration];
+    NSLog(@"GSTheme integration initialized with periodic checking enabled");
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
@@ -228,6 +234,9 @@
         case XCB_EXPOSE: {
             xcb_expose_event_t *exposeEvent = (xcb_expose_event_t *)event;
             [connection handleExpose:exposeEvent];
+
+            // Re-apply GSTheme if this is a titlebar expose event
+            [self handleTitlebarExpose:exposeEvent];
             break;
         }
         case XCB_ENTER_NOTIFY: {
@@ -267,7 +276,14 @@
         }
         case XCB_MAP_REQUEST: {
             xcb_map_request_event_t *mapRequestEvent = (xcb_map_request_event_t *)event;
+
+            // Let XCBConnection handle the map request normally (this creates titlebar structure)
             [connection handleMapRequest:mapRequestEvent];
+
+            // Immediately apply GSTheme after XCBConnection creates the structure
+            [self performSelector:@selector(applyGSThemeToRecentlyMappedWindow:)
+                       withObject:[NSNumber numberWithUnsignedInt:mapRequestEvent->window]
+                       afterDelay:0.05]; // Very short delay
             break;
         }
         case XCB_UNMAP_NOTIFY: {
@@ -327,6 +343,336 @@
 
 
 
+
+#pragma mark - GSTheme Integration (NEW)
+
+- (void)handleWindowCreated:(XCBTitleBar*)titlebar {
+    if (!titlebar) {
+        return;
+    }
+
+    NSLog(@"GSTheme: Applying theme to new titlebar for window: %@", titlebar.windowTitle);
+
+    // Register with theme integration
+    [[URSThemeIntegration sharedInstance] handleWindowCreated:titlebar];
+
+    // Apply GSTheme rendering
+    BOOL success = [URSThemeIntegration renderGSThemeTitlebar:titlebar
+                                                        title:titlebar.windowTitle
+                                                       active:YES]; // Assume new windows are active
+
+    if (!success) {
+        NSLog(@"GSTheme rendering failed for titlebar, falling back to Cairo");
+        // XCBTitleBar will fall back to its default Cairo rendering
+    }
+}
+
+- (void)handleWindowFocusChanged:(XCBTitleBar*)titlebar isActive:(BOOL)active {
+    if (!titlebar) {
+        return;
+    }
+
+    NSLog(@"GSTheme: Focus changed for window %@ (active: %d)", titlebar.windowTitle, active);
+
+    // Update theme integration
+    [[URSThemeIntegration sharedInstance] handleWindowFocusChanged:titlebar isActive:active];
+
+    // Re-render with new focus state
+    [URSThemeIntegration renderGSThemeTitlebar:titlebar
+                                         title:titlebar.windowTitle
+                                        active:active];
+}
+
+- (void)refreshAllManagedWindows {
+    NSLog(@"GSTheme: Refreshing all managed windows with current theme");
+    [URSThemeIntegration refreshAllTitlebars];
+}
+
+// Simple periodic check for new windows that need GSTheme
+- (void)setupPeriodicThemeIntegration {
+    // Use a timer to periodically check for new windows (less frequent)
+    [NSTimer scheduledTimerWithTimeInterval:5.0
+                                     target:self
+                                   selector:@selector(checkForNewWindows)
+                                   userInfo:nil
+                                    repeats:YES];
+    NSLog(@"Periodic GSTheme integration timer started (5 second interval)");
+}
+
+- (void)handleMapRequestWithGSTheme:(xcb_map_request_event_t*)mapRequestEvent {
+    @try {
+        NSLog(@"Intercepting map request for window %u - using GSTheme-only decoration", mapRequestEvent->window);
+
+        // Let XCBConnection handle the map request BUT don't let it decorate with XCBKit
+        // We need to duplicate XCBConnection's handleMapRequest logic but skip the decorateClientWindow call
+
+        xcb_window_t requestWindow = mapRequestEvent->window;
+
+        // Get window geometry
+        xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry([connection connection], requestWindow);
+        xcb_get_geometry_reply_t *geom_reply = xcb_get_geometry_reply([connection connection], geom_cookie, NULL);
+
+        if (geom_reply) {
+            NSLog(@"Window geometry: %dx%d at %d,%d", geom_reply->width, geom_reply->height, geom_reply->x, geom_reply->y);
+
+            // Create frame without XCBKit titlebar decoration
+            XCBWindow *clientWindow = [connection windowForXCBId:requestWindow];
+            if (!clientWindow) {
+                // Create a basic client window object
+                clientWindow = [[XCBWindow alloc] init];
+                [clientWindow setWindow:requestWindow];
+                [clientWindow setConnection:connection];
+                [connection registerWindow:clientWindow];
+            }
+
+            // Create frame for the window (this will create the structure but we'll handle decoration)
+            XCBFrame *frame = [[XCBFrame alloc] initWithClientWindow:clientWindow withConnection:connection];
+
+            NSLog(@"Created frame for client window, will apply GSTheme-only decoration");
+
+            // Map the frame and client window
+            [connection mapWindow:frame];
+            [connection registerWindow:clientWindow];
+
+            // Apply ONLY GSTheme decoration (no XCBKit titlebar drawing)
+            [self performSelector:@selector(applyGSThemeOnlyDecoration:)
+                       withObject:frame
+                       afterDelay:0.1]; // Short delay to let frame be fully mapped
+
+            free(geom_reply);
+        } else {
+            NSLog(@"Failed to get geometry for window %u, falling back to normal handling", requestWindow);
+            // Fallback to normal XCBConnection handling
+            [connection handleMapRequest:mapRequestEvent];
+        }
+
+    } @catch (NSException *exception) {
+        NSLog(@"Exception in GSTheme map request handler: %@", exception.reason);
+        // Fallback to normal handling
+        [connection handleMapRequest:mapRequestEvent];
+    }
+}
+
+- (void)applyGSThemeOnlyDecoration:(XCBFrame*)frame {
+    @try {
+        NSLog(@"Applying GSTheme-only decoration to frame");
+
+        // Get the titlebar from the frame
+        XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
+        if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
+            XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
+
+            // Apply ONLY GSTheme rendering (no Cairo/XCBKit drawing)
+            BOOL success = [URSThemeIntegration renderGSThemeToWindow:frame
+                                                                frame:frame
+                                                                title:titlebar.windowTitle
+                                                               active:YES];
+
+            if (success) {
+                NSLog(@"GSTheme-only decoration applied successfully");
+
+                // Add to managed list
+                URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
+                if (![integration.managedTitlebars containsObject:titlebar]) {
+                    [integration.managedTitlebars addObject:titlebar];
+                }
+            } else {
+                NSLog(@"GSTheme-only decoration failed");
+            }
+        } else {
+            NSLog(@"No titlebar found in frame for GSTheme decoration");
+        }
+
+    } @catch (NSException *exception) {
+        NSLog(@"Exception applying GSTheme-only decoration: %@", exception.reason);
+    }
+}
+
+- (void)handleTitlebarExpose:(xcb_expose_event_t*)exposeEvent {
+    @try {
+        URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
+        if (!integration.enabled) {
+            return;
+        }
+
+        xcb_window_t exposedWindow = exposeEvent->window;
+
+        // Check if the exposed window is a titlebar we're managing
+        for (XCBTitleBar *titlebar in integration.managedTitlebars) {
+            if ([titlebar window] == exposedWindow) {
+                // This titlebar was exposed, re-apply GSTheme to override XCBKit redrawing
+                NSString *windowIdString = [NSString stringWithFormat:@"%u", exposedWindow];
+                XCBWindow *window = [[self.connection windowsMap] objectForKey:windowIdString];
+
+                if (window && [window isKindOfClass:[XCBFrame class]]) {
+                    XCBFrame *frame = (XCBFrame*)window;
+
+                    NSLog(@"Titlebar %u exposed, re-applying GSTheme", exposedWindow);
+
+                    // Re-apply GSTheme rendering to override the expose redraw
+                    [URSThemeIntegration renderGSThemeToWindow:window
+                                                         frame:frame
+                                                         title:titlebar.windowTitle
+                                                        active:YES];
+                }
+                break;
+            }
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"Exception in titlebar expose handler: %@", exception.reason);
+    }
+}
+
+- (void)applyGSThemeToRecentlyMappedWindow:(NSNumber*)windowIdNumber {
+    @try {
+        xcb_window_t windowId = [windowIdNumber unsignedIntValue];
+
+        NSLog(@"Applying GSTheme to recently mapped window: %u", windowId);
+
+        // Find the frame for this client window
+        NSDictionary *windowsMap = [self.connection windowsMap];
+
+        for (NSString *mapWindowId in windowsMap) {
+            XCBWindow *window = [windowsMap objectForKey:mapWindowId];
+
+            if (window && [window isKindOfClass:[XCBFrame class]]) {
+                XCBFrame *frame = (XCBFrame*)window;
+                XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+
+                // Check if this frame contains our client window
+                if (clientWindow && [clientWindow window] == windowId) {
+                    XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
+
+                    if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
+                        XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
+
+                        NSLog(@"Found frame for client window %u, applying GSTheme to titlebar", windowId);
+
+                        // Apply GSTheme rendering (this will override XCBKit's decoration)
+                        BOOL success = [URSThemeIntegration renderGSThemeToWindow:window
+                                                                             frame:frame
+                                                                             title:titlebar.windowTitle
+                                                                            active:YES];
+
+                        if (success) {
+                            // Add to managed list so we can handle expose events
+                            URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
+                            if (![integration.managedTitlebars containsObject:titlebar]) {
+                                [integration.managedTitlebars addObject:titlebar];
+                            }
+
+                            NSLog(@"Successfully applied GSTheme to titlebar for window %u: %@",
+                                  windowId, titlebar.windowTitle ?: @"(untitled)");
+
+                            // Apply GSTheme again after a short delay to override any subsequent XCBKit drawing
+                            [self performSelector:@selector(reapplyGSThemeToTitlebar:)
+                                       withObject:titlebar
+                                       afterDelay:0.1];
+                        } else {
+                            NSLog(@"Failed to apply GSTheme to titlebar for window %u", windowId);
+                        }
+
+                        return; // Found and processed
+                    }
+                }
+            }
+        }
+
+        NSLog(@"Could not find frame for client window %u", windowId);
+
+    } @catch (NSException *exception) {
+        NSLog(@"Exception applying GSTheme to recently mapped window: %@", exception.reason);
+    }
+}
+
+- (void)reapplyGSThemeToTitlebar:(XCBTitleBar*)titlebar {
+    @try {
+        if (!titlebar) return;
+
+        NSLog(@"Reapplying GSTheme to titlebar: %@", titlebar.windowTitle);
+
+        // Find the frame containing this titlebar
+        NSDictionary *windowsMap = [self.connection windowsMap];
+
+        for (NSString *windowId in windowsMap) {
+            XCBWindow *window = [windowsMap objectForKey:windowId];
+
+            if (window && [window isKindOfClass:[XCBFrame class]]) {
+                XCBFrame *frame = (XCBFrame*)window;
+                XCBWindow *frameTitle = [frame childWindowForKey:TitleBar];
+
+                if (frameTitle && frameTitle == titlebar) {
+                    // Reapply GSTheme rendering
+                    [URSThemeIntegration renderGSThemeToWindow:window
+                                                         frame:frame
+                                                         title:titlebar.windowTitle
+                                                        active:YES];
+                    NSLog(@"GSTheme reapplied to titlebar: %@", titlebar.windowTitle);
+                    return;
+                }
+            }
+        }
+
+        NSLog(@"Could not find frame for titlebar reapplication");
+
+    } @catch (NSException *exception) {
+        NSLog(@"Exception in GSTheme reapplication: %@", exception.reason);
+    }
+}
+
+- (void)checkForNewWindows {
+    @try {
+        // Check if GSTheme integration is enabled
+        URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
+        if (!integration.enabled) {
+            return; // Skip if disabled
+        }
+
+        // Check all windows in the connection for new frames/titlebars
+        NSDictionary *windowsMap = [self.connection windowsMap];
+        NSUInteger newTitlebarsFound = 0;
+
+        for (NSString *windowId in windowsMap) {
+            XCBWindow *window = [windowsMap objectForKey:windowId];
+
+            // Look for XCBFrame objects (which contain titlebars)
+            if (window && [window isKindOfClass:[XCBFrame class]]) {
+                XCBFrame *frame = (XCBFrame*)window;
+                XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
+
+                if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
+                    XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
+
+                    // Check if we've already processed this titlebar
+                    if (![integration.managedTitlebars containsObject:titlebar]) {
+                        newTitlebarsFound++;
+
+                        // Apply standalone GSTheme rendering
+                        BOOL success = [URSThemeIntegration renderGSThemeToWindow:window
+                                                                             frame:frame
+                                                                             title:titlebar.windowTitle
+                                                                            active:YES];
+
+                        if (success) {
+                            // Add to managed list only if successful
+                            [integration.managedTitlebars addObject:titlebar];
+                            NSLog(@"Applied GSTheme to new titlebar: %@", titlebar.windowTitle ?: @"(untitled)");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only log if we found new titlebars
+        if (newTitlebarsFound > 0) {
+            NSLog(@"GSTheme periodic check: processed %lu new titlebars", (unsigned long)newTitlebarsFound);
+        }
+
+    } @catch (NSException *exception) {
+        NSLog(@"Exception in periodic window check: %@", exception.reason);
+    }
+}
+
 #pragma mark - Cleanup
 
 - (void)dealloc
@@ -343,6 +689,9 @@
                                    all:YES];
         }
     }
+
+    // Remove notification center observers
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 
     // ARC handles memory management automatically
 }

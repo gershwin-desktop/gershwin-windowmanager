@@ -13,6 +13,8 @@
 #import <Foundation/Foundation.h>
 #import <XCBKit/XCBConnection.h>
 #import <XCBKit/XCBWindow.h>
+#import <XCBKit/XCBTitleBar.h>
+#import "URSThemeIntegration.h"
 
 // Use GNUstep's existing RunLoopEventType and RunLoopEvents protocol
 // (already defined in Foundation/NSRunLoop.h)
@@ -34,6 +36,11 @@
 // New NSRunLoop Integration methods
 - (void)setupXCBEventIntegration;
 - (void)processXCBEvent:(xcb_generic_event_t*)event;
+
+// NEW: GSTheme Integration methods
+- (void)handleWindowCreated:(XCBTitleBar*)titlebar;
+- (void)handleWindowFocusChanged:(XCBTitleBar*)titlebar isActive:(BOOL)active;
+- (void)refreshAllManagedWindows;
 
 
 @end

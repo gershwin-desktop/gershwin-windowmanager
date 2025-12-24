@@ -12,6 +12,7 @@
 #import <AppKit/AppKit.h>
 #import "URSHybridEventHandler.h"
 #import "UROSWMApplication.h"
+#import "URSThemeIntegration.h"
 #import <XCBKit/utils/XCBShape.h>
 #import <XCBKit/services/TitleBarSettingsService.h>
 
@@ -28,6 +29,11 @@ int main(int argc, const char * argv[])
         [settings setClosePosition:closePosition];
         [settings setMinimizePosition:minimizePosition];
         [settings setMaximizePosition:maximizePosition];
+
+        // Initialize GSTheme for titlebar decorations
+        NSLog(@"Initializing GSTheme titlebar integration...");
+        [URSThemeIntegration initializeGSTheme];
+        [URSThemeIntegration enableGSThemeTitleBars];
 
         // Create custom NSApplication and hybrid event handler
         UROSWMApplication *app = [UROSWMApplication sharedApplication];
