@@ -189,6 +189,8 @@
             } else {
                 // No more events, process the motion
                 [connection handleMotionNotify:lastMotionEvent];
+                // Update titlebar during resize to prevent visual tiling/repetition
+                [self handleResizeDuringMotion:lastMotionEvent];
                 needFlush = YES;
                 free(lastMotionEvent);
                 lastMotionEvent = NULL;
@@ -271,7 +273,10 @@
         }
         case XCB_BUTTON_RELEASE: {
             xcb_button_release_event_t *releaseEvent = (xcb_button_release_event_t *)event;
+            // Let xcbkit handle the release first
             [connection handleButtonRelease:releaseEvent];
+            // After resize completes, update the titlebar with GSTheme
+            [self handleResizeComplete:releaseEvent];
             break;
         }
         case XCB_MAP_NOTIFY: {
@@ -673,6 +678,126 @@
 
     } @catch (NSException *exception) {
         NSLog(@"Exception in periodic window check: %@", exception.reason);
+    }
+}
+
+#pragma mark - Resize Handling
+
+- (void)handleResizeDuringMotion:(xcb_motion_notify_event_t*)motionEvent {
+    @try {
+        // Find the window involved in the motion
+        XCBWindow *window = [connection windowForXCBId:motionEvent->event];
+        if (!window) {
+            return;
+        }
+
+        // Check if it's a frame (resize happens on frames)
+        XCBFrame *frame = nil;
+        if ([window isKindOfClass:[XCBFrame class]]) {
+            frame = (XCBFrame*)window;
+        }
+
+        if (!frame) {
+            return;
+        }
+
+        // Get the titlebar
+        XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
+        if (!titlebarWindow || ![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
+            return;
+        }
+        XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
+
+        // Get the new frame size from the current geometry
+        XCBRect frameRect = [frame windowRect];
+        XCBSize pixmapSize = [titlebar pixmapSize];
+
+        // Only update if the width has changed (horizontal resize)
+        if (pixmapSize.width != frameRect.size.width) {
+            // Resize the titlebar to match the new frame width (same approach as zoom)
+            uint16_t titleHgt = [titlebar windowRect].size.height;
+            XCBSize titleSize = XCBMakeSize(frameRect.size.width, titleHgt);
+            [titlebar maximizeToSize:titleSize andPosition:XCBMakePoint(0.0, 0.0)];
+
+            // Recreate the titlebar pixmap at the new size
+            [titlebar destroyPixmap];
+            [titlebar createPixmap];
+
+            // Redraw with GSTheme (same as zoom)
+            [URSThemeIntegration renderGSThemeToWindow:frame
+                                                 frame:frame
+                                                 title:[titlebar windowTitle]
+                                                active:YES];
+
+            // Copy the pixmap to the window (this is the key difference from zoom!)
+            // During zoom, expose events trigger this copy, but during resize motion
+            // we need to do it explicitly to prevent visual tiling/repetition
+            XCBRect titleRect = [titlebar windowRect];
+            [titlebar drawArea:titleRect];
+
+            NSLog(@"GSTheme: Titlebar redrawn during resize to width %d", frameRect.size.width);
+        }
+    } @catch (NSException *exception) {
+        // Silently ignore exceptions during resize motion to avoid spam
+    }
+}
+
+- (void)handleResizeComplete:(xcb_button_release_event_t*)releaseEvent {
+    @try {
+        // Find the window that was released
+        XCBWindow *window = [connection windowForXCBId:releaseEvent->event];
+        if (!window) {
+            return;
+        }
+
+        // Check if it's a frame (resize happens on frames)
+        XCBFrame *frame = nil;
+        if ([window isKindOfClass:[XCBFrame class]]) {
+            frame = (XCBFrame*)window;
+        } else if ([window parentWindow] && [[window parentWindow] isKindOfClass:[XCBFrame class]]) {
+            frame = (XCBFrame*)[window parentWindow];
+        }
+
+        if (!frame) {
+            return;
+        }
+
+        // Get the titlebar
+        XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
+        if (!titlebarWindow || ![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
+            return;
+        }
+        XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
+
+        // Check if the titlebar size has changed (compare pixmap size to window rect)
+        XCBRect titlebarRect = [titlebar windowRect];
+        XCBSize pixmapSize = [titlebar pixmapSize];
+
+        if (pixmapSize.width != titlebarRect.size.width ||
+            pixmapSize.height != titlebarRect.size.height) {
+            NSLog(@"GSTheme: Titlebar size changed from %dx%d to %dx%d, recreating pixmap",
+                  pixmapSize.width, pixmapSize.height,
+                  titlebarRect.size.width, titlebarRect.size.height);
+
+            // Recreate the titlebar pixmap at the new size
+            [titlebar destroyPixmap];
+            [titlebar createPixmap];
+
+            // Redraw with GSTheme
+            [URSThemeIntegration renderGSThemeToWindow:frame
+                                                 frame:frame
+                                                 title:[titlebar windowTitle]
+                                                active:YES];
+
+            // Copy the pixmap to the window
+            XCBRect titleRect = [titlebar windowRect];
+            [titlebar drawArea:titleRect];
+
+            [connection flush];
+            NSLog(@"GSTheme: Titlebar redrawn after resize");
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"Exception in handleResizeComplete: %@", exception.reason);
     }
 }
 
