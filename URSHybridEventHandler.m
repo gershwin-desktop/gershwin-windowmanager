@@ -944,6 +944,11 @@
                                                          frame:frame
                                                          title:[titlebar windowTitle]
                                                         active:YES];
+
+                    // Update background pixmap and copy to window
+                    [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+                    [titlebar drawArea:[titlebar windowRect]];
+
                     NSLog(@"GSTheme: Restore complete, titlebar redrawn");
                 } else {
                     // Maximize to screen size
@@ -976,6 +981,11 @@
                                                          frame:frame
                                                          title:[titlebar windowTitle]
                                                         active:YES];
+
+                    // Update background pixmap and copy to window
+                    [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+                    [titlebar drawArea:[titlebar windowRect]];
+
                     NSLog(@"GSTheme: Maximize complete, titlebar redrawn at new size");
                 }
                 break;
