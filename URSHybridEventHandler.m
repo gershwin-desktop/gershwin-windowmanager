@@ -267,6 +267,8 @@
         }
         case XCB_BUTTON_PRESS: {
             xcb_button_press_event_t *pressEvent = (xcb_button_press_event_t *)event;
+            NSLog(@"EVENT: XCB_BUTTON_PRESS received for window %u at (%d, %d)",
+                  pressEvent->event, pressEvent->event_x, pressEvent->event_y);
             // Check if this is a button click on a GSThemeTitleBar
             if (![self handleTitlebarButtonPress:pressEvent]) {
                 // Not a titlebar button, let xcbkit handle normally
@@ -892,11 +894,20 @@
         }
 
         XCBTitleBar *titlebar = (XCBTitleBar*)window;
-        NSLog(@"GSTheme: Found titlebar, parentWindow: %@",
+        XCBRect titlebarRect = [titlebar windowRect];
+        NSLog(@"GSTheme: Found titlebar, windowRect: %ux%u at (%d,%d), parentWindow: %@",
+              (unsigned)titlebarRect.size.width, (unsigned)titlebarRect.size.height,
+              (int)titlebarRect.position.x, (int)titlebarRect.position.y,
               [titlebar parentWindow] ? NSStringFromClass([[titlebar parentWindow] class]) : @"nil");
+
+        // CRITICAL: Allow X11 to continue processing events
+        // Use ASYNC_POINTER to resume event processing without replaying this event
+        // (REPLAY_POINTER would cause double-processing of the click)
+        xcb_allow_events([connection connection], XCB_ALLOW_ASYNC_POINTER, pressEvent->time);
 
         // Check which button was clicked using the button layout
         NSPoint clickPoint = NSMakePoint(pressEvent->event_x, pressEvent->event_y);
+        NSLog(@"GSTheme: Click at (%.0f, %.0f)", clickPoint.x, clickPoint.y);
         GSThemeTitleBarButton button = [self buttonAtPoint:clickPoint forTitlebar:titlebar];
 
         if (button == GSThemeTitleBarButtonNone) {
@@ -934,10 +945,25 @@
                     NSLog(@"GSTheme: Restoring window from maximized state");
                     [frame restoreDimensionAndPosition];
 
+                    // Explicitly resize the titlebar to match restored frame width
+                    XCBRect restoredFrameRect = [frame windowRect];
+                    uint16_t titleHgt = [titlebar windowRect].size.height;
+                    XCBSize restoredTitleSize = XCBMakeSize(restoredFrameRect.size.width, titleHgt);
+                    [titlebar maximizeToSize:restoredTitleSize andPosition:XCBMakePoint(0.0, 0.0)];
+
+                    // Also resize client window
+                    if (clientWindow) {
+                        XCBSize clientSize = XCBMakeSize(restoredFrameRect.size.width,
+                                                         restoredFrameRect.size.height - titleHgt);
+                        XCBPoint clientPos = XCBMakePoint(0.0, titleHgt - 1);
+                        [clientWindow maximizeToSize:clientSize andPosition:clientPos];
+                    }
+
                     // Recreate the titlebar pixmap at the restored size
                     [titlebar destroyPixmap];
                     [titlebar createPixmap];
-                    NSLog(@"GSTheme: Titlebar pixmap recreated for restored size");
+                    NSLog(@"GSTheme: Titlebar pixmap recreated for restored size %dx%d",
+                          restoredFrameRect.size.width, titleHgt);
 
                     // Redraw titlebar with GSTheme at restored size
                     [URSThemeIntegration renderGSThemeToWindow:frame
