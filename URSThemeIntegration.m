@@ -344,9 +344,9 @@ static URSThemeIntegration *sharedInstance = nil;
           titlebar.pixmap, (int)image.size.width, (int)image.size.height);
 
     // DEBUG: Check bitmap format and sample pixel data
-    NSLog(@"Bitmap format: %ldx%ld, bitsPerPixel=%ld, bytesPerRow=%ld, colorSpace=%@, format=%lu",
+    NSLog(@"Bitmap format: %ldx%ld, bitsPerPixel=%ld, bytesPerRow=%ld, colorSpace=%@, format=%u",
           [bitmap pixelsWide], [bitmap pixelsHigh], [bitmap bitsPerPixel],
-          [bitmap bytesPerRow], [bitmap colorSpaceName], [bitmap bitmapFormat]);
+          [bitmap bytesPerRow], [bitmap colorSpaceName], (unsigned int)[bitmap bitmapFormat]);
 
     // Sample a few pixels to see actual byte values
     unsigned char *pixels = [bitmap bitmapData];
