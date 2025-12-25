@@ -189,7 +189,7 @@
             } else {
                 // No more events, process the motion
                 [connection handleMotionNotify:lastMotionEvent];
-                // Update titlebar during resize to prevent visual tiling/repetition
+                // Update titlebar after xcbkit resizes the window
                 [self handleResizeDuringMotion:lastMotionEvent];
                 needFlush = YES;
                 free(lastMotionEvent);
@@ -708,34 +708,31 @@
         }
         XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
 
-        // Get the new frame size from the current geometry
-        XCBRect frameRect = [frame windowRect];
+        // After xcbkit processes motion, windowRect is updated with new size
+        XCBRect titlebarRect = [titlebar windowRect];
         XCBSize pixmapSize = [titlebar pixmapSize];
 
-        // Only update if the width has changed (horizontal resize)
-        if (pixmapSize.width != frameRect.size.width) {
-            // Resize the titlebar to match the new frame width (same approach as zoom)
-            uint16_t titleHgt = [titlebar windowRect].size.height;
-            XCBSize titleSize = XCBMakeSize(frameRect.size.width, titleHgt);
-            [titlebar maximizeToSize:titleSize andPosition:XCBMakePoint(0.0, 0.0)];
-
+        // Only update if the size has changed
+        if (pixmapSize.width != titlebarRect.size.width) {
             // Recreate the titlebar pixmap at the new size
             [titlebar destroyPixmap];
             [titlebar createPixmap];
 
-            // Redraw with GSTheme (same as zoom)
+            // Redraw with GSTheme
             [URSThemeIntegration renderGSThemeToWindow:frame
                                                  frame:frame
                                                  title:[titlebar windowTitle]
                                                 active:YES];
 
-            // Copy the pixmap to the window (this is the key difference from zoom!)
-            // During zoom, expose events trigger this copy, but during resize motion
-            // we need to do it explicitly to prevent visual tiling/repetition
-            XCBRect titleRect = [titlebar windowRect];
-            [titlebar drawArea:titleRect];
+            // Update the window background pixmap to prevent X11 tiling
+            // This is the key fix - xcbkit sets a background pixmap which X11 tiles
+            // when the window is larger than the pixmap
+            [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
 
-            NSLog(@"GSTheme: Titlebar redrawn during resize to width %d", frameRect.size.width);
+            // Copy the pixmap to the window immediately
+            [titlebar drawArea:titlebarRect];
+
+            [connection flush];
         }
     } @catch (NSException *exception) {
         // Silently ignore exceptions during resize motion to avoid spam
@@ -788,6 +785,9 @@
                                                  frame:frame
                                                  title:[titlebar windowTitle]
                                                 active:YES];
+
+            // Update the window background pixmap to prevent X11 tiling
+            [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
 
             // Copy the pixmap to the window
             XCBRect titleRect = [titlebar windowRect];
