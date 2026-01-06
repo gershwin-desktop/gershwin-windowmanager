@@ -37,7 +37,8 @@
 @property (assign, nonatomic) BOOL shiftKeyPressed;
 
 // Original URSEventHandler methods (preserved for compatibility)
-- (void)registerAsWindowManager;
+- (BOOL)registerAsWindowManager;
+- (void)decorateExistingWindowsOnStartup;
 
 // New NSRunLoop Integration methods
 - (void)setupXCBEventIntegration;
@@ -47,6 +48,12 @@
 - (void)handleWindowCreated:(XCBTitleBar*)titlebar;
 - (void)handleWindowFocusChanged:(XCBTitleBar*)titlebar isActive:(BOOL)active;
 - (void)refreshAllManagedWindows;
+
+// Cleanup methods
+- (void)cleanupBeforeExit;
+
+// ICCCM Manager Selection Protocol - Being Replaced
+- (void)handleSelectionClear:(xcb_selection_clear_event_t*)event;
 
 // Keyboard event handling for Alt-Tab
 - (void)setupKeyboardGrabbing;

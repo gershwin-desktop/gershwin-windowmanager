@@ -11,10 +11,14 @@
 
 #import "URSHybridEventHandler.h"
 #import <XCBKit/XCBScreen.h>
+#import <XCBKit/XCBQueryTreeReply.h>
+#import <XCBKit/XCBAttributesReply.h>
 #import <xcb/xcb.h>
 #import <xcb/xcb_icccm.h>
+#import <xcb/xcb_aux.h>
 #import <X11/keysym.h>
 #import <XCBKit/services/EWMHService.h>
+#import <XCBKit/services/XCBAtomService.h>
 #import <XCBKit/XCBFrame.h>
 #import "URSThemeIntegration.h"
 #import "GSThemeTitleBar.h"
@@ -70,7 +74,15 @@
     self.nsRunLoopActive = YES;
 
     // Register as window manager (same as original)
-    [self registerAsWindowManager];
+    BOOL registered = [self registerAsWindowManager];
+    if (!registered) {
+        NSLog(@"[WindowManager] Failed to register as WM; terminating");
+        [NSApp terminate:nil];
+        return;
+    }
+
+    // Decorate any existing windows already on screen
+    [self decorateExistingWindowsOnStartup];
 
     // Setup XCB event integration with NSRunLoop
     [self setupXCBEventIntegration];
@@ -88,6 +100,12 @@
     return NSTerminateNow;
 }
 
+- (void)applicationWillTerminate:(NSNotification *)notification
+{
+    NSLog(@"[WindowManager] Application terminating - performing full cleanup");
+    [self cleanupBeforeExit];
+}
+
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender
 {
     // Keep running even if no windows are visible (window manager behavior)
@@ -96,7 +114,7 @@
 
 #pragma mark - Original URSEventHandler Methods (Preserved)
 
-- (void)registerAsWindowManager
+- (BOOL)registerAsWindowManager
 {
     XCBScreen *screen = [[connection screens] objectAtIndex:0];
     XCBVisual *visual = [[XCBVisual alloc] initWithVisualId:[screen screen]->root_visual];
@@ -115,14 +133,91 @@
                                                     withValueList:NULL
                                                   registerWindow:YES];
 
-    [connection registerAsWindowManager:YES screenId:0 selectionWindow:selectionManagerWindow];
+    NSLog(@"[WindowManager] Attempting to become WM (replace existing if needed)...");
+    BOOL registered = [connection registerAsWindowManager:YES screenId:0 selectionWindow:selectionManagerWindow];
+
+    if (!registered) {
+        NSLog(@"[WindowManager] Existing WM detected; trying to replace it");
+        registered = [connection registerAsWindowManager:NO screenId:0 selectionWindow:selectionManagerWindow];
+    }
+
+    if (!registered) {
+        NSLog(@"[WindowManager] Could not acquire WM ownership even after replace attempt");
+        return NO;
+    }
+
+    NSLog(@"[WindowManager] Successfully registered as window manager");
 
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
     [ewmhService putPropertiesForRootWindow:[screen rootWindow] andWmWindow:selectionManagerWindow];
     [connection flush];
 
     // ARC handles cleanup automatically
+    return YES;
+}
 
+#pragma mark - Existing Windows Decoration
+
+- (void)decorateExistingWindowsOnStartup {
+    @try {
+        XCBScreen *screen = [[connection screens] objectAtIndex:0];
+        XCBWindow *rootWindow = [screen rootWindow];
+
+        XCBQueryTreeReply *tree = [rootWindow queryTree];
+        xcb_window_t *children = [tree queryTreeAsArray];
+        uint32_t childCount = tree.childrenLen;
+
+        NSLog(@"[WindowManager] Decorating %u pre-existing windows", childCount);
+
+        for (uint32_t i = 0; i < childCount; i++) {
+            xcb_window_t winId = children[i];
+
+            // Skip our own helper/selection window and root
+            if (winId == [rootWindow window] || winId == [self.selectionManagerWindow window]) {
+                continue;
+            }
+
+            XCBWindow *win = [[XCBWindow alloc] initWithXCBWindow:winId andConnection:connection];
+            [win updateAttributes];
+            XCBAttributesReply *attrs = [win attributes];
+
+            if (!attrs) {
+                NSLog(@"[WindowManager] Skipping window %u (no attributes)", winId);
+                continue;
+            }
+
+            // Ignore override-redirect or unmapped windows
+            if (attrs.overrideRedirect) {
+                NSLog(@"[WindowManager] Skipping window %u (override-redirect)", winId);
+                continue;
+            }
+
+            if (attrs.mapState != XCB_MAP_STATE_VIEWABLE) {
+                NSLog(@"[WindowManager] Skipping window %u (mapState %u)", winId, attrs.mapState);
+                continue;
+            }
+
+            // Skip already-managed windows
+            if ([connection windowForXCBId:winId]) {
+                NSLog(@"[WindowManager] Window %u already managed; skipping", winId);
+                continue;
+            }
+
+            NSLog(@"[WindowManager] Adopting existing window %u", winId);
+
+            // Synthesize a map request so normal decoration flow runs
+            xcb_map_request_event_t mapEvent = {0};
+            mapEvent.response_type = XCB_MAP_REQUEST;
+            mapEvent.parent = [rootWindow window];
+            mapEvent.window = winId;
+
+            [connection handleMapRequest:&mapEvent];
+        }
+
+        [connection flush];
+    } @catch (NSException *exception) {
+        NSLog(@"[WindowManager] Exception while decorating existing windows: %@", exception.reason);
+    }
 }
 
 #pragma mark - NSRunLoop Integration (New for Phase 1)
@@ -365,6 +460,11 @@
             [self handleKeyReleaseEvent:keyReleaseEvent];
             break;
         }
+        case XCB_SELECTION_CLEAR: {
+            xcb_selection_clear_event_t *selectionClearEvent = (xcb_selection_clear_event_t *)event;
+            [self handleSelectionClear:selectionClearEvent];
+            break;
+        }
         default:
             break;
     }
@@ -381,6 +481,7 @@
         case XCB_DESTROY_NOTIFY:
         case XCB_CLIENT_MESSAGE:
         case XCB_CONFIGURE_REQUEST:
+        case XCB_SELECTION_CLEAR:
             return YES;
         default:
             return NO;
@@ -1319,6 +1420,101 @@
 
 #pragma mark - Keyboard Event Handling (Alt-Tab)
 
+- (void)cleanupKeyboardGrabbing {
+    NSLog(@"[Alt-Tab] Cleaning up keyboard grabbing");
+    
+    @try {
+        XCBScreen *screen = [[connection screens] objectAtIndex:0];
+        xcb_window_t root = [[screen rootWindow] window];
+        xcb_connection_t *conn = [connection connection];
+        
+        // Ungrab all key combinations we previously grabbed
+        // We need to ungrab both Alt+Tab and Shift+Alt+Tab
+        
+        // Get the keyboard mapping to find Tab key (same as in setup)
+        xcb_get_keyboard_mapping_cookie_t cookie = xcb_get_keyboard_mapping(
+            conn,
+            8,   // min_keycode
+            248  // count (255 - 8 + 1)
+        );
+        
+        xcb_get_keyboard_mapping_reply_t *reply = xcb_get_keyboard_mapping_reply(conn, cookie, NULL);
+        if (!reply) {
+            NSLog(@"[Alt-Tab] Warning: Failed to get keyboard mapping during cleanup");
+            // Fallback ungrab with common Tab keycode
+            xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1);
+            xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT);
+            [connection flush];
+            return;
+        }
+        
+        xcb_keysym_t *keysyms = xcb_get_keyboard_mapping_keysyms(reply);
+        int keysyms_len = xcb_get_keyboard_mapping_keysyms_length(reply);
+        
+        // Find Tab key and ungrab it
+        BOOL tabFound = NO;
+        for (int i = 0; i < keysyms_len; i++) {
+            if (keysyms[i] == XK_Tab) {
+                xcb_keycode_t keycode = 8 + (i / reply->keysyms_per_keycode);
+                
+                NSLog(@"[Alt-Tab] Ungrabbing Tab key at keycode %d", keycode);
+                
+                // Ungrab Alt+Tab
+                xcb_ungrab_key(conn, keycode, root, XCB_MOD_MASK_1);
+                
+                // Ungrab Shift+Alt+Tab
+                xcb_ungrab_key(conn, keycode, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT);
+                
+                tabFound = YES;
+                break;
+            }
+        }
+        
+        if (!tabFound) {
+            NSLog(@"[Alt-Tab] Using fallback keycode 23 for ungrab");
+            xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1);
+            xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT);
+        }
+        
+        free(reply);
+        [connection flush];
+        NSLog(@"[Alt-Tab] Successfully ungrabbed keyboard");
+        
+    } @catch (NSException *exception) {
+        NSLog(@"[Alt-Tab] Exception in cleanupKeyboardGrabbing: %@", exception.reason);
+    }
+}
+
+- (void)cleanupRootWindowEventMask {
+    NSLog(@"[WindowManager] Cleaning up root window event mask");
+    
+    @try {
+        XCBScreen *screen = [[connection screens] objectAtIndex:0];
+        XCBWindow *rootWindow = [[XCBWindow alloc] initWithXCBWindow:[[screen rootWindow] window] 
+                                                        andConnection:connection];
+        
+        // Clear SUBSTRUCTURE_REDIRECT to allow normal window manager behavior
+        // This allows window clicks and focus changes to work after WM exits
+        uint32_t values[1];
+        values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;  // Keep notify, but remove redirect
+        
+        BOOL success = [rootWindow changeAttributes:values 
+                                           withMask:XCB_CW_EVENT_MASK 
+                                            checked:NO];
+        
+        if (success) {
+            NSLog(@"[WindowManager] Successfully restored root window event mask");
+        } else {
+            NSLog(@"[WindowManager] Warning: Failed to restore root window event mask");
+        }
+        
+        [connection flush];
+        
+    } @catch (NSException *exception) {
+        NSLog(@"[WindowManager] Exception in cleanupRootWindowEventMask: %@", exception.reason);
+    }
+}
+
 - (void)setupKeyboardGrabbing {
     NSLog(@"[Alt-Tab] Setting up keyboard grabbing");
     
@@ -1471,8 +1667,222 @@
 
 #pragma mark - Cleanup
 
+- (void)cleanupBeforeExit
+{
+    NSLog(@"[WindowManager] ========== Starting comprehensive cleanup ==========");
+    
+    @try {
+        // Step 1: Clean up keyboard grabs
+        NSLog(@"[WindowManager] Step 1: Cleaning up keyboard grabs");
+        [self cleanupKeyboardGrabbing];
+        
+        // Step 2: Undecorate and restore all client windows
+        NSLog(@"[WindowManager] Step 2: Restoring all client windows");
+        [self undecoratAllWindows];
+        
+        // Step 3: Clear EWMH properties
+        NSLog(@"[WindowManager] Step 3: Clearing EWMH properties");
+        [self clearEWMHProperties];
+        
+        // Step 4: Release window manager selection ownership
+        NSLog(@"[WindowManager] Step 4: Releasing WM selection ownership");
+        [self releaseWMSelection];
+        
+        // Step 5: Restore root window event mask
+        NSLog(@"[WindowManager] Step 5: Restoring root window event mask");
+        [self cleanupRootWindowEventMask];
+        
+        // Step 6: Flush all changes to X server
+        NSLog(@"[WindowManager] Step 6: Flushing changes to X server");
+        [connection flush];
+        xcb_aux_sync([connection connection]);
+        
+        NSLog(@"[WindowManager] ========== Cleanup completed successfully ==========");
+        
+    } @catch (NSException *exception) {
+        NSLog(@"[WindowManager] Exception during cleanup: %@", exception.reason);
+    }
+}
+
+- (void)undecoratAllWindows
+{
+    @try {
+        if (!connection) {
+            NSLog(@"[WindowManager] No connection available for window cleanup");
+            return;
+        }
+        
+        NSDictionary *windowsMap = [connection windowsMap];
+        if (!windowsMap || [windowsMap count] == 0) {
+            NSLog(@"[WindowManager] No windows to clean up");
+            return;
+        }
+        
+        NSLog(@"[WindowManager] Cleaning up %lu managed windows", (unsigned long)[windowsMap count]);
+        
+        XCBScreen *screen = [[connection screens] objectAtIndex:0];
+        XCBWindow *rootWindow = [screen rootWindow];
+        
+        // Collect all frames first to avoid modifying dictionary while iterating
+        NSMutableArray *framesToCleanup = [NSMutableArray array];
+        
+        for (NSString *windowId in windowsMap) {
+            XCBWindow *window = [windowsMap objectForKey:windowId];
+            if (window && [window isKindOfClass:[XCBFrame class]]) {
+                [framesToCleanup addObject:window];
+            }
+        }
+        
+        NSLog(@"[WindowManager] Found %lu frames to clean up", (unsigned long)[framesToCleanup count]);
+        
+        // Clean up each frame
+        for (XCBFrame *frame in framesToCleanup) {
+            @try {
+                XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+                
+                if (clientWindow) {
+                    NSLog(@"[WindowManager] Restoring client window %u", [clientWindow window]);
+                    
+                    // Get client window geometry
+                    XCBRect clientRect = [clientWindow windowRect];
+                    
+                    // Reparent client back to root window
+                    xcb_reparent_window([connection connection],
+                                      [clientWindow window],
+                                      [rootWindow window],
+                                      clientRect.position.x,
+                                      clientRect.position.y);
+                    
+                    // Unmap the frame (this hides the decorations)
+                    xcb_unmap_window([connection connection], [frame window]);
+                    
+                    // Mark client as not decorated
+                    [clientWindow setDecorated:NO];
+                    
+                    NSLog(@"[WindowManager] Client window %u restored to root", [clientWindow window]);
+                }
+                
+                // Destroy the frame window (this will also clean up titlebar and buttons)
+                xcb_destroy_window([connection connection], [frame window]);
+                
+            } @catch (NSException *exception) {
+                NSLog(@"[WindowManager] Exception cleaning up frame %u: %@", [frame window], exception.reason);
+            }
+        }
+        
+        [connection flush];
+        
+    } @catch (NSException *exception) {
+        NSLog(@"[WindowManager] Exception in undecoratAllWindows: %@", exception.reason);
+    }
+}
+
+- (void)clearEWMHProperties
+{
+    @try {
+        if (!connection) {
+            NSLog(@"[WindowManager] No connection available for EWMH cleanup");
+            return;
+        }
+        
+        XCBScreen *screen = [[connection screens] objectAtIndex:0];
+        XCBWindow *rootWindow = [screen rootWindow];
+        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+        
+        NSLog(@"[WindowManager] Clearing EWMH properties from root window");
+        
+        // Clear _NET_SUPPORTING_WM_CHECK
+        xcb_delete_property([connection connection],
+                          [rootWindow window],
+                          [[ewmhService atomService] atomFromCachedAtomsWithKey:@"_NET_SUPPORTING_WM_CHECK"]);
+        
+        // Clear _NET_ACTIVE_WINDOW
+        xcb_delete_property([connection connection],
+                          [rootWindow window],
+                          [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHActiveWindow]]);
+        
+        // Clear _NET_CLIENT_LIST
+        xcb_delete_property([connection connection],
+                          [rootWindow window],
+                          [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHClientList]]);
+        
+        // Clear _NET_CLIENT_LIST_STACKING
+        xcb_delete_property([connection connection],
+                          [rootWindow window],
+                          [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHClientListStacking]]);
+        
+        [connection flush];
+        NSLog(@"[WindowManager] EWMH properties cleared");
+        
+    } @catch (NSException *exception) {
+        NSLog(@"[WindowManager] Exception clearing EWMH properties: %@", exception.reason);
+    }
+}
+
+- (void)releaseWMSelection
+{
+    @try {
+        if (!connection) {
+            NSLog(@"[WindowManager] No connection available for selection release");
+            return;
+        }
+        
+        NSLog(@"[WindowManager] Releasing WM_S0 selection ownership");
+        
+        XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
+        xcb_atom_t wmS0Atom = [atomService atomFromCachedAtomsWithKey:@"WM_S0"];
+        
+        if (wmS0Atom != XCB_ATOM_NONE) {
+            // Set selection owner to None (releases ownership)
+            xcb_set_selection_owner([connection connection],
+                                   XCB_NONE,
+                                   wmS0Atom,
+                                   XCB_CURRENT_TIME);
+            
+            [connection flush];
+            NSLog(@"[WindowManager] WM_S0 selection released");
+        } else {
+            NSLog(@"[WindowManager] Warning: Could not find WM_S0 atom");
+        }
+        
+    } @catch (NSException *exception) {
+        NSLog(@"[WindowManager] Exception releasing WM selection: %@", exception.reason);
+    }
+}
+
+- (void)handleSelectionClear:(xcb_selection_clear_event_t *)event
+{
+    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
+    xcb_atom_t wmS0Atom = [atomService atomFromCachedAtomsWithKey:@"WM_S0"];
+    
+    // Check if this is the WM_S0 selection being cleared (we're being replaced)
+    if (event->selection == wmS0Atom) {
+        NSLog(@"[WindowManager] WM_S0 selection cleared - another WM is taking over");
+        NSLog(@"[WindowManager] Timestamp: %u, Owner: %u", event->time, event->owner);
+        
+        // Initiate clean shutdown
+        [self cleanupBeforeExit];
+        
+        // Destroy our selection window if we have one
+        if (selectionManagerWindow) {
+            xcb_destroy_window([connection connection], [selectionManagerWindow window]);
+            [connection flush];
+            NSLog(@"[WindowManager] Selection manager window destroyed");
+        }
+        
+        // Terminate the application gracefully
+        NSLog(@"[WindowManager] Terminating to allow new WM to take over");
+        [NSApp terminate:nil];
+    } else {
+        NSString *selectionName = [atomService atomNameFromAtom:event->selection];
+        NSLog(@"[WindowManager] SelectionClear for non-WM selection: %@", selectionName);
+    }
+}
+
 - (void)dealloc
 {
+    // Clean up keyboard grabs first
+    [self cleanupKeyboardGrabbing];
 
     // Remove from run loop if integrated
     if (self.xcbEventsIntegrated && connection) {
