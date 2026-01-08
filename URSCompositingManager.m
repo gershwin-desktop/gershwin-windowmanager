@@ -18,7 +18,7 @@
 #import <xcb/damage.h>
 #import <math.h>
 
-// Shadow configuration - xfwm4 style
+// Shadow configuration
 #define SHADOW_RADIUS 12
 #define SHADOW_OFFSET_X (-3 * SHADOW_RADIUS / 2)  // -18
 #define SHADOW_OFFSET_Y (-3 * SHADOW_RADIUS / 2)  // -18
@@ -616,7 +616,7 @@
         xcb_render_create_picture(conn, self.rootBuffer,
                                  self.rootPixmap, self.rootFormat, 0, NULL);
         
-        // Create solid black picture for shadow rendering (xfwm4 style)
+        // Create solid black picture for shadow rendering
         self.blackPicture = [self createSolidPicture:0.0 g:0.0 b:0.0 a:1.0];
         if (self.blackPicture == XCB_NONE) {
             NSLog(@"[CompositingManager] WARNING: Failed to create black picture for shadows");
@@ -1008,6 +1008,9 @@
         [self addDamage:parts];
         cw.damaged = YES;
     }
+    
+    // Flush to ensure damage events are processed
+    [self.connection flush];
 }
 
 - (void)damageScreen {
@@ -1085,33 +1088,35 @@
 #pragma mark - Compositing
 
 - (void)scheduleRepair {
+    // Cancel any previously scheduled repair
     if (self.repairScheduled) {
-        return;
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(performRepair) object:nil];
     }
     
-    // Rate limit: only paint at most every 16ms (60 FPS)
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    NSTimeInterval elapsed = now - self.lastRepairTime;
-    
-    if (elapsed < 0.016) {
-        // Too soon, just accumulate damage and wait
-        return;
-    }
-    
+    // Always schedule repair when damage exists
+    // Damage accumulates in self.allDamage, so we won't lose events
     self.repairScheduled = YES;
-    [self performRepair];
+    
+    // Use 1ms delay to batch rapid damage events
+    // This is critical for things like blinking cursors that generate frequent damage
+    [self performSelector:@selector(performRepair) withObject:nil afterDelay:0.001];
 }
 
 - (void)performRepair {
-    self.repairScheduled = NO;
-    self.lastRepairTime = [NSDate timeIntervalSinceReferenceDate];
+    if (!self.compositingActive) {
+        self.repairScheduled = NO;
+        return;
+    }
     
-    if (!self.compositingActive || self.allDamage == XCB_NONE) {
+    // Check if there's damage to paint
+    if (self.allDamage == XCB_NONE) {
+        self.repairScheduled = NO;
         return;
     }
     
     xcb_xfixes_region_t damage = self.allDamage;
     self.allDamage = XCB_NONE;
+    self.repairScheduled = NO;
     
     [self paintAll:damage];
     
@@ -1164,7 +1169,6 @@
                                self.rootBuffer, bg_color, 1, &bg_rect);
     
     // Paint windows from bottom to top (so higher z-order windows are on top)
-    int windowsPainted = 0;
     for (int i = 0; i < num_children; i++) {
         xcb_window_t win = children[i];
         
@@ -1183,7 +1187,6 @@
             continue;
         }
         
-        windowsPainted++;
         // Paint the window - clip region is set inside paintWindow
         [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:paint_region];
     }
