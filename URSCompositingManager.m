@@ -16,6 +16,13 @@
 #import <xcb/xfixes.h>
 #import <xcb/render.h>
 #import <xcb/damage.h>
+#import <math.h>
+
+// Shadow configuration - xfwm4 style
+#define SHADOW_RADIUS 12
+#define SHADOW_OFFSET_X (-3 * SHADOW_RADIUS / 2)  // -18
+#define SHADOW_OFFSET_Y (-3 * SHADOW_RADIUS / 2)  // -18
+#define SHADOW_OPACITY 0.75
 
 // Per-window compositing data
 @interface URSCompositeWindow : NSObject
@@ -36,6 +43,13 @@
 @property (assign, nonatomic) uint16_t borderWidth;
 @property (assign, nonatomic) uint8_t depth;
 @property (assign, nonatomic) xcb_visualid_t visual;
+// Shadow properties
+@property (assign, nonatomic) xcb_render_picture_t shadowPicture;
+@property (assign, nonatomic) xcb_pixmap_t shadowPixmap;
+@property (assign, nonatomic) int16_t shadowOffsetX;
+@property (assign, nonatomic) int16_t shadowOffsetY;
+@property (assign, nonatomic) uint16_t shadowWidth;
+@property (assign, nonatomic) uint16_t shadowHeight;
 @end
 
 @implementation URSCompositeWindow
@@ -51,6 +65,12 @@
         _damaged = NO;
         _viewable = NO;
         _redirected = YES;
+        _shadowPicture = XCB_NONE;
+        _shadowPixmap = XCB_NONE;
+        _shadowOffsetX = 0;
+        _shadowOffsetY = 0;
+        _shadowWidth = 0;
+        _shadowHeight = 0;
     }
     return self;
 }
@@ -63,6 +83,7 @@
 @property (assign, nonatomic) xcb_window_t outputWindow;         // Child of overlay for actual rendering
 @property (assign, nonatomic) xcb_render_picture_t rootPicture;
 @property (assign, nonatomic) xcb_render_picture_t rootBuffer;   // Double buffer
+@property (assign, nonatomic) xcb_render_picture_t blackPicture; // Solid black for shadows
 @property (assign, nonatomic) xcb_pixmap_t rootPixmap;           // Backing pixmap for buffer
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, URSCompositeWindow *> *cwindows;
 
@@ -74,6 +95,12 @@
 @property (assign, nonatomic) xcb_xfixes_region_t allDamage;
 @property (assign, nonatomic) xcb_xfixes_region_t screenRegion;
 
+// Gaussian shadow data (pre-computed once)
+@property (assign, nonatomic) int gaussianSize;
+@property (assign, nonatomic) double *gaussianMap;  // Gaussian convolution kernel
+@property (assign, nonatomic) uint8_t *shadowCorner; // Pre-computed shadow corners
+@property (assign, nonatomic) uint8_t *shadowTop;    // Pre-computed shadow top/bottom
+
 // Extension version tracking
 @property (assign, nonatomic) uint8_t compositeOpcode;
 @property (assign, nonatomic) uint8_t renderOpcode;
@@ -82,6 +109,7 @@
 
 // Throttling to prevent excessive recomposites
 @property (assign, nonatomic) BOOL repairScheduled;
+@property (assign, nonatomic) NSTimeInterval lastRepairTime;
 
 // Cached screen info
 @property (assign, nonatomic) uint16_t screenWidth;
@@ -118,7 +146,17 @@
         _allDamage = XCB_NONE;
         _screenRegion = XCB_NONE;
         _repairScheduled = NO;
+        _lastRepairTime = 0;
         _cwindows = [[NSMutableDictionary alloc] init];
+        
+        // Initialize Gaussian shadow data
+        _gaussianMap = make_gaussian_map((double)SHADOW_RADIUS, &_gaussianSize);
+        if (_gaussianMap) {
+            [self presumGaussianMap];
+            NSLog(@"[CompositingManager] Initialized Gaussian shadow map (size=%d)", _gaussianSize);
+        } else {
+            NSLog(@"[CompositingManager] WARNING: Failed to create Gaussian map");
+        }
     }
     return self;
 }
@@ -296,11 +334,26 @@
             }
         }
         
-        // Look for 32-bit ARGB format
+        // Look for 32-bit ARGB format with 8-bit channels
         if (fmt->depth == 32 && fmt->type == XCB_RENDER_PICT_TYPE_DIRECT) {
-            // Check if it has alpha
-            if (fmt->direct.alpha_mask != 0) {
-                self.argbFormat = fmt->id;
+            // Check if it has alpha AND 8-bit channels (mask = 0xFF)
+            if (fmt->direct.alpha_mask == 0xFF &&
+                fmt->direct.red_mask == 0xFF &&
+                fmt->direct.green_mask == 0xFF &&
+                fmt->direct.blue_mask == 0xFF) {
+                // Prefer BGRA layout (alpha_shift=24, red_shift=16) which is standard X11 format
+                // But accept any 8-bit ARGB format if we don't have one yet
+                if (self.argbFormat == XCB_NONE || fmt->direct.alpha_shift == 24) {
+                    self.argbFormat = fmt->id;
+                    NSLog(@"[Render] Selected ARGB32 format: id=%u, shifts: R=%d G=%d B=%d A=%d, masks: R=0x%x G=0x%x B=0x%x A=0x%x",
+                          fmt->id, fmt->direct.red_shift, fmt->direct.green_shift, 
+                          fmt->direct.blue_shift, fmt->direct.alpha_shift,
+                          fmt->direct.red_mask, fmt->direct.green_mask,
+                          fmt->direct.blue_mask, fmt->direct.alpha_mask);
+                }
+            } else {
+                NSLog(@"[Render] Skipping non-8bit ARGB32 format: id=%u, alpha_mask=0x%x",
+                      fmt->id, fmt->direct.alpha_mask);
             }
         }
     }
@@ -315,6 +368,86 @@
     NSLog(@"[CompositingManager] Found render formats - root: %u, argb: %u", 
           self.rootFormat, self.argbFormat);
     return YES;
+}
+
+// Create a solid color picture (for shadow rendering)
+- (xcb_render_picture_t)createSolidPicture:(double)r g:(double)g b:(double)b a:(double)a {
+    xcb_connection_t *conn = [self.connection connection];
+    
+    // Create a 1x1 pixmap
+    xcb_pixmap_t pixmap = xcb_generate_id(conn);
+    xcb_create_pixmap(conn, 32, pixmap, self.rootWindow, 1, 1);
+    
+    // Create Picture with repeat
+    xcb_render_picture_t picture = xcb_generate_id(conn);
+    uint32_t values[] = { 1 };  // CPRepeat = 1
+    xcb_render_create_picture(conn, picture, pixmap, self.argbFormat, 
+                             XCB_RENDER_CP_REPEAT, values);
+    
+    // Fill with solid color
+    xcb_render_color_t color;
+    color.red = (uint16_t)(r * 0xFFFF);
+    color.green = (uint16_t)(g * 0xFFFF);
+    color.blue = (uint16_t)(b * 0xFFFF);
+    color.alpha = (uint16_t)(a * 0xFFFF);
+    
+    xcb_rectangle_t rect = {0, 0, 1, 1};
+    xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC, picture, color, 1, &rect);
+    
+    // Free pixmap (Picture holds reference)
+    xcb_free_pixmap(conn, pixmap);
+    
+    return picture;
+}
+
+// Helper to find picture format by depth
+// Helper to find picture format by depth and type
+- (xcb_render_pictformat_t)findPictFormat:(uint8_t)depth {
+    xcb_connection_t *conn = [self.connection connection];
+    
+    xcb_render_query_pict_formats_cookie_t formats_cookie = 
+        xcb_render_query_pict_formats(conn);
+    xcb_render_query_pict_formats_reply_t *formats_reply = 
+        xcb_render_query_pict_formats_reply(conn, formats_cookie, NULL);
+    
+    if (!formats_reply) {
+        NSLog(@"[Shadow] Failed to query formats");
+        return XCB_NONE;
+    }
+    
+    xcb_render_pictformat_t result = XCB_NONE;
+    xcb_render_pictforminfo_iterator_t iter = 
+        xcb_render_query_pict_formats_formats_iterator(formats_reply);
+    
+    // For depth 8, we need A8 format (Direct with only alpha channel)
+    for (; iter.rem; xcb_render_pictforminfo_next(&iter)) {
+        xcb_render_pictforminfo_t *fmt = iter.data;
+        if (fmt->depth == depth && fmt->type == XCB_RENDER_PICT_TYPE_DIRECT) {
+            // For A8, check that it has alpha channel
+            if (depth == 8) {
+                xcb_render_directformat_t *direct = &fmt->direct;
+                // A8 should have alpha_shift=0, alpha_mask=0xFF, and no RGB
+                if (direct->alpha_mask == 0xFF && direct->red_mask == 0 && 
+                    direct->green_mask == 0 && direct->blue_mask == 0) {
+                    result = fmt->id;
+                    NSLog(@"[Shadow] Found A8 format: id=%u alpha_shift=%d alpha_mask=0x%x", 
+                          fmt->id, direct->alpha_shift, direct->alpha_mask);
+                    break;
+                }
+            } else {
+                result = fmt->id;
+                NSLog(@"[Shadow] Found format for depth %d: id=%u type=%d", depth, fmt->id, fmt->type);
+                break;
+            }
+        }
+    }
+    
+    if (result == XCB_NONE) {
+        NSLog(@"[Shadow] WARNING: No suitable format found for depth %d", depth);
+    }
+    
+    free(formats_reply);
+    return result;
 }
 
 #pragma mark - Activation
@@ -483,6 +616,14 @@
         xcb_render_create_picture(conn, self.rootBuffer,
                                  self.rootPixmap, self.rootFormat, 0, NULL);
         
+        // Create solid black picture for shadow rendering (xfwm4 style)
+        self.blackPicture = [self createSolidPicture:0.0 g:0.0 b:0.0 a:1.0];
+        if (self.blackPicture == XCB_NONE) {
+            NSLog(@"[CompositingManager] WARNING: Failed to create black picture for shadows");
+        } else {
+            NSLog(@"[CompositingManager] Created black picture 0x%x for shadows", self.blackPicture);
+        }
+        
         [self.connection flush];
         NSLog(@"[CompositingManager] Root buffer created (%dx%d)", 
               self.screenWidth, self.screenHeight);
@@ -513,7 +654,7 @@
     }
     
     free(tree_reply);
-    NSLog(@"[CompositingManager] Added %d existing windows", num_children);
+    // NSLog(@"[CompositingManager] Added %d existing windows", num_children);
 }
 
 #pragma mark - Window Management
@@ -636,6 +777,16 @@
         cw.extents = XCB_NONE;
     }
     
+    if (cw.shadowPicture != XCB_NONE) {
+        xcb_render_free_picture(conn, cw.shadowPicture);
+        cw.shadowPicture = XCB_NONE;
+    }
+    
+    if (cw.shadowPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, cw.shadowPixmap);
+        cw.shadowPixmap = XCB_NONE;
+    }
+    
     if (shouldDelete && cw.damage != XCB_NONE) {
         xcb_damage_destroy(conn, cw.damage);
         cw.damage = XCB_NONE;
@@ -650,7 +801,7 @@
     }
     
     URSCompositeWindow *cw = [self findCWindow:window];
-    
+        
     // If the window isn't directly tracked, it might be a child window (like a titlebar).
     // Find its parent frame window.
     if (!cw) {
@@ -696,6 +847,16 @@
             xcb_render_free_picture(conn, cw.picture);
             cw.picture = XCB_NONE;
         }
+        // Recreate shadow with new size
+        if (cw.shadowPicture != XCB_NONE) {
+            xcb_render_free_picture(conn, cw.shadowPicture);
+            cw.shadowPicture = XCB_NONE;
+        }
+        if (cw.shadowPixmap != XCB_NONE) {
+            xcb_free_pixmap(conn, cw.shadowPixmap);
+            cw.shadowPixmap = XCB_NONE;
+        }
+        // Will be recreated on next paint
     }
     
     // If position or size changed, invalidate regions
@@ -732,6 +893,10 @@
     if (cw) {
         cw.viewable = YES;
         cw.damaged = NO;
+        // Create shadow for newly mapped window
+        if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE) {
+            [self createShadowForWindow:cw];
+        }
         [self damageWindowArea:cw];
     }
 }
@@ -890,6 +1055,14 @@
     r.width = cw.width + 2 * cw.borderWidth;
     r.height = cw.height + 2 * cw.borderWidth;
     
+    // Expand to include shadow if present
+    if (cw.shadowPicture != XCB_NONE) {
+        r.x += cw.shadowOffsetX;
+        r.y += cw.shadowOffsetY;
+        r.width = cw.shadowWidth;
+        r.height = cw.shadowHeight;
+    }
+    
     xcb_xfixes_region_t region = xcb_generate_id(conn);
     xcb_xfixes_create_region(conn, region, 1, &r);
     return region;
@@ -916,15 +1089,22 @@
         return;
     }
     
-    self.repairScheduled = YES;
+    // Rate limit: only paint at most every 16ms (60 FPS)
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval elapsed = now - self.lastRepairTime;
     
-    // Use a short delay to batch multiple damage events
-    // Using performSelector for GNUstep compatibility (no libdispatch)
-    [self performSelector:@selector(performRepair) withObject:nil afterDelay:0.001];
+    if (elapsed < 0.016) {
+        // Too soon, just accumulate damage and wait
+        return;
+    }
+    
+    self.repairScheduled = YES;
+    [self performRepair];
 }
 
 - (void)performRepair {
     self.repairScheduled = NO;
+    self.lastRepairTime = [NSDate timeIntervalSinceReferenceDate];
     
     if (!self.compositingActive || self.allDamage == XCB_NONE) {
         return;
@@ -976,8 +1156,9 @@
     xcb_xfixes_copy_region(conn, region, paint_region);
     
     // Paint background in damaged areas
-    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, paint_region, 0, 0);
-    xcb_render_color_t bg_color = {0x3333, 0x3333, 0x3333, 0xFFFF}; // Dark gray background
+    // No clip for background - fill entire buffer
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, XCB_NONE, 0, 0);
+    xcb_render_color_t bg_color = {0x8000, 0x8000, 0x8000, 0xFFFF}; // Mid grey background
     xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
     xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
                                self.rootBuffer, bg_color, 1, &bg_rect);
@@ -1003,52 +1184,340 @@
         }
         
         windowsPainted++;
-        // Set clip region to entire damaged area
-        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, paint_region, 0, 0);
-        
-        // Paint the window - IncludeInferiors captures all child content
+        // Paint the window - clip region is set inside paintWindow
         [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:paint_region];
     }
     
     xcb_xfixes_destroy_region(conn, paint_region);
     
     // Copy buffer to screen (overlay window)
-    // Get bounds of damaged region for efficient copy
-    xcb_xfixes_fetch_region_cookie_t fetch_cookie = 
-        xcb_xfixes_fetch_region(conn, region);
-    xcb_xfixes_fetch_region_reply_t *fetch_reply =
-        xcb_xfixes_fetch_region_reply(conn, fetch_cookie, NULL);
-    
-    if (fetch_reply) {
-        xcb_rectangle_t bounds = fetch_reply->extents;
-        
-        xcb_xfixes_set_picture_clip_region(conn, self.rootPicture, region, 0, 0);
-        xcb_render_composite(conn,
-                            XCB_RENDER_PICT_OP_SRC,
-                            self.rootBuffer,
-                            XCB_NONE,
-                            self.rootPicture,
-                            bounds.x, bounds.y,
-                            0, 0,
-                            bounds.x, bounds.y,
-                            bounds.width, bounds.height);
-        
-        free(fetch_reply);
-    }
+    // DEBUG: Copy ENTIRE buffer to screen (not just damaged region)
+    xcb_xfixes_set_picture_clip_region(conn, self.rootPicture, XCB_NONE, 0, 0);
+    xcb_render_composite(conn,
+                        XCB_RENDER_PICT_OP_SRC,
+                        self.rootBuffer,
+                        XCB_NONE,
+                        self.rootPicture,
+                        0, 0,
+                        0, 0,
+                        0, 0,
+                        self.screenWidth, self.screenHeight);
+    NSLog(@"[DEBUG] Copied entire buffer %dx%d to screen", self.screenWidth, self.screenHeight);
     
     free(tree_reply);
     [self.connection flush];
     
-    NSLog(@"[CompositingManager] paintAll: painted %d windows out of %d children", windowsPainted, num_children);
+    // NSLog(@"[CompositingManager] paintAll: painted %d windows out of %d children", windowsPainted, num_children);
 }
 
-// Paint a window - IncludeInferiors in the picture handles child windows automatically
+// Gaussian function for shadow blur
+static double gaussian(double r, double x, double y) {
+    return ((1.0 / (sqrt(2.0 * 3.14159265358979323846 * r))) * exp(-(x * x + y * y) / (2.0 * r * r)));
+}
+
+// Create Gaussian convolution map
+static double* make_gaussian_map(double r, int *size_out) {
+    int size = ((int)ceil(r * 3.0) + 1) & ~1;  // Make it even
+    int center = size / 2;
+    double *map = calloc(size * size, sizeof(double));
+    if (!map) return NULL;
+    
+    double t = 0.0;
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            double g = gaussian(r, (double)(x - center), (double)(y - center));
+            t += g;
+            map[y * size + x] = g;
+        }
+    }
+    
+    // Normalize
+    for (int i = 0; i < size * size; i++) {
+        map[i] /= t;
+    }
+    
+    *size_out = size;
+    return map;
+}
+
+// Sum Gaussian values over a region (for shadow intensity)
+// cx, cy = center position of Gaussian relative to the window
+// width, height = dimensions of the solid window being shadowed
+static uint8_t sum_gaussian(double *map, int map_size, double opacity, 
+                           int cx, int cy, int width, int height) {
+    int center = map_size / 2;
+    
+    // Calculate the range of the Gaussian map to sum
+    // These represent which part of the Gaussian kernel overlaps with the window
+    int fx_start = center - cx;
+    if (fx_start < 0) fx_start = 0;
+    int fx_end = width + center - cx;
+    if (fx_end > map_size) fx_end = map_size;
+    
+    int fy_start = center - cy;
+    if (fy_start < 0) fy_start = 0;
+    int fy_end = height + center - cy;
+    if (fy_end > map_size) fy_end = map_size;
+    
+    double v = 0.0;
+    for (int fy = fy_start; fy < fy_end; fy++) {
+        for (int fx = fx_start; fx < fx_end; fx++) {
+            v += map[fy * map_size + fx];
+        }
+    }
+    
+    // Clamp to 1.0 (as per xfwm4)
+    if (v > 1.0) v = 1.0;
+    
+    return (uint8_t)(v * opacity * 255.0);
+}
+
+// Pre-compute shadow corners and edges for fast lookup
+- (void)presumGaussianMap {
+    if (!self.gaussianMap || self.gaussianSize <= 0) return;
+    
+    int center = self.gaussianSize / 2;
+    
+    // Allocate corner and top arrays (26 opacity levels for fine control)
+    if (self.shadowCorner) free(self.shadowCorner);
+    if (self.shadowTop) free(self.shadowTop);
+    
+    self.shadowCorner = calloc((self.gaussianSize + 1) * (self.gaussianSize + 1) * 26, sizeof(uint8_t));
+    self.shadowTop = calloc((self.gaussianSize + 1) * 26, sizeof(uint8_t));
+    
+    // Pre-compute for full opacity
+    for (int x = 0; x <= self.gaussianSize; x++) {
+        self.shadowTop[25 * (self.gaussianSize + 1) + x] = 
+            sum_gaussian(self.gaussianMap, self.gaussianSize, 1.0, center, x - center,
+                        self.gaussianSize * 2, self.gaussianSize * 2);
+        
+        if (x == 0 || x == center || x == self.gaussianSize) {
+            NSLog(@"[presumGaussian] shadowTop[%d] = %d", x, self.shadowTop[25 * (self.gaussianSize + 1) + x]);
+        }
+        
+        // Scale for other opacity levels
+        for (int opacity = 0; opacity < 25; opacity++) {
+            self.shadowTop[opacity * (self.gaussianSize + 1) + x] = 
+                (self.shadowTop[25 * (self.gaussianSize + 1) + x] * opacity) / 25;
+        }
+        
+        for (int y = 0; y <= x; y++) {
+            int idx_full = 25 * (self.gaussianSize + 1) * (self.gaussianSize + 1) + 
+                          y * (self.gaussianSize + 1) + x;
+            self.shadowCorner[idx_full] = 
+                sum_gaussian(self.gaussianMap, self.gaussianSize, 1.0, 
+                           x - center, y - center,
+                           self.gaussianSize * 2, self.gaussianSize * 2);
+            
+            // Symmetric
+            self.shadowCorner[25 * (self.gaussianSize + 1) * (self.gaussianSize + 1) + 
+                            x * (self.gaussianSize + 1) + y] = 
+                self.shadowCorner[idx_full];
+            
+            // Scale for other opacity levels
+            for (int opacity = 0; opacity < 25; opacity++) {
+                int idx = opacity * (self.gaussianSize + 1) * (self.gaussianSize + 1) + 
+                         y * (self.gaussianSize + 1) + x;
+                self.shadowCorner[idx] = (self.shadowCorner[idx_full] * opacity) / 25;
+                
+                // Symmetric
+                self.shadowCorner[opacity * (self.gaussianSize + 1) * (self.gaussianSize + 1) + 
+                                x * (self.gaussianSize + 1) + y] = self.shadowCorner[idx];
+            }
+        }
+    }
+}
+
+// Create shadow image in memory (XImage equivalent)
+- (uint8_t*)makeShadowImage:(int)width height:(int)height 
+                 shadowWidth:(int*)swidth shadowHeight:(int*)sheight {
+    int center = self.gaussianSize / 2;
+    int opacity_int = (int)(SHADOW_OPACITY * 25.0);
+    
+    *swidth = width + self.gaussianSize;
+    *sheight = height + self.gaussianSize;
+    
+    if (*swidth < 1 || *sheight < 1) return NULL;
+    
+    uint8_t *data = calloc(*swidth * *sheight, sizeof(uint8_t));
+    if (!data) return NULL;
+    
+    // Fill with base shadow value
+    uint8_t base_val = (self.gaussianSize > 0 && self.shadowTop != NULL) ? 
+        self.shadowTop[opacity_int * (self.gaussianSize + 1) + self.gaussianSize] : 
+        sum_gaussian(self.gaussianMap, self.gaussianSize, SHADOW_OPACITY, center, center, width, height);
+    
+    NSLog(@"[Shadow] makeShadowImage: center=%d, opacity_int=%d, base_val=%d, gaussianSize=%d, shadowTop=%p, shadowCorner=%p",
+          center, opacity_int, base_val, self.gaussianSize, self.shadowTop, self.shadowCorner);
+    
+    memset(data, base_val, *swidth * *sheight);
+    
+    // Compute corners
+    int ylimit = (self.gaussianSize < *sheight / 2) ? self.gaussianSize : (*sheight + 1) / 2;
+    int xlimit = (self.gaussianSize < *swidth / 2) ? self.gaussianSize : (*swidth + 1) / 2;
+    
+    for (int y = 0; y < ylimit; y++) {
+        for (int x = 0; x < xlimit; x++) {
+            uint8_t d;
+            if (xlimit == self.gaussianSize && ylimit == self.gaussianSize) {
+                d = self.shadowCorner[opacity_int * (self.gaussianSize + 1) * (self.gaussianSize + 1) + 
+                                     y * (self.gaussianSize + 1) + x];
+            } else {
+                d = sum_gaussian(self.gaussianMap, self.gaussianSize, SHADOW_OPACITY,
+                               x - center, y - center, width, height);
+            }
+            data[y * *swidth + x] = d;
+            data[(*sheight - y - 1) * *swidth + x] = d;
+            data[(*sheight - y - 1) * *swidth + (*swidth - x - 1)] = d;
+            data[y * *swidth + (*swidth - x - 1)] = d;
+        }
+    }
+    
+    // Top and bottom edges
+    int x_diff = *swidth - (self.gaussianSize * 2);
+    if (x_diff > 0 && ylimit > 0) {
+        for (int y = 0; y < ylimit; y++) {
+            uint8_t d = (ylimit == self.gaussianSize) ?
+                self.shadowTop[opacity_int * (self.gaussianSize + 1) + y] :
+                sum_gaussian(self.gaussianMap, self.gaussianSize, SHADOW_OPACITY, center, y - center, width, height);
+            memset(&data[y * *swidth + self.gaussianSize], d, x_diff);
+            memset(&data[(*sheight - y - 1) * *swidth + self.gaussianSize], d, x_diff);
+        }
+    }
+    
+    // Left and right edges
+    for (int x = 0; x < xlimit; x++) {
+        uint8_t d = (xlimit == self.gaussianSize) ?
+            self.shadowTop[opacity_int * (self.gaussianSize + 1) + x] :
+            sum_gaussian(self.gaussianMap, self.gaussianSize, SHADOW_OPACITY, x - center, center, width, height);
+        
+        for (int y = self.gaussianSize; y < *sheight - self.gaussianSize; y++) {
+            data[y * *swidth + x] = d;
+            data[y * *swidth + (*swidth - x - 1)] = d;
+        }
+    }
+    
+    return data;
+}
+
+- (void)createShadowForWindow:(URSCompositeWindow *)cw {
+    xcb_connection_t *conn = [self.connection connection];
+    
+    if (self.argbFormat == XCB_NONE || !self.gaussianMap) {
+        return; // Can't create shadow without alpha support or Gaussian map
+    }
+    
+    // Generate shadow image in memory
+    int swidth, sheight;
+    uint8_t *shadow_data = [self makeShadowImage:cw.width + 2 * cw.borderWidth 
+                                          height:cw.height + 2 * cw.borderWidth
+                                     shadowWidth:&swidth 
+                                    shadowHeight:&sheight];
+    if (!shadow_data) {
+        NSLog(@"[Shadow] Failed to create shadow image");
+        return;
+    }
+    
+    // Validate shadow data - sample from different regions
+    int corner_val = shadow_data[0];  // top-left corner
+    int center_val = shadow_data[(sheight/2) * swidth + (swidth/2)];  // center
+    int edge_val = shadow_data[10 * swidth + swidth/2];  // top edge
+    int nonzero = 0, maxval = 0;
+    for (int i = 0; i < swidth * sheight && i < 1000; i++) {
+        if (shadow_data[i] > 0) nonzero++;
+        if (shadow_data[i] > maxval) maxval = shadow_data[i];
+    }
+    NSLog(@"[Shadow] Shadow data: size=%dx%d, samples: corner=%d center=%d edge=%d, first1000: nonzero=%d max=%d", 
+          swidth, sheight, corner_val, center_val, edge_val, nonzero, maxval);
+    
+    cw.shadowWidth = swidth;
+    cw.shadowHeight = sheight;
+    cw.shadowOffsetX = SHADOW_OFFSET_X;
+    cw.shadowOffsetY = SHADOW_OFFSET_Y;
+    
+    // Create shadow using ARGB32 format directly
+    // Convert 8-bit alpha data to ARGB32 (pre-multiplied black+alpha)
+    uint32_t *argb_data = (uint32_t *)malloc(swidth * sheight * sizeof(uint32_t));
+    if (!argb_data) {
+        NSLog(@"[Shadow] Failed to allocate ARGB data");
+        free(shadow_data);
+        return;
+    }
+    
+    // Convert A8 -> ARGB32 (black with alpha)
+    // ARGB format on little-endian is BGRA in memory: B, G, R, A bytes
+    for (int i = 0; i < swidth * sheight; i++) {
+        uint8_t alpha = shadow_data[i];
+        // ARGB32 little-endian: 0xAARRGGBB stored as BB GG RR AA in memory
+        // For black (0,0,0) with alpha, it's just (alpha << 24)
+        argb_data[i] = ((uint32_t)alpha << 24);  // 0xAA000000 = black with alpha
+    }
+    free(shadow_data);
+    
+    // Create 32-bit depth pixmap for ARGB shadow
+    cw.shadowPixmap = xcb_generate_id(conn);
+    xcb_create_pixmap(conn, 32, cw.shadowPixmap, self.rootWindow, swidth, sheight);
+    
+    // Upload ARGB32 shadow data
+    xcb_gcontext_t gc = xcb_generate_id(conn);
+    xcb_create_gc(conn, gc, cw.shadowPixmap, 0, NULL);
+    
+    xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.shadowPixmap, gc,
+                 swidth, sheight, 0, 0, 0, 32,
+                 swidth * sheight * 4, (uint8_t *)argb_data);
+    xcb_flush(conn);  // Ensure image data is uploaded before proceeding
+    
+    xcb_free_gc(conn, gc);
+    free(argb_data);
+    
+    // Create Picture with ARGB format
+    cw.shadowPicture = xcb_generate_id(conn);
+    xcb_render_create_picture(conn, cw.shadowPicture, cw.shadowPixmap, self.argbFormat, 0, NULL);
+    
+    NSLog(@"[Shadow] ARGB32 shadow picture: 0x%x for window 0x%x (size %dx%d), pixmap: 0x%x", 
+          cw.shadowPicture, cw.windowId, swidth, sheight, cw.shadowPixmap);
+    
+    // DO NOT free the pixmap - the Picture needs it to stay alive
+    // It will be freed when the window is destroyed
+}
+
 - (void)paintWindow:(URSCompositeWindow *)cw 
                 atX:(int16_t)screenX 
                 atY:(int16_t)screenY 
      withClipRegion:(xcb_xfixes_region_t)clipRegion {
     
     xcb_connection_t *conn = [self.connection connection];
+    
+    // Create shadow if needed (after resize)
+    if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE) {
+        [self createShadowForWindow:cw];
+    }
+    
+    // Draw shadow using Gaussian ARGB32 picture (smooth gradient)
+    if (cw.shadowPicture != XCB_NONE) {
+        int16_t shadowX = screenX + cw.shadowOffsetX;
+        int16_t shadowY = screenY + cw.shadowOffsetY;
+        
+        // Remove clip for shadow - we want it everywhere
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, XCB_NONE, 0, 0);
+        
+        // Try ARGB32 composite first (proper Gaussian gradient)
+        xcb_render_composite(conn,
+                            XCB_RENDER_PICT_OP_OVER,
+                            cw.shadowPicture,       // Source: ARGB32 shadow with alpha
+                            XCB_NONE,               // No mask
+                            self.rootBuffer,        // Destination
+                            0, 0,                   // src x, y
+                            0, 0,                   // mask x, y (unused)
+                            shadowX,                // dst x
+                            shadowY,                // dst y
+                            cw.shadowWidth,
+                            cw.shadowHeight);
+        xcb_flush(conn);
+    }
+    
+    // Don't use clip region - paint entire window (simpler)
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, XCB_NONE, 0, 0);
     
     // Ensure we have a picture for this window
     if (cw.picture == XCB_NONE) {
@@ -1058,7 +1527,6 @@
     if (cw.picture != XCB_NONE) {
         // Paint the window - IncludeInferiors captures all child content
         // (titlebar, buttons, client content, etc.)
-        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
         xcb_render_composite(conn,
                             XCB_RENDER_PICT_OP_OVER,
                             cw.picture,
@@ -1236,6 +1704,27 @@
         if (self.screenRegion != XCB_NONE) {
             xcb_xfixes_destroy_region(conn, self.screenRegion);
             self.screenRegion = XCB_NONE;
+        }
+        
+        // Free shadow resources
+        if (self.blackPicture != XCB_NONE) {
+            xcb_render_free_picture(conn, self.blackPicture);
+            self.blackPicture = XCB_NONE;
+        }
+        
+        if (self.shadowCorner) {
+            free(self.shadowCorner);
+            self.shadowCorner = NULL;
+        }
+        
+        if (self.shadowTop) {
+            free(self.shadowTop);
+            self.shadowTop = NULL;
+        }
+        
+        if (self.gaussianMap) {
+            free(self.gaussianMap);
+            self.gaussianMap = NULL;
         }
         
         // Free root buffer and picture
