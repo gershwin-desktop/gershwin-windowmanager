@@ -119,6 +119,7 @@
 // Throttling to prevent excessive recomposites
 @property (assign, nonatomic) BOOL repairScheduled;
 @property (assign, nonatomic) NSTimeInterval lastRepairTime;
+@property (assign, nonatomic) NSUInteger repairFrameCounter; // Frame counter for throttling during drag
 
 // Cached screen info
 @property (assign, nonatomic) uint16_t screenWidth;
@@ -171,6 +172,7 @@
         _screenRegion = XCB_NONE;
         _repairScheduled = NO;
         _lastRepairTime = 0;
+        _repairFrameCounter = 0;
         _cwindows = [[NSMutableDictionary alloc] init];
         
         // OPTIMIZATION: Initialize format caches
@@ -782,6 +784,13 @@
         return;
     }
     
+    // Skip override-redirect windows (menus, tooltips, selection rectangles, etc.)
+    // These are temporary UI elements that should not be composited
+    if (attr->override_redirect) {
+        free(attr);
+        return;
+    }
+    
     // Get geometry
     xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(conn, windowId);
     xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(conn, geom_cookie, NULL);
@@ -928,9 +937,68 @@
     
     xcb_connection_t *conn = [self.connection connection];
     
-    // If visible, damage the old area
+    // PERFORMANCE FIX: During drag, only damage once with combined old+new area
+    // Instead of damaging old area, updating position, then damaging new area
     if (cw.viewable) {
-        [self damageWindowArea:cw];
+        // Create a region that covers both old and new positions
+        xcb_rectangle_t rects[2];
+        
+        // Old position (including shadow if present)
+        rects[0].x = cw.x;
+        rects[0].y = cw.y;
+        rects[0].width = cw.width + 2 * cw.borderWidth;
+        rects[0].height = cw.height + 2 * cw.borderWidth;
+        
+        // Expand to include shadow if present
+        if (cw.shadowPicture != XCB_NONE) {
+            // Shadow offsets are typically negative, so we need to expand the rectangle
+            // to encompass both the window and its shadow
+            int16_t shadow_x = cw.x + cw.shadowOffsetX;
+            int16_t shadow_y = cw.y + cw.shadowOffsetY;
+            int16_t window_right = cw.x + cw.width + 2 * cw.borderWidth;
+            int16_t window_bottom = cw.y + cw.height + 2 * cw.borderWidth;
+            int16_t shadow_right = shadow_x + cw.shadowWidth;
+            int16_t shadow_bottom = shadow_y + cw.shadowHeight;
+            
+            // Calculate bounding box that includes both window and shadow
+            rects[0].x = (shadow_x < cw.x) ? shadow_x : cw.x;
+            rects[0].y = (shadow_y < cw.y) ? shadow_y : cw.y;
+            int16_t right = (shadow_right > window_right) ? shadow_right : window_right;
+            int16_t bottom = (shadow_bottom > window_bottom) ? shadow_bottom : window_bottom;
+            rects[0].width = right - rects[0].x;
+            rects[0].height = bottom - rects[0].y;
+        }
+        
+        // New position (including shadow if present)
+        rects[1].x = x;
+        rects[1].y = y;
+        rects[1].width = cw.width + 2 * cw.borderWidth;
+        rects[1].height = cw.height + 2 * cw.borderWidth;
+        
+        // Expand to include shadow if present
+        if (cw.shadowPicture != XCB_NONE) {
+            // Shadow offsets are typically negative, so we need to expand the rectangle
+            // to encompass both the window and its shadow
+            int16_t shadow_x = x + cw.shadowOffsetX;
+            int16_t shadow_y = y + cw.shadowOffsetY;
+            int16_t window_right = x + cw.width + 2 * cw.borderWidth;
+            int16_t window_bottom = y + cw.height + 2 * cw.borderWidth;
+            int16_t shadow_right = shadow_x + cw.shadowWidth;
+            int16_t shadow_bottom = shadow_y + cw.shadowHeight;
+            
+            // Calculate bounding box that includes both window and shadow
+            rects[1].x = (shadow_x < x) ? shadow_x : x;
+            rects[1].y = (shadow_y < y) ? shadow_y : y;
+            int16_t right = (shadow_right > window_right) ? shadow_right : window_right;
+            int16_t bottom = (shadow_bottom > window_bottom) ? shadow_bottom : window_bottom;
+            rects[1].width = right - rects[1].x;
+            rects[1].height = bottom - rects[1].y;
+        }
+        
+        // Create a single region covering both areas
+        xcb_xfixes_region_t combined = xcb_generate_id(conn);
+        xcb_xfixes_create_region(conn, combined, 2, rects);
+        [self addDamage:combined];
     }
     
     // Update position
@@ -945,11 +1013,6 @@
     if (cw.extents != XCB_NONE) {
         xcb_xfixes_destroy_region(conn, cw.extents);
         cw.extents = XCB_NONE;
-    }
-    
-    // Damage the new area
-    if (cw.viewable) {
-        [self damageWindowArea:cw];
     }
     
     // Mark stacking order dirty (window moved)
@@ -1272,6 +1335,19 @@
 - (void)performRepairNow {
     if (!self.compositingActive) {
         return;
+    }
+    
+    // PERFORMANCE FIX: Throttle compositor updates during drag to reduce overhead
+    // Only update every 2nd frame during drag operations for smoother dragging
+    if ([self.connection dragState]) {
+        self.repairFrameCounter++;
+        if (self.repairFrameCounter % 2 != 0) {
+            // Skip this frame, but keep damage accumulated
+            return;
+        }
+    } else {
+        // Reset counter when not dragging
+        self.repairFrameCounter = 0;
     }
     
     // Cancel any scheduled repair

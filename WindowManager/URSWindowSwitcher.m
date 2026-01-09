@@ -635,6 +635,11 @@
         if (clientWindow) {
             xcb_set_input_focus(conn, XCB_INPUT_FOCUS_POINTER_ROOT,
                                [clientWindow window], XCB_CURRENT_TIME);
+            
+            // Update _NET_ACTIVE_WINDOW so Menu and other apps can track active window changes
+            EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
+            [ewmhService updateNetActiveWindow:clientWindow];
+            ewmhService = nil;
         } else {
             xcb_set_input_focus(conn, XCB_INPUT_FOCUS_POINTER_ROOT,
                                [frame window], XCB_CURRENT_TIME);

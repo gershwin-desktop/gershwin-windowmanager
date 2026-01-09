@@ -42,6 +42,9 @@
 @property (strong, nonatomic) URSCompositingManager* compositingManager;
 @property (assign, nonatomic) BOOL compositingRequested;
 
+// ICCCM/EWMH Strut and Workarea Tracking
+@property (strong, nonatomic) NSMutableDictionary* windowStruts; // Maps window ID to strut data
+
 // Original URSEventHandler methods (preserved for compatibility)
 - (BOOL)registerAsWindowManager;
 - (void)decorateExistingWindowsOnStartup;
@@ -65,5 +68,12 @@
 - (void)setupKeyboardGrabbing;
 - (void)handleKeyPressEvent:(xcb_key_press_event_t*)event;
 - (void)handleKeyReleaseEvent:(xcb_key_release_event_t*)event;
+
+// ICCCM/EWMH Strut and Workarea Management
+- (void)handleStrutPropertyChange:(xcb_property_notify_event_t*)event;
+- (void)readAndRegisterStrutForWindow:(xcb_window_t)windowId;
+- (void)removeStrutForWindow:(xcb_window_t)windowId;
+- (void)recalculateWorkarea;
+- (NSRect)currentWorkarea;
 
 @end

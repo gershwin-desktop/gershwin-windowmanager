@@ -92,7 +92,7 @@ static NSMutableDictionary *windowTitlebars = nil;
                       [screen screen]->root,
                       geom->x, geom->y - 25, // Position frame to show titlebar above client
                       frameWidth, frameHeight,
-                      1, // border width
+                      0, // border width
                       XCB_WINDOW_CLASS_INPUT_OUTPUT,
                       [screen screen]->root_visual,
                       mask,

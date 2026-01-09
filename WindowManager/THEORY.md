@@ -588,6 +588,82 @@ NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
 
 ---
 
+## Implemented Optimizations (2026)
+
+The following optimizations have been implemented to bring the window manager to production quality:
+
+### A. Eliminated Redundant Cairo Rendering
+
+**Problem:** When GSTheme is active, the XCBKit layer would render full titlebars using Cairo (buttons, text, gradients), then URSThemeIntegration would immediately overwrite everything with GSTheme-rendered content. This wasted CPU cycles on drawing that was never visible.
+
+**Solution:** Added `isGSThemeActive` property to XCBTitleBar. When set, XCBFrame skips:
+- Button generation via TitleBarSettingsService
+- Cairo drawing of all buttons (close, minimize, maximize, etc.)
+- Cairo text rendering for window title
+
+The titlebar pixmap is still allocated for double-buffering, but Cairo drawing is bypassed entirely.
+
+**Files Modified:**
+- `XCBTitleBar.h/m` - Added `setInternalTitle:` and conditional rendering in `setWindowTitle:`
+- `XCBFrame.m` - Added `isGSThemeActive` check before Cairo button drawing
+
+### B. Single-Pass Pixel Conversion with LUT
+
+**Problem:** The `transferImage:toTitlebar:` method was performing RGBA→BGRA conversion twice:
+1. Once for the active titlebar pixmap
+2. Once for the dimmed (inactive) titlebar pixmap
+
+Additionally, the dimmed version was created using expensive NSImage operations:
+- Create new NSImage
+- Lock focus
+- Draw original image
+- Draw gray overlay with alpha
+- Unlock focus
+- Extract bitmap again
+
+**Solution:** Pre-computed a 256-entry dimming lookup table:
+```objc
+static uint8_t dimLUT[256];  // Computed once: dimLUT[i] = (i * 0.65) + 44.8
+```
+
+A single pass now creates both BGRA versions:
+```objc
+for (int i = 0; i < pixelCount; i++) {
+    uint8_t r = src[0], g = src[1], b = src[2], a = src[3];
+    // Active: BGRA
+    dstActive[0] = b; dstActive[1] = g; dstActive[2] = r; dstActive[3] = a;
+    // Dimmed: Apply LUT during same loop
+    dstDimmed[0] = dimLUT[b]; dstDimmed[1] = dimLUT[g]; 
+    dstDimmed[2] = dimLUT[r]; dstDimmed[3] = a;
+}
+```
+
+**Result:** Eliminated all NSImage-based dimming, reduced pixel iteration from 2× to 1×.
+
+**Files Modified:**
+- `URSThemeIntegration.m` - Complete rewrite of `transferImage:toTitlebar:`
+
+### C. Removed Debug Logging
+
+**Problem:** Verbose per-button and per-pixel NSLog calls were left in production code paths, causing significant I/O overhead during every titlebar render.
+
+**Solution:** Removed all debug logging from hot paths. Remaining logs are for initialization and error conditions only.
+
+**Files Modified:**
+- `URSThemeIntegration.m` - Removed ~30 lines of debug NSLog calls
+
+### D. Verified Already-Optimized Systems
+
+The following systems were reviewed and found to be already well-optimized:
+
+1. **URSCompositingManager Caching:** Uses `visualFormatCache`, `depthFormatCache`, and `windowStackingOrder` to avoid repeated X server queries.
+
+2. **Double Buffering:** XCBTitleBar correctly maintains separate `activePixmap` and `inactivePixmap` with efficient `setActivePixmap:` to swap between them.
+
+3. **Resize Handling:** Previous flush calls have already been removed from the resize path.
+
+---
+
 ## Summary
 
 WindowManager achieves its hybrid architecture through careful layering:
@@ -599,4 +675,8 @@ WindowManager achieves its hybrid architecture through careful layering:
 
 The key insight is using Cairo as the bridge between GNUstep's Quartz-like drawing model and X11's pixmap-based rendering. Double buffering at multiple levels (titlebar pixmaps, compositor root buffer) ensures smooth visual updates.
 
-The main areas for optimization are reducing memory copies in the rendering pipeline and being smarter about damage tracking to minimize unnecessary repainting.
+### Remaining Optimization Opportunities
+
+1. **MIT-SHM Zero-Copy Transfers:** Use shared memory for pixmap data transfer instead of `xcb_put_image`
+2. **ARGB Bitmap Format:** Configure NSBitmapImageRep with `NSAlphaFirstBitmapFormat` to eliminate byte swapping entirely
+3. **Hardware Acceleration:** Detect GLAMOR/DRI3 for GPU-accelerated compositing

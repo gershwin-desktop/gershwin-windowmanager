@@ -14,6 +14,15 @@
 #import <objc/runtime.h>
 #import "GSThemeTitleBar.h"
 
+// Category to expose private GSTheme methods for theme-agnostic titlebar rendering
+// These methods exist in GSTheme but aren't in the public header
+@interface GSTheme (URSPrivateMethods)
+- (void)drawTitleBarRect:(NSRect)titleBarRect
+            forStyleMask:(unsigned int)styleMask
+                   state:(int)inputState
+                andTitle:(NSString*)title;
+@end
+
 @implementation URSThemeIntegration
 
 static URSThemeIntegration *sharedInstance = nil;
@@ -737,16 +746,10 @@ static NSMutableSet *fixedSizeWindows = nil;
         NSImage *titlebarImage = [[NSImage alloc] initWithSize:titlebarSize];
 
         [titlebarImage lockFocus];
-
-        // Clear background with titlebar background color (not transparent!)
-        // Using transparent would leave garbage pixels from uninitialized pixmap
-        [[NSColor lightGrayColor] set];
-        NSRectFill(NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height));
-
-        // DEBUG: Draw bright red line at right edge to see exactly where titlebar ends
-        [[NSColor redColor] set];
-        NSRectFill(NSMakeRect(titlebarSize.width - 3, 0, 3, titlebarSize.height));
-        NSLog(@"DEBUG: Drew red marker at x=%d (titlebar width=%d)", (int)(titlebarSize.width - 3), (int)titlebarSize.width);
+        
+        // Set up the graphics state for theme drawing
+        NSGraphicsContext *gctx = [NSGraphicsContext currentContext];
+        [gctx saveGraphicsState];
 
         // Use GSTheme to draw titlebar decoration
         NSRect drawRect = NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height);
@@ -817,308 +820,172 @@ static NSMutableSet *fixedSizeWindows = nil;
             NSLog(@"Using theme font: %@ %.1f", themeFontName, themeFontSize);
         }
 
-        // Draw the window titlebar using GSTheme (but without title text first)
-        [theme drawWindowBorder:drawRect
-                      withFrame:drawRect
-                   forStyleMask:styleMask
-                          state:state
-                       andTitle:@""];  // Empty title, we'll draw it manually
-
-        // Manually draw the title text with the correct theme font
-        if (title && [title length] > 0) {
-            // Calculate available space for title (between buttons and right edge)
-            float leftButtonsWidth = 0;
-            if (styleMask & NSClosableWindowMask) leftButtonsWidth += 19; // Close button + spacing
-            if (styleMask & NSMiniaturizableWindowMask) leftButtonsWidth += 19; // Mini button + spacing
-            if (styleMask & NSResizableWindowMask) leftButtonsWidth += 19; // Zoom button + spacing
-
-            float leftMargin = leftButtonsWidth + 8; // Start after buttons with padding
-            float rightMargin = 8; // Leave margin on right
-            float availableWidth = drawRect.size.width - leftMargin - rightMargin;
-
-            // Calculate text size to center it properly
-            NSSize textSize = [title sizeWithAttributes:@{NSFontAttributeName: titlebarFont}];
-
-            // Center the text in the available space
-            float titleX = leftMargin + (availableWidth - textSize.width) / 2;
-            float titleY = (drawRect.size.height - textSize.height) / 2; // Center vertically
-
-            NSRect titleRect = NSMakeRect(titleX, titleY, textSize.width, textSize.height);
-
-            // Set title text attributes with theme font
-            NSDictionary *titleAttributes = @{
-                NSFontAttributeName: titlebarFont,
-                NSForegroundColorAttributeName: [NSColor blackColor]
-            };
-
-            NSLog(@"Centering title '%@' at rect %@ (available width: %.1f, text width: %.1f)",
-                  title, NSStringFromRect(titleRect), availableWidth, textSize.width);
-
-            // Draw the title text
-            [title drawInRect:titleRect withAttributes:titleAttributes];
+        // *** THEME-AGNOSTIC APPROACH ***
+        // Call the theme's titlebar drawing method. Different themes may use
+        // different method names:
+        //   - Base GSTheme: drawTitleBarRect (uppercase T)
+        //   - Eau theme: drawtitleRect (lowercase t)
+        // We check for theme-specific methods first, then fall back to base.
+        
+        NSRect titleBarRect = NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height);
+        
+        // Pre-fill the entire rect with the theme's border/control stroke color
+        // This ensures no black pixels remain at edges where the theme may not draw
+        // (e.g., Eau's drawTitleBarBackground insets by 1 pixel)
+        NSColor *prefillColor = [NSColor colorWithCalibratedWhite:0.4 alpha:1.0]; // Grey40 #666666 - matches Eau border
+        [prefillColor set];
+        NSRectFill(titleBarRect);
+        
+        NSLog(@"DEBUG: Calling theme titlebar drawing with rect=%@", NSStringFromRect(titleBarRect));
+        
+        // Check for Eau-style drawtitleRect (lowercase 't')
+        SEL eauSelector = @selector(drawtitleRect:forStyleMask:state:andTitle:);
+        // Check for base drawTitleBarRect (uppercase 'T')
+        SEL baseSelector = @selector(drawTitleBarRect:forStyleMask:state:andTitle:);
+        
+        @try {
+            if ([theme respondsToSelector:eauSelector]) {
+                // Eau theme (and similar) - call drawtitleRect directly
+                NSLog(@"DEBUG: Theme responds to drawtitleRect (Eau-style)");
+                
+                NSMethodSignature *sig = [theme methodSignatureForSelector:eauSelector];
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setSelector:eauSelector];
+                [inv setTarget:theme];
+                [inv setArgument:&titleBarRect atIndex:2];
+                [inv setArgument:&styleMask atIndex:3];
+                [inv setArgument:&state atIndex:4];
+                NSString *titleStr = title ?: @"";
+                [inv setArgument:&titleStr atIndex:5];
+                [inv invoke];
+                
+                NSLog(@"DEBUG: Successfully called theme's drawtitleRect");
+            } else if ([theme respondsToSelector:baseSelector]) {
+                // Base GSTheme - call drawTitleBarRect
+                NSLog(@"DEBUG: Theme responds to drawTitleBarRect (base-style)");
+                [theme drawTitleBarRect:titleBarRect
+                           forStyleMask:styleMask
+                                  state:state
+                               andTitle:title ?: @""];
+                NSLog(@"DEBUG: Successfully called theme's drawTitleBarRect");
+            } else {
+                // Fallback: simple gray background
+                NSLog(@"DEBUG: Theme doesn't respond to any titlebar drawing method, using fallback");
+                [[NSColor lightGrayColor] set];
+                NSRectFill(titleBarRect);
+            }
+        } @catch (NSException *e) {
+            NSLog(@"DEBUG: Titlebar drawing threw exception: %@, using fallback", e.reason);
+            [[NSColor lightGrayColor] set];
+            NSRectFill(titleBarRect);
         }
+        
+        // Restore graphics state
+        [gctx restoreGraphicsState];
 
-        // Add properly positioned and styled buttons using direct theme image loading
-        // Use manual Eau positioning since GSTheme methods return generic values
-        NSLog(@"Standalone: Theme name: %@, class: %@", [theme name], [theme class]);
-
+        // *** BUTTON DRAWING ***
+        // Get button positions using theme's methods, then draw using theme-appropriate style
+        // Eau theme positions buttons on LEFT: Close, Mini, Zoom
+        // Base GSTheme positions Close on RIGHT
+        
         BOOL isEauTheme = [[theme name] isEqualToString:@"Eau"];
-        NSLog(@"Using %@ positioning for buttons", isEauTheme ? @"authentic Eau" : @"automatic GSTheme");
-
-        // COMPARISON: Log what the actual Eau theme positioning methods return
-        if (isEauTheme) {
-            NSRect actualCloseFrame = [theme closeButtonFrameForBounds:drawRect];
-            NSRect actualMiniFrame = [theme miniaturizeButtonFrameForBounds:drawRect];
-            NSLog(@"COMPARISON - Actual Eau closeButtonFrame: %@", NSStringFromRect(actualCloseFrame));
-            NSLog(@"COMPARISON - Actual Eau miniaturizeButtonFrame: %@", NSStringFromRect(actualMiniFrame));
-        }
+        NSLog(@"Drawing buttons for theme: %@ (isEau=%d)", [theme name], isEauTheme);
+        
+        // Button size and spacing for Eau
+        CGFloat buttonSize = 15.0;
+        CGFloat buttonSpacing = 4.0;
+        CGFloat leftPadding = 10.5;
+        CGFloat topPadding = 5.5;
+        
+        // Eau button colors
+        NSColor *closeColor = [NSColor colorWithCalibratedRed:0.97 green:0.26 blue:0.23 alpha:1.0];
+        NSColor *miniColor = [NSColor colorWithCalibratedRed:0.9 green:0.7 blue:0.3 alpha:1.0];
+        NSColor *zoomColor = [NSColor colorWithCalibratedRed:0.322 green:0.778 blue:0.244 alpha:1.0];
 
         if (styleMask & NSClosableWindowMask) {
             NSRect closeFrame;
             if (isEauTheme) {
-                // Authentic Eau positioning from GSStandardDecorationView+Eau.m
-                #define EAU_TITLEBAR_BUTTON_SIZE 15
-                #define EAU_TITLEBAR_PADDING_LEFT 10.5
-                #define EAU_TITLEBAR_PADDING_TOP 5.5
-
-                closeFrame = NSMakeRect(
-                    EAU_TITLEBAR_PADDING_LEFT,
-                    drawRect.size.height - EAU_TITLEBAR_BUTTON_SIZE - EAU_TITLEBAR_PADDING_TOP,
-                    EAU_TITLEBAR_BUTTON_SIZE, EAU_TITLEBAR_BUTTON_SIZE);
-                NSLog(@"Standalone: Our Eau closeFrame: %@", NSStringFromRect(closeFrame));
-                NSLog(@"COMPARISON - Using constants: left=%.1f, top=%.1f, size=%.1f",
-                      EAU_TITLEBAR_PADDING_LEFT, EAU_TITLEBAR_PADDING_TOP, (float)EAU_TITLEBAR_BUTTON_SIZE);
+                // Eau: Close button is first on LEFT
+                closeFrame = NSMakeRect(leftPadding, 
+                                        titleBarRect.size.height - buttonSize - topPadding,
+                                        buttonSize, buttonSize);
             } else {
                 closeFrame = [theme closeButtonFrameForBounds:drawRect];
-                NSLog(@"Standalone: GSTheme closeButtonFrameForBounds returned: %@", NSStringFromRect(closeFrame));
             }
-
-            // Load Eau theme specific button images
-            NSImage *closeImage = nil;
-            NSBundle *themeBundle = [theme bundle];
-
-            if (themeBundle) {
-                NSString *bundlePath = [themeBundle bundlePath];
-                NSLog(@"Standalone: Eau theme bundle path: %@", bundlePath);
-
-                // Try Eau-specific close button images
-                NSArray *closeImageNames = @[@"CloseButton", @"close", @"Close", @"common_Close"];
-                NSArray *imageExtensions = @[@"png", @"tiff", @"jpg", @"gif"];
-
-                for (NSString *imageName in closeImageNames) {
-                    for (NSString *ext in imageExtensions) {
-                        NSString *imagePath = [themeBundle pathForResource:imageName ofType:ext];
-                        if (imagePath) {
-                            closeImage = [[NSImage alloc] initWithContentsOfFile:imagePath];
-                            if (closeImage) {
-                                NSLog(@"Standalone: Found Eau close button: %@", imagePath);
-                                break;
-                            }
-                        }
-                    }
-                    if (closeImage) break;
-                }
+            
+            // Draw button ball (Eau-style) or just the image (other themes)
+            if (isEauTheme) {
+                [URSThemeIntegration drawEauButtonBall:closeFrame withColor:closeColor];
             }
-
-            // Fallback to system image if no Eau-specific image found
-            if (!closeImage) {
-                closeImage = [NSImage imageNamed:@"common_Close"];
-                NSLog(@"Standalone: Using fallback common_Close image");
-            }
-
-            NSLog(@"Standalone: Close button image: %@ (from %@)", closeImage, closeImage ? @"loaded" : @"failed to load");
-
-            // Debug: Save the close button image to see what it looks like
+            
+            // Draw button icon
+            NSImage *closeImage = [NSImage imageNamed:@"common_Close"];
             if (closeImage) {
-                NSData *imageData = [closeImage TIFFRepresentation];
-                if (imageData) {
-                    [imageData writeToFile:@"/tmp/close_button_debug.tiff" atomically:YES];
-                    NSLog(@"Saved close button image to /tmp/close_button_debug.tiff");
-                }
-            }
-
-            if (closeImage) {
-                // Draw authentic Eau close button using the exact color and method from NSWindow+Eau.m
-                NSColor *closeButtonColor = [NSColor colorWithDeviceRed: 0.97 green: 0.26 blue: 0.23 alpha: 1.0];
-                NSLog(@"Close button color - R:%.3f G:%.3f B:%.3f A:%.3f",
-                      [closeButtonColor redComponent], [closeButtonColor greenComponent],
-                      [closeButtonColor blueComponent], [closeButtonColor alphaComponent]);
-                [URSThemeIntegration drawEauButtonBall:closeFrame withColor:closeButtonColor];
-                NSLog(@"Standalone: Drew authentic Eau close button ball with red color");
-
-                // Draw the 12x13 image centered in the 15x15 frame
                 NSRect imageRect = NSMakeRect(
                     closeFrame.origin.x + (closeFrame.size.width - closeImage.size.width) / 2,
                     closeFrame.origin.y + (closeFrame.size.height - closeImage.size.height) / 2,
                     closeImage.size.width, closeImage.size.height);
-                NSLog(@"Standalone: Close imageRect (centered %gx%g in %gx%g): %@",
-                      closeImage.size.width, closeImage.size.height,
-                      closeFrame.size.width, closeFrame.size.height,
-                      NSStringFromRect(imageRect));
-
-                [closeImage drawInRect:imageRect
-                               fromRect:NSZeroRect
-                              operation:NSCompositeSourceOver
-                               fraction:1.0];
-                NSLog(@"Standalone: Drew close button image with circular background at frame: %@", NSStringFromRect(closeFrame));
-            } else {
-                // Draw a simple close 'X' if no image available
-                [[NSColor blackColor] set];
-                NSBezierPath *xPath = [NSBezierPath bezierPath];
-                [xPath moveToPoint:NSMakePoint(closeFrame.origin.x + 2, closeFrame.origin.y + 2)];
-                [xPath lineToPoint:NSMakePoint(closeFrame.origin.x + closeFrame.size.width - 2, closeFrame.origin.y + closeFrame.size.height - 2)];
-                [xPath moveToPoint:NSMakePoint(closeFrame.origin.x + closeFrame.size.width - 2, closeFrame.origin.y + 2)];
-                [xPath lineToPoint:NSMakePoint(closeFrame.origin.x + 2, closeFrame.origin.y + closeFrame.size.height - 2)];
-                [xPath setLineWidth:2.0];
-                [xPath stroke];
-                NSLog(@"Standalone: Drew fallback close 'X' at frame: %@", NSStringFromRect(closeFrame));
+                [closeImage drawInRect:imageRect fromRect:NSZeroRect 
+                             operation:NSCompositeSourceOver fraction:1.0];
             }
+            NSLog(@"Drew close button at: %@", NSStringFromRect(closeFrame));
         }
 
         if (styleMask & NSMiniaturizableWindowMask) {
             NSRect miniFrame;
             if (isEauTheme) {
-                // Authentic Eau positioning: miniaturize button after close button with 4px spacing
-                miniFrame = NSMakeRect(
-                    EAU_TITLEBAR_PADDING_LEFT + EAU_TITLEBAR_BUTTON_SIZE + 4, // 4px padding between buttons
-                    drawRect.size.height - EAU_TITLEBAR_BUTTON_SIZE - EAU_TITLEBAR_PADDING_TOP,
-                    EAU_TITLEBAR_BUTTON_SIZE, EAU_TITLEBAR_BUTTON_SIZE);
-                NSLog(@"Standalone: Our Eau miniFrame: %@", NSStringFromRect(miniFrame));
-                NSLog(@"COMPARISON - Mini calc: x=%.1f+%.1f+4=%.1f, y=%.1f-%.1f-%.1f=%.1f",
-                      EAU_TITLEBAR_PADDING_LEFT, (float)EAU_TITLEBAR_BUTTON_SIZE,
-                      EAU_TITLEBAR_PADDING_LEFT + EAU_TITLEBAR_BUTTON_SIZE + 4,
-                      drawRect.size.height, (float)EAU_TITLEBAR_BUTTON_SIZE, EAU_TITLEBAR_PADDING_TOP,
-                      drawRect.size.height - EAU_TITLEBAR_BUTTON_SIZE - EAU_TITLEBAR_PADDING_TOP);
+                // Eau: Mini button is second on LEFT
+                miniFrame = NSMakeRect(leftPadding + buttonSize + buttonSpacing,
+                                       titleBarRect.size.height - buttonSize - topPadding,
+                                       buttonSize, buttonSize);
             } else {
                 miniFrame = [theme miniaturizeButtonFrameForBounds:drawRect];
-                NSLog(@"Standalone: GSTheme miniaturizeButtonFrameForBounds returned: %@", NSStringFromRect(miniFrame));
             }
-
-            // Load Eau theme specific miniaturize button images
-            NSImage *miniImage = nil;
-            NSBundle *themeBundle = [theme bundle];
-
-            if (themeBundle) {
-                // Try Eau-specific miniaturize button images
-                NSArray *miniImageNames = @[@"MiniaturizeButton", @"minimize", @"Minimize", @"common_Miniaturize"];
-                NSArray *imageExtensions = @[@"png", @"tiff", @"jpg", @"gif"];
-
-                for (NSString *imageName in miniImageNames) {
-                    for (NSString *ext in imageExtensions) {
-                        NSString *imagePath = [themeBundle pathForResource:imageName ofType:ext];
-                        if (imagePath) {
-                            miniImage = [[NSImage alloc] initWithContentsOfFile:imagePath];
-                            if (miniImage) {
-                                NSLog(@"Standalone: Found Eau miniaturize button: %@", imagePath);
-                                break;
-                            }
-                        }
-                    }
-                    if (miniImage) break;
-                }
+            
+            if (isEauTheme) {
+                [URSThemeIntegration drawEauButtonBall:miniFrame withColor:miniColor];
             }
-
-            // Fallback to system image if no Eau-specific image found
-            if (!miniImage) {
-                miniImage = [NSImage imageNamed:@"common_Miniaturize"];
-                NSLog(@"Standalone: Using fallback common_Miniaturize image");
-            }
-
-            NSLog(@"Standalone: Miniaturize button image: %@ (from %@)", miniImage, miniImage ? @"loaded" : @"failed to load");
-
-            // Debug: Save the miniaturize button image to see what it looks like
+            
+            NSImage *miniImage = [NSImage imageNamed:@"common_Miniaturize"];
             if (miniImage) {
-                NSData *imageData = [miniImage TIFFRepresentation];
-                if (imageData) {
-                    [imageData writeToFile:@"/tmp/miniaturize_button_debug.tiff" atomically:YES];
-                    NSLog(@"Saved miniaturize button image to /tmp/miniaturize_button_debug.tiff");
-                }
-            }
-
-            if (miniImage) {
-                // Draw authentic Eau miniaturize button using the exact color from NSWindow+Eau.m
-                NSColor *miniButtonColor = [NSColor colorWithDeviceRed: 0.9 green: 0.7 blue: 0.3 alpha: 1];
-                NSLog(@"Mini button color - R:%.3f G:%.3f B:%.3f A:%.3f",
-                      [miniButtonColor redComponent], [miniButtonColor greenComponent],
-                      [miniButtonColor blueComponent], [miniButtonColor alphaComponent]);
-                [URSThemeIntegration drawEauButtonBall:miniFrame withColor:miniButtonColor];
-                NSLog(@"Standalone: Drew authentic Eau miniaturize button ball with yellow color");
-
-                // Draw the 12x13 image centered in the 15x15 frame
                 NSRect imageRect = NSMakeRect(
                     miniFrame.origin.x + (miniFrame.size.width - miniImage.size.width) / 2,
                     miniFrame.origin.y + (miniFrame.size.height - miniImage.size.height) / 2,
                     miniImage.size.width, miniImage.size.height);
-                NSLog(@"Standalone: Mini imageRect (centered %gx%g in %gx%g): %@",
-                      miniImage.size.width, miniImage.size.height,
-                      miniFrame.size.width, miniFrame.size.height,
-                      NSStringFromRect(imageRect));
-
-                [miniImage drawInRect:imageRect
-                              fromRect:NSZeroRect
-                             operation:NSCompositeSourceOver
-                             fraction:1.0];
-                NSLog(@"Standalone: Drew miniaturize button image with circular background at frame: %@", NSStringFromRect(miniFrame));
-            } else {
-                // Draw a simple minimize line if no image available
-                [[NSColor blackColor] set];
-                NSRect lineRect = NSMakeRect(miniFrame.origin.x + 2,
-                                           miniFrame.origin.y + miniFrame.size.height/2 - 1,
-                                           miniFrame.size.width - 4, 2);
-                NSRectFill(lineRect);
-                NSLog(@"Standalone: Drew fallback minimize line at frame: %@", NSStringFromRect(miniFrame));
+                [miniImage drawInRect:imageRect fromRect:NSZeroRect
+                            operation:NSCompositeSourceOver fraction:1.0];
             }
+            NSLog(@"Drew miniaturize button at: %@", NSStringFromRect(miniFrame));
         }
 
         if (styleMask & NSResizableWindowMask) {
-            NSButton *zoomButton = [theme standardWindowButton:NSWindowZoomButton forStyleMask:styleMask];
-            if (zoomButton) {
-                NSRect zoomFrame;
-                if (isEauTheme) {
-                    // Authentic Eau positioning: zoom button after miniaturize button
-                    zoomFrame = NSMakeRect(
-                        EAU_TITLEBAR_PADDING_LEFT + (EAU_TITLEBAR_BUTTON_SIZE + 4) * 2, // After miniaturize button
-                        drawRect.size.height - EAU_TITLEBAR_BUTTON_SIZE - EAU_TITLEBAR_PADDING_TOP,
-                        EAU_TITLEBAR_BUTTON_SIZE, EAU_TITLEBAR_BUTTON_SIZE);
-                    NSLog(@"Standalone: Authentic Eau zoomFrame: %@", NSStringFromRect(zoomFrame));
-                } else {
-                    // Calculate zoom button position based on miniaturize button + some spacing
-                    NSRect miniFrame = [theme miniaturizeButtonFrameForBounds:drawRect];
-                    float buttonSpacing = 2.0; // Small gap between buttons
-
-                    zoomFrame = NSMakeRect(
-                        miniFrame.origin.x + miniFrame.size.width + buttonSpacing,
-                        miniFrame.origin.y,
-                        miniFrame.size.width,
-                        miniFrame.size.height
-                    );
-                    NSLog(@"Standalone: Calculated zoom frame based on miniaturize: %@", NSStringFromRect(zoomFrame));
-                }
-
-                NSImage *buttonImage = [zoomButton image];
-                if (buttonImage) {
-                    // Draw authentic Eau zoom button using the exact color from NSWindow+Eau.m
-                    NSColor *zoomButtonColor = [NSColor colorWithDeviceRed: 0.322 green: 0.778 blue: 0.244 alpha: 1];
-                    NSLog(@"Zoom button color - R:%.3f G:%.3f B:%.3f A:%.3f",
-                          [zoomButtonColor redComponent], [zoomButtonColor greenComponent],
-                          [zoomButtonColor blueComponent], [zoomButtonColor alphaComponent]);
-                    [URSThemeIntegration drawEauButtonBall:zoomFrame withColor:zoomButtonColor];
-                    NSLog(@"Standalone: Drew authentic Eau zoom button ball with green color");
-
-                    // Draw the image centered in the 15x15 frame (most zoom images are also 12x13)
-                    NSRect imageRect = NSMakeRect(
-                        zoomFrame.origin.x + (zoomFrame.size.width - buttonImage.size.width) / 2,
-                        zoomFrame.origin.y + (zoomFrame.size.height - buttonImage.size.height) / 2,
-                        buttonImage.size.width, buttonImage.size.height);
-                    [buttonImage drawInRect:imageRect
-                                   fromRect:NSZeroRect
-                                  operation:NSCompositeSourceOver
-                                   fraction:1.0];
-                    NSLog(@"Standalone: Drew zoom button with circular background at frame: %@", NSStringFromRect(zoomFrame));
-                } else {
-                    NSLog(@"Standalone: No zoom button image available");
-                }
+            NSRect zoomFrame;
+            if (isEauTheme) {
+                // Eau: Zoom button is third on LEFT
+                zoomFrame = NSMakeRect(leftPadding + (buttonSize + buttonSpacing) * 2,
+                                       titleBarRect.size.height - buttonSize - topPadding,
+                                       buttonSize, buttonSize);
+            } else {
+                // Calculate based on miniaturize button
+                NSRect miniFrame = [theme miniaturizeButtonFrameForBounds:drawRect];
+                zoomFrame = NSMakeRect(miniFrame.origin.x + miniFrame.size.width + 4,
+                                       miniFrame.origin.y, miniFrame.size.width, miniFrame.size.height);
             }
+            
+            if (isEauTheme) {
+                [URSThemeIntegration drawEauButtonBall:zoomFrame withColor:zoomColor];
+            }
+            
+            NSImage *zoomImage = [NSImage imageNamed:@"common_Zoom"];
+            if (zoomImage) {
+                NSRect imageRect = NSMakeRect(
+                    zoomFrame.origin.x + (zoomFrame.size.width - zoomImage.size.width) / 2,
+                    zoomFrame.origin.y + (zoomFrame.size.height - zoomImage.size.height) / 2,
+                    zoomImage.size.width, zoomImage.size.height);
+                [zoomImage drawInRect:imageRect fromRect:NSZeroRect
+                            operation:NSCompositeSourceOver fraction:1.0];
+            }
+            NSLog(@"Drew zoom button at: %@", NSStringFromRect(zoomFrame));
         }
 
         [titlebarImage unlockFocus];

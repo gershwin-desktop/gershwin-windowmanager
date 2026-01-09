@@ -21,9 +21,9 @@ if pgrep -f "Xephyr.*$DISPLAY_NUM" > /dev/null 2>&1; then
     sleep 1
 fi
 
-# Start Xephyr
+# Start Xephyr with white background
 echo "Starting Xephyr nested X server..."
-Xephyr $DISPLAY_NUM -screen $SCREEN_SIZE -ac -br &
+Xephyr $DISPLAY_NUM -screen $SCREEN_SIZE -ac +extension RANDR +extension RENDER +extension GLX &
 XEPHYR_PID=$!
 sleep 2
 

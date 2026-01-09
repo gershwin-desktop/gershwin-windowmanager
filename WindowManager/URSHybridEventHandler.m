@@ -37,6 +37,7 @@
 @synthesize shiftKeyPressed;
 @synthesize compositingManager;
 @synthesize compositingRequested;
+@synthesize windowStruts;
 
 #pragma mark - Initialization
 
@@ -61,6 +62,9 @@
     self.windowSwitcher = [URSWindowSwitcher sharedSwitcherWithConnection:connection];
     self.altKeyPressed = NO;
     self.shiftKeyPressed = NO;
+    
+    // Initialize strut tracking dictionary
+    self.windowStruts = [[NSMutableDictionary alloc] init];
     
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -216,6 +220,14 @@
 
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
     [ewmhService putPropertiesForRootWindow:[screen rootWindow] andWmWindow:selectionManagerWindow];
+    
+    // Set initial workarea to full screen (no struts yet)
+    [ewmhService updateWorkareaForRootWindow:[screen rootWindow] 
+                                           x:0 
+                                           y:0 
+                                       width:[screen screen]->width_in_pixels 
+                                      height:[screen screen]->height_in_pixels];
+    
     [connection flush];
 
     // ARC handles cleanup automatically
@@ -228,6 +240,7 @@
     @try {
         XCBScreen *screen = [[connection screens] objectAtIndex:0];
         XCBWindow *rootWindow = [screen rootWindow];
+        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
 
         XCBQueryTreeReply *tree = [rootWindow queryTree];
         xcb_window_t *children = [tree queryTreeAsArray];
@@ -252,7 +265,7 @@
                 continue;
             }
 
-            // Ignore override-redirect or unmapped windows
+            // Ignore override-redirect windows for decoration
             if (attrs.overrideRedirect) {
                 NSLog(@"[WindowManager] Skipping window %u (override-redirect)", winId);
                 continue;
@@ -261,6 +274,12 @@
             if (attrs.mapState != XCB_MAP_STATE_VIEWABLE) {
                 NSLog(@"[WindowManager] Skipping window %u (mapState %u)", winId, attrs.mapState);
                 continue;
+            }
+            
+            // Check if this is a dock window with struts - scan for struts even if already managed
+            if ([ewmhService isWindowTypeDock:win]) {
+                NSLog(@"[WindowManager] Found dock window %u at startup - checking for struts", winId);
+                [self readAndRegisterStrutForWindow:winId];
             }
 
             // Skip already-managed windows
@@ -281,6 +300,10 @@
         }
 
         [connection flush];
+        
+        // Recalculate workarea after scanning all existing windows for struts
+        [self recalculateWorkarea];
+        
     } @catch (NSException *exception) {
         NSLog(@"[WindowManager] Exception while decorating existing windows: %@", exception.reason);
     }
@@ -507,6 +530,17 @@
         case XCB_MAP_REQUEST: {
             xcb_map_request_event_t *mapRequestEvent = (xcb_map_request_event_t *)event;
 
+            // Check if this is a dock window with struts
+            EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+            XCBWindow *tempWindow = [[XCBWindow alloc] initWithXCBWindow:mapRequestEvent->window andConnection:connection];
+            if ([ewmhService isWindowTypeDock:tempWindow]) {
+                NSLog(@"[WindowManager] Dock window %u being mapped - checking for struts", mapRequestEvent->window);
+                [self readAndRegisterStrutForWindow:mapRequestEvent->window];
+                [self recalculateWorkarea];
+            }
+            tempWindow = nil;
+            ewmhService = nil;
+
             // Resize window to 70% of screen size before mapping
             [self resizeWindowTo70Percent:mapRequestEvent->window];
 
@@ -543,6 +577,13 @@
                 [self.compositingManager unregisterWindow:destroyNotify->window];
             }
             
+            // Remove any struts for this window
+            [self removeStrutForWindow:destroyNotify->window];
+            // Check if strut removal requires workarea recalculation
+            if ([self.windowStruts count] > 0 || [[self.windowStruts allKeys] count] == 0) {
+                [self recalculateWorkarea];
+            }
+            
             [connection handleDestroyNotify:destroyNotify];
             break;
         }
@@ -572,6 +613,8 @@
         }
         case XCB_PROPERTY_NOTIFY: {
             xcb_property_notify_event_t *propEvent = (xcb_property_notify_event_t *)event;
+            // Check if this is a strut property change
+            [self handleStrutPropertyChange:propEvent];
             [connection handlePropertyNotify:propEvent];
             break;
         }
@@ -967,14 +1010,17 @@
         uint16_t screenWidth = [screen width];
         uint16_t screenHeight = [screen height];
         
-        // Calculate 70% of screen size
-        uint16_t newWidth = (uint16_t)(screenWidth * 0.7);
-        uint16_t newHeight = (uint16_t)(screenHeight * 0.7);
+        // Get the current workarea (respects struts from dock windows like menu bar)
+        NSRect workarea = [self currentWorkarea];
         
-        // Golden ratio positioning (0.618)
+        // Calculate 70% of workarea size (not screen size - respects struts)
+        uint16_t newWidth = (uint16_t)(workarea.size.width * 0.7);
+        uint16_t newHeight = (uint16_t)(workarea.size.height * 0.7);
+        
+        // Golden ratio positioning (0.618) within the workarea
         // Position window at (1 - φ) ≈ 0.382 to lean left and top
-        uint16_t goldenPosX = (uint16_t)(screenWidth * 0.382);
-        uint16_t goldenPosY = (uint16_t)(screenHeight * 0.382);
+        uint16_t goldenPosX = (uint16_t)(workarea.origin.x + workarea.size.width * 0.382);
+        uint16_t goldenPosY = (uint16_t)(workarea.origin.y + workarea.size.height * 0.382);
         
         // Get current geometry to check if resizing is needed
         xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry([connection connection], clientWindowId);
@@ -1035,10 +1081,12 @@
             BOOL isFullScreenSize = (geom_reply->width >= screenWidth && geom_reply->height >= screenHeight);
             
             if (isAtOrigin && isFullScreenSize && !isDesktopWindow && !isFullscreenState) {
-                NSLog(@"Window %u has no app-determined geometry (at 0,0 with full screen). Applying WM defaults: 70%% size at golden ratio position",
+                NSLog(@"Window %u has no app-determined geometry (at 0,0 with full screen). Applying WM defaults: 70%% of workarea at golden ratio position",
                       clientWindowId);
+                NSLog(@"[ICCCM] Workarea constraints: origin=(%.0f,%.0f) size=(%.0f x %.0f)",
+                      workarea.origin.x, workarea.origin.y, workarea.size.width, workarea.size.height);
                 
-                // Resize and position the window using WM defaults
+                // Resize and position the window using WM defaults (within workarea)
                 uint32_t configValues[] = {goldenPosX, goldenPosY, newWidth, newHeight};
                 xcb_configure_window([connection connection],
                                      clientWindowId,
@@ -1577,28 +1625,28 @@
 
                     NSLog(@"GSTheme: Restore complete, titlebar redrawn");
                 } else {
-                    // Maximize to screen size
+                    // Maximize to workarea size (respects struts)
                     NSLog(@"GSTheme: Maximizing window");
-                    XCBScreen *screen = [frame onScreen];
-                    XCBSize size = XCBMakeSize([screen width], [screen height]);
-                    XCBPoint position = XCBMakePoint(0.0, 0.0);
+                    NSRect workarea = [self currentWorkarea];
+                    XCBSize size = XCBMakeSize((uint32_t)workarea.size.width, (uint32_t)workarea.size.height);
+                    XCBPoint position = XCBMakePoint((int32_t)workarea.origin.x, (int32_t)workarea.origin.y);
 
                     [frame maximizeToSize:size andPosition:position];
 
-                    // Resize titlebar and client window
+                    // Resize titlebar and client window (positions are relative to frame, not absolute)
                     uint16_t titleHgt = [titlebar windowRect].size.height;
-                    XCBSize titleSize = XCBMakeSize([screen width], titleHgt);
-                    [titlebar maximizeToSize:titleSize andPosition:XCBMakePoint(0.0, 0.0)];
+                    XCBSize titleSize = XCBMakeSize((uint32_t)workarea.size.width, titleHgt);
+                    [titlebar maximizeToSize:titleSize andPosition:XCBMakePoint(0, 0)];
 
                     // Recreate the titlebar pixmap at the new size
                     [titlebar destroyPixmap];
                     [titlebar createPixmap];
                     NSLog(@"GSTheme: Titlebar pixmap recreated for maximized size %dx%d",
-                          [screen width], titleHgt);
+                          (uint32_t)workarea.size.width, titleHgt);
 
                     if (clientWindow) {
-                        XCBSize clientSize = XCBMakeSize([screen width], [screen height] - titleHgt);
-                        XCBPoint clientPos = XCBMakePoint(0.0, titleHgt - 1);
+                        XCBSize clientSize = XCBMakeSize((uint32_t)workarea.size.width, (uint32_t)(workarea.size.height - titleHgt));
+                        XCBPoint clientPos = XCBMakePoint(0, titleHgt - 1);
                         [clientWindow maximizeToSize:clientSize andPosition:clientPos];
                     }
 
@@ -2162,6 +2210,185 @@
         NSString *selectionName = [atomService atomNameFromAtom:event->selection];
         NSLog(@"[WindowManager] SelectionClear for non-WM selection: %@", selectionName);
     }
+}
+
+#pragma mark - ICCCM/EWMH Strut and Workarea Management
+
+- (void)handleStrutPropertyChange:(xcb_property_notify_event_t*)event
+{
+    if (!event) return;
+    
+    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    
+    NSString *atomName = [atomService atomNameFromAtom:event->atom];
+    
+    // Check if this is a strut property change
+    if ([atomName isEqualToString:[ewmhService EWMHWMStrut]] ||
+        [atomName isEqualToString:[ewmhService EWMHWMStrutPartial]]) {
+        
+        NSLog(@"[ICCCM] Strut property changed for window %u: %@", event->window, atomName);
+        
+        if (event->state == XCB_PROPERTY_DELETE) {
+            // Strut was removed
+            [self removeStrutForWindow:event->window];
+        } else {
+            // Strut was added or modified
+            [self readAndRegisterStrutForWindow:event->window];
+        }
+        
+        // Recalculate workarea after strut change
+        [self recalculateWorkarea];
+    }
+}
+
+- (void)readAndRegisterStrutForWindow:(xcb_window_t)windowId
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    
+    // Create a temporary window object to read properties
+    XCBWindow *window = [[XCBWindow alloc] initWithXCBWindow:windowId andConnection:connection];
+    if (!window) {
+        NSLog(@"[ICCCM] Cannot create window object for %u", windowId);
+        return;
+    }
+    
+    // Try to read _NET_WM_STRUT_PARTIAL first (more precise)
+    uint32_t strutPartial[12] = {0};
+    if ([ewmhService readStrutPartialForWindow:window strut:strutPartial]) {
+        // Store strut partial data
+        NSMutableDictionary *strutData = [NSMutableDictionary dictionary];
+        [strutData setObject:@(strutPartial[0]) forKey:@"left"];
+        [strutData setObject:@(strutPartial[1]) forKey:@"right"];
+        [strutData setObject:@(strutPartial[2]) forKey:@"top"];
+        [strutData setObject:@(strutPartial[3]) forKey:@"bottom"];
+        [strutData setObject:@(strutPartial[4]) forKey:@"left_start_y"];
+        [strutData setObject:@(strutPartial[5]) forKey:@"left_end_y"];
+        [strutData setObject:@(strutPartial[6]) forKey:@"right_start_y"];
+        [strutData setObject:@(strutPartial[7]) forKey:@"right_end_y"];
+        [strutData setObject:@(strutPartial[8]) forKey:@"top_start_x"];
+        [strutData setObject:@(strutPartial[9]) forKey:@"top_end_x"];
+        [strutData setObject:@(strutPartial[10]) forKey:@"bottom_start_x"];
+        [strutData setObject:@(strutPartial[11]) forKey:@"bottom_end_x"];
+        [strutData setObject:@(YES) forKey:@"isPartial"];
+        
+        [self.windowStruts setObject:strutData forKey:@(windowId)];
+        
+        NSLog(@"[ICCCM] Registered strut partial for window %u: left=%u, right=%u, top=%u, bottom=%u",
+              windowId, strutPartial[0], strutPartial[1], strutPartial[2], strutPartial[3]);
+        return;
+    }
+    
+    // Fall back to _NET_WM_STRUT
+    uint32_t strut[4] = {0};
+    if ([ewmhService readStrutForWindow:window strut:strut]) {
+        NSMutableDictionary *strutData = [NSMutableDictionary dictionary];
+        [strutData setObject:@(strut[0]) forKey:@"left"];
+        [strutData setObject:@(strut[1]) forKey:@"right"];
+        [strutData setObject:@(strut[2]) forKey:@"top"];
+        [strutData setObject:@(strut[3]) forKey:@"bottom"];
+        [strutData setObject:@(NO) forKey:@"isPartial"];
+        
+        [self.windowStruts setObject:strutData forKey:@(windowId)];
+        
+        NSLog(@"[ICCCM] Registered strut for window %u: left=%u, right=%u, top=%u, bottom=%u",
+              windowId, strut[0], strut[1], strut[2], strut[3]);
+    }
+}
+
+- (void)removeStrutForWindow:(xcb_window_t)windowId
+{
+    NSNumber *key = @(windowId);
+    if ([self.windowStruts objectForKey:key]) {
+        [self.windowStruts removeObjectForKey:key];
+        NSLog(@"[ICCCM] Removed strut for window %u", windowId);
+    }
+}
+
+- (void)recalculateWorkarea
+{
+    @try {
+        XCBScreen *screen = [[connection screens] objectAtIndex:0];
+        XCBWindow *rootWindow = [screen rootWindow];
+        
+        // Get screen dimensions
+        uint32_t screenWidth = [screen screen]->width_in_pixels;
+        uint32_t screenHeight = [screen screen]->height_in_pixels;
+        
+        // Start with full screen
+        int32_t workareaX = 0;
+        int32_t workareaY = 0;
+        uint32_t workareaWidth = screenWidth;
+        uint32_t workareaHeight = screenHeight;
+        
+        // Calculate maximum struts from all windows
+        uint32_t maxLeft = 0, maxRight = 0, maxTop = 0, maxBottom = 0;
+        
+        for (NSNumber *windowKey in self.windowStruts) {
+            NSDictionary *strutData = [self.windowStruts objectForKey:windowKey];
+            
+            uint32_t left = [[strutData objectForKey:@"left"] unsignedIntValue];
+            uint32_t right = [[strutData objectForKey:@"right"] unsignedIntValue];
+            uint32_t top = [[strutData objectForKey:@"top"] unsignedIntValue];
+            uint32_t bottom = [[strutData objectForKey:@"bottom"] unsignedIntValue];
+            
+            if (left > maxLeft) maxLeft = left;
+            if (right > maxRight) maxRight = right;
+            if (top > maxTop) maxTop = top;
+            if (bottom > maxBottom) maxBottom = bottom;
+        }
+        
+        // Apply struts to workarea
+        workareaX = (int32_t)maxLeft;
+        workareaY = (int32_t)maxTop;
+        workareaWidth = screenWidth - maxLeft - maxRight;
+        workareaHeight = screenHeight - maxTop - maxBottom;
+        
+        NSLog(@"[ICCCM] Recalculated workarea: x=%d, y=%d, width=%u, height=%u (struts: left=%u, right=%u, top=%u, bottom=%u)",
+              workareaX, workareaY, workareaWidth, workareaHeight, maxLeft, maxRight, maxTop, maxBottom);
+        
+        // Update _NET_WORKAREA on root window
+        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+        [ewmhService updateWorkareaForRootWindow:rootWindow 
+                                               x:workareaX 
+                                               y:workareaY 
+                                           width:workareaWidth 
+                                          height:workareaHeight];
+        
+        [connection flush];
+        
+    } @catch (NSException *exception) {
+        NSLog(@"[ICCCM] Exception recalculating workarea: %@", exception.reason);
+    }
+}
+
+- (NSRect)currentWorkarea
+{
+    XCBScreen *screen = [[connection screens] objectAtIndex:0];
+    uint32_t screenWidth = [screen screen]->width_in_pixels;
+    uint32_t screenHeight = [screen screen]->height_in_pixels;
+    
+    // Calculate maximum struts
+    uint32_t maxLeft = 0, maxRight = 0, maxTop = 0, maxBottom = 0;
+    
+    for (NSNumber *windowKey in self.windowStruts) {
+        NSDictionary *strutData = [self.windowStruts objectForKey:windowKey];
+        
+        uint32_t left = [[strutData objectForKey:@"left"] unsignedIntValue];
+        uint32_t right = [[strutData objectForKey:@"right"] unsignedIntValue];
+        uint32_t top = [[strutData objectForKey:@"top"] unsignedIntValue];
+        uint32_t bottom = [[strutData objectForKey:@"bottom"] unsignedIntValue];
+        
+        if (left > maxLeft) maxLeft = left;
+        if (right > maxRight) maxRight = right;
+        if (top > maxTop) maxTop = top;
+        if (bottom > maxBottom) maxBottom = bottom;
+    }
+    
+    return NSMakeRect((CGFloat)maxLeft, 
+                      (CGFloat)maxTop, 
+                      (CGFloat)(screenWidth - maxLeft - maxRight),
+                      (CGFloat)(screenHeight - maxTop - maxBottom));
 }
 
 - (void)dealloc

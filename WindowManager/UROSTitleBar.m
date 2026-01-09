@@ -10,6 +10,7 @@
 #import <cairo/cairo.h>
 #import <cairo/cairo-xcb.h>
 #import <xcb/xcb.h>
+#import <XCBKit/services/EWMHService.h>
 
 @implementation UROSTitleBar
 
@@ -311,11 +312,34 @@
             NSLog(@"UROSTitleBar: Restoring window from maximized state via xcbkit");
             [frame restoreDimensionAndPosition];
         } else {
-            // Maximize (zoom) the window to screen size
+            // Maximize (zoom) the window to workarea size (respects struts)
             NSLog(@"UROSTitleBar: Maximizing window via xcbkit");
+            
+            // Get workarea from root window to respect struts
             XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
-            XCBSize maxSize = XCBMakeSize([screen width], [screen height]);
-            XCBPoint maxPosition = XCBMakePoint(0, 0);
+            XCBWindow *rootWindow = [screen rootWindow];
+            EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
+            
+            int32_t workareaX = 0, workareaY = 0;
+            uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
+            
+            if ([ewmhService readWorkareaForRootWindow:rootWindow 
+                                                     x:&workareaX 
+                                                     y:&workareaY 
+                                                 width:&workareaWidth 
+                                                height:&workareaHeight]) {
+                NSLog(@"UROSTitleBar: Using workarea for maximize: x=%d, y=%d, w=%u, h=%u", 
+                      workareaX, workareaY, workareaWidth, workareaHeight);
+            } else {
+                NSLog(@"UROSTitleBar: Failed to read workarea, using full screen");
+                workareaX = 0;
+                workareaY = 0;
+                workareaWidth = [screen width];
+                workareaHeight = [screen height];
+            }
+            
+            XCBSize maxSize = XCBMakeSize(workareaWidth, workareaHeight);
+            XCBPoint maxPosition = XCBMakePoint(workareaX, workareaY);
             [frame maximizeToSize:maxSize andPosition:maxPosition];
         }
         [self.connection flush];
