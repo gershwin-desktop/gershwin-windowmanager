@@ -707,7 +707,7 @@ static NSMutableSet *fixedSizeWindows = nil;
         // DEBUG: Add 2 pixels to width and shift 1 pixel left to cover both edges
         uint16_t targetWidth = frameRect.size.width + 2;
         int16_t targetX = -1;  // Shift titlebar 1 pixel left
-        NSLog(@"DEBUG: Resizing titlebar X11 window to %d at x=%d (frame=%d, current titlebar=%d)",
+        NSDebugLog(@"DEBUG: Resizing titlebar X11 window to %d at x=%d (frame=%d, current titlebar=%d)",
               targetWidth, targetX, frameRect.size.width, titlebarRect.size.width);
 
         uint32_t values[2] = {(uint32_t)targetX, targetWidth};
@@ -728,7 +728,7 @@ static NSMutableSet *fixedSizeWindows = nil;
         // Use frame width to ensure titlebar matches window width exactly
         // DEBUG: Add 2 pixels (1 on each side) to cover both edges
         NSSize titlebarSize = NSMakeSize(frameRect.size.width + 2, titlebarRect.size.height);
-        NSLog(@"DEBUG: Using titlebarSize.width = %d (frame was %d)", (int)titlebarSize.width, (int)frameRect.size.width);
+        NSDebugLog(@"DEBUG: Using titlebarSize.width = %d (frame was %d)", (int)titlebarSize.width, (int)frameRect.size.width);
 
         // DEBUG: Also get client window dimensions for comparison
         XCBWindow *clientWin = [frame childWindowForKey:ClientWindow];
@@ -836,7 +836,7 @@ static NSMutableSet *fixedSizeWindows = nil;
         [prefillColor set];
         NSRectFill(titleBarRect);
         
-        NSLog(@"DEBUG: Calling theme titlebar drawing with rect=%@", NSStringFromRect(titleBarRect));
+        NSDebugLog(@"DEBUG: Calling theme titlebar drawing with rect=%@", NSStringFromRect(titleBarRect));
         
         // Check for Eau-style drawtitleRect (lowercase 't')
         SEL eauSelector = @selector(drawtitleRect:forStyleMask:state:andTitle:);
@@ -846,7 +846,7 @@ static NSMutableSet *fixedSizeWindows = nil;
         @try {
             if ([theme respondsToSelector:eauSelector]) {
                 // Eau theme (and similar) - call drawtitleRect directly
-                NSLog(@"DEBUG: Theme responds to drawtitleRect (Eau-style)");
+                NSDebugLog(@"DEBUG: Theme responds to drawtitleRect (Eau-style)");
                 
                 NSMethodSignature *sig = [theme methodSignatureForSelector:eauSelector];
                 NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
@@ -859,23 +859,23 @@ static NSMutableSet *fixedSizeWindows = nil;
                 [inv setArgument:&titleStr atIndex:5];
                 [inv invoke];
                 
-                NSLog(@"DEBUG: Successfully called theme's drawtitleRect");
+                NSDebugLog(@"DEBUG: Successfully called theme's drawtitleRect");
             } else if ([theme respondsToSelector:baseSelector]) {
                 // Base GSTheme - call drawTitleBarRect
-                NSLog(@"DEBUG: Theme responds to drawTitleBarRect (base-style)");
+                NSDebugLog(@"DEBUG: Theme responds to drawTitleBarRect (base-style)");
                 [theme drawTitleBarRect:titleBarRect
                            forStyleMask:styleMask
                                   state:state
                                andTitle:title ?: @""];
-                NSLog(@"DEBUG: Successfully called theme's drawTitleBarRect");
+                NSDebugLog(@"DEBUG: Successfully called theme's drawTitleBarRect");
             } else {
                 // Fallback: simple gray background
-                NSLog(@"DEBUG: Theme doesn't respond to any titlebar drawing method, using fallback");
+                NSDebugLog(@"DEBUG: Theme doesn't respond to any titlebar drawing method, using fallback");
                 [[NSColor lightGrayColor] set];
                 NSRectFill(titleBarRect);
             }
         } @catch (NSException *e) {
-            NSLog(@"DEBUG: Titlebar drawing threw exception: %@, using fallback", e.reason);
+            NSDebugLog(@"DEBUG: Titlebar drawing threw exception: %@, using fallback", e.reason);
             [[NSColor lightGrayColor] set];
             NSRectFill(titleBarRect);
         }

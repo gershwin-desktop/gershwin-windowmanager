@@ -19,6 +19,11 @@
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
++ (void)animateZoomRectsFromRect:(XCBRect)startRect
+                          toRect:(XCBRect)endRect
+                      connection:(XCBConnection *)connection
+                          screen:(xcb_screen_t *)screen
+                        duration:(NSTimeInterval)duration;
 @end
 
 @implementation EWMHService

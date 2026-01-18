@@ -21,6 +21,8 @@
 #import "services/TitleBarSettingsService.h"
 #import "utils/XCBShape.h"
 
+#import <objc/message.h> // for dynamic messaging to compositor helper
+
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
 - (BOOL)compositingActive;
@@ -35,6 +37,11 @@
                                                     toRect:(XCBRect)endRect
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade;
++ (void)animateZoomRectsFromRect:(XCBRect)startRect
+                          toRect:(XCBRect)endRect
+                      connection:(XCBConnection *)connection
+                          screen:(xcb_screen_t *)screen
+                        duration:(NSTimeInterval)duration;
 @end
 
 @implementation XCBConnection
@@ -674,6 +681,50 @@ static XCBConnection *sharedInstance;
             else
             {
                 // Normal map for non-minimized window
+                
+                // Check for window open animation property
+                XCBRect animStartRect = XCBInvalidRect;
+                BOOL hasAnimationRect = NO;
+                
+                xcb_connection_t *conn = [self connection];
+                xcb_window_t win = [window window];
+                XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
+                
+                // Try to get _GERSHWIN_WINDOW_OPEN_ANIMATION_RECT property
+                xcb_atom_t animAtom = [atomSvc cacheAtom:@"_GERSHWIN_WINDOW_OPEN_ANIMATION_RECT"];
+                if (animAtom != XCB_NONE) {
+                    xcb_get_property_cookie_t cookie = xcb_get_property(conn, 0, win, animAtom, XCB_ATOM_CARDINAL, 0, 4);
+                    xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, cookie, NULL);
+                    
+                    if (reply) {
+                        int len = xcb_get_property_value_length(reply);
+                        if (len == 16) {
+                            int32_t *data = (int32_t *)xcb_get_property_value(reply);
+                            animStartRect.position.x = data[0];
+                            animStartRect.position.y = data[1];
+                            animStartRect.size.width = data[2];
+                            animStartRect.size.height = data[3];
+                            hasAnimationRect = YES;
+                            
+                            // Delete the property so it doesn't interfere with future operations
+                            xcb_delete_property(conn, win, animAtom);
+                            
+                            NSLog(@"[MapRequest] Found animation rect: {%d, %d, %hu, %hu}", 
+                                  (int)animStartRect.position.x, (int)animStartRect.position.y,
+                                  animStartRect.size.width, animStartRect.size.height);
+                        } else {
+                            NSLog(@"[MapRequest] Animation property present but length=%d (expected 16)", len);
+                        }
+                        free(reply);
+                    } else {
+                        NSLog(@"[MapRequest] No reply reading animation property");
+                    }
+                } else {
+                    // atom not present/couldn't be interned
+                    NSLog(@"[MapRequest] Animation atom not found/couldn't be interned");
+                }
+                
+                // Map the window
                 [self mapWindow:frame];
 
                 if (titleBar)
@@ -682,6 +733,63 @@ static XCBConnection *sharedInstance;
                 }
 
                 [self mapWindow:window];
+                
+                // Trigger animation if we have a start rect
+                if (hasAnimationRect) {
+                    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+                    
+                    if (compositorClass) {
+                        id<URSCompositingManaging> compositor = nil;
+                        if ([compositorClass respondsToSelector:@selector(sharedManager)]) {
+                            compositor = [compositorClass performSelector:@selector(sharedManager)];
+                        }
+                        
+                        if (compositor) {
+                            BOOL compActive = [compositor compositingActive];
+                            XCBRect endRect = [frame windowRect];
+                            NSLog(@"[MapRequest] compositor present. compositingActive=%d, startRect={%d,%d,%hu,%hu}, endRect={%d,%d,%hu,%hu}",
+                                  compActive,
+                                  (int)animStartRect.position.x, (int)animStartRect.position.y, animStartRect.size.width, animStartRect.size.height,
+                                  (int)endRect.position.x, (int)endRect.position.y, endRect.size.width, endRect.size.height);
+
+                            if (compActive) {
+                                // Compositing mode: use smooth animated transition
+                                [compositor animateWindowTransition:[frame window]
+                                                          fromRect:animStartRect
+                                                            toRect:endRect
+                                                          duration:0.25
+                                                              fade:YES];
+                                NSLog(@"[MapRequest] Called compositor animateWindowTransition for window %u", [frame window]);
+                            } else {
+                                // Non-compositing mode: use fast zoom rect animation
+                                XCBScreen *screenObj = [[self screens] objectAtIndex:0];
+                                xcb_screen_t *screen = [screenObj screen];
+                                
+                                [compositorClass animateZoomRectsFromRect:animStartRect
+                                                                  toRect:endRect
+                                                              connection:self
+                                                                  screen:screen
+                                                                duration:0.2];
+                                NSLog(@"[MapRequest] Completed zoom rect window open animation");
+                            }
+                        } else {
+                            NSLog(@"[MapRequest] No compositor available; falling back to non-compositing behavior");
+                            XCBRect endRect = [frame windowRect];
+                            XCBScreen *screenObj = [[self screens] objectAtIndex:0];
+                            xcb_screen_t *screen = [screenObj screen];
+
+                            Class compClassDynamic = NSClassFromString(@"URSCompositingManager");
+                            if (compClassDynamic && [compClassDynamic respondsToSelector:@selector(animateZoomRectsFromRect:toRect:connection:screen:duration:)]) {
+                                // Use objc_msgSend to call class method with multiple args
+                                void (*msg)(id, SEL, XCBRect, XCBRect, id, xcb_screen_t*, NSTimeInterval) = (void *)objc_msgSend;
+                                msg(compClassDynamic, @selector(animateZoomRectsFromRect:toRect:connection:screen:duration:), animStartRect, endRect, self, screen, 0.2);
+                                NSLog(@"[MapRequest] Called dynamic animator animateZoomRectsFromRect");
+                            } else {
+                                NSLog(@"[MapRequest] No animator class/method available for zoom rects");
+                            }
+                        }
+                    }
+                }
             }
         }
         else

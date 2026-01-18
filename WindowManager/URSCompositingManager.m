@@ -9,6 +9,7 @@
 //  - Proper resource cleanup
 //
 
+#define _DEFAULT_SOURCE  // For usleep
 #import "URSCompositingManager.h"
 #import <XCBKit/XCBScreen.h>
 #import <xcb/xcb.h>
@@ -18,6 +19,7 @@
 #import <xcb/damage.h>
 #import <xcb/shm.h>
 #import <sys/shm.h>
+#import <unistd.h>  // for usleep
 #import <sys/ipc.h>
 #import <math.h>
 
@@ -875,6 +877,8 @@
     
     // OPTIMIZATION: Mark stacking order dirty (will be rebuilt on next paint)
     self.stackingOrderDirty = YES;
+
+    NSLog(@"[CompositingManager] Added window %u (parent: %u) pos={%d,%d} size={%hu,%hu} viewable=%d", windowId, cw.parentWindowId, cw.x, cw.y, cw.width, cw.height, (int)cw.viewable);
     
     free(attr);
     free(geom);
@@ -1669,7 +1673,15 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                      minimizing:(BOOL)minimizing
                          duration:(NSTimeInterval)duration
                                  fade:(BOOL)fade {
+    NSLog(@"[Compositor] animateWindow called for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f fade=%d minimizing=%d compositingActive=%d",
+          windowId,
+          (int)startRect.position.x, (int)startRect.position.y, startRect.size.width, startRect.size.height,
+          (int)endRect.position.x, (int)endRect.position.y, endRect.size.width, endRect.size.height,
+          duration, (int)fade, (int)minimizing, (int)self.compositingActive);
+
     if (!self.compositingActive || windowId == XCB_NONE) {
+        NSLog(@"[Compositor] animateWindow aborted: compositingActive=%d, windowId=%u",
+              (int)self.compositingActive, windowId);
         return;
     }
 
@@ -1680,6 +1692,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
 
     if (!cw) {
+        NSLog(@"[Compositor] animateWindow aborted: could not create composite window for %u", windowId);
         return;
     }
 
@@ -1711,6 +1724,8 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
 
     BOOL wasMinimized = cw.animatingMinimize;
+
+    NSLog(@"[Compositor] Animation finished for window %u (wasMinimize=%d)", cw.windowId, (int)wasMinimized);
 
     cw.animating = NO;
     cw.animatingMinimize = NO;
@@ -2146,6 +2161,15 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         double scaleEaseY = t * t;
         BOOL wasMinimize = cw.animatingMinimize;
 
+        // Log the first frame of animation to help debugging (not spammy)
+        if (t < 0.02) {
+            NSLog(@"[Compositor] Animation started for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f",
+                  cw.windowId,
+                  (int)cw.animationStartRect.position.x, (int)cw.animationStartRect.position.y, cw.animationStartRect.size.width, cw.animationStartRect.size.height,
+                  (int)cw.animationEndRect.position.x, (int)cw.animationEndRect.position.y, cw.animationEndRect.size.width, cw.animationEndRect.size.height,
+                  cw.animationDuration);
+        }
+
         double startW = fmax(1.0, (double)cw.animationStartRect.size.width);
         double startH = fmax(1.0, (double)cw.animationStartRect.size.height);
         double endW = fmax(1.0, (double)cw.animationEndRect.size.width);
@@ -2528,6 +2552,84 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 
 - (void)dealloc {
     [self cleanup];
+}
+
+#pragma mark - Non-Compositing Zoom Rect Animation
+
+// Class method for non-compositing zoom rect animation
+// Uses XOR drawing to show outline rectangles animating from startRect to endRect
++ (void)animateZoomRectsFromRect:(XCBRect)startRect
+                          toRect:(XCBRect)endRect
+                      connection:(XCBConnection *)connection
+                          screen:(xcb_screen_t *)screen
+                        duration:(NSTimeInterval)duration {
+    if (!connection || !screen) {
+        NSLog(@"[ZoomRectAnimation] Invalid connection or screen");
+        return;
+    }
+    
+    // Validate rectangles
+    if (!FnCheckXCBRectIsValid(startRect) || !FnCheckXCBRectIsValid(endRect)) {
+        NSLog(@"[ZoomRectAnimation] Invalid rectangle coordinates");
+        return;
+    }
+    
+    xcb_connection_t *conn = [connection connection];
+    xcb_window_t root = screen->root;
+    
+    // Create a graphics context for XOR drawing
+    xcb_gcontext_t gc = xcb_generate_id(conn);
+    uint32_t mask = XCB_GC_FOREGROUND | XCB_GC_FUNCTION | XCB_GC_SUBWINDOW_MODE | XCB_GC_LINE_WIDTH;
+    uint32_t values[4];
+    values[0] = screen->white_pixel; // Foreground color (white)
+    values[1] = XCB_GX_XOR;          // XOR function for drawing/erasing
+    values[2] = XCB_SUBWINDOW_MODE_INCLUDE_INFERIORS; // Draw over child windows
+    values[3] = 2;                   // Line width
+    
+    xcb_create_gc(conn, gc, root, mask, values);
+    
+    // Animation parameters
+    const int numFrames = 12;
+    const double frameDuration = duration / numFrames;
+    
+    // Draw animation frames
+    for (int i = 0; i <= numFrames; i++) {
+        double progress = (double)i / numFrames;
+        
+        // Ease-in-out interpolation
+        double t = progress < 0.5 
+            ? 2.0 * progress * progress 
+            : 1.0 - 2.0 * (1.0 - progress) * (1.0 - progress);
+        
+        // Interpolate rectangle
+        XCBRect currentRect;
+        currentRect.position.x = startRect.position.x + (endRect.position.x - startRect.position.x) * t;
+        currentRect.position.y = startRect.position.y + (endRect.position.y - startRect.position.y) * t;
+        currentRect.size.width = startRect.size.width + (endRect.size.width - startRect.size.width) * t;
+        currentRect.size.height = startRect.size.height + (endRect.size.height - startRect.size.height) * t;
+        
+        // Draw rectangle (XOR will automatically erase previous frame)
+        xcb_rectangle_t rect;
+        rect.x = currentRect.position.x;
+        rect.y = currentRect.position.y;
+        rect.width = currentRect.size.width;
+        rect.height = currentRect.size.height;
+        
+        xcb_poly_rectangle(conn, root, gc, 1, &rect);
+        xcb_flush(conn);
+        
+        // Don't sleep after last frame
+        if (i < numFrames) {
+            usleep(frameDuration * 1000000);
+        }
+        
+        // Erase the rectangle for next frame (draw again with XOR)
+        xcb_poly_rectangle(conn, root, gc, 1, &rect);
+    }
+    
+    // Clean up
+    xcb_free_gc(conn, gc);
+    xcb_flush(conn);
 }
 
 @end

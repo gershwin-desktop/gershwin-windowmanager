@@ -578,13 +578,16 @@
 
             // Register window with compositor if active
             if (self.compositingManager && [self.compositingManager compositingActive]) {
+                NSLog(@"[HybridEventHandler] Registering window %u with compositor (compositingActive=%d)", mapRequestEvent->window, (int)[self.compositingManager compositingActive]);
                 [self.compositingManager registerWindow:mapRequestEvent->window];
+                NSLog(@"[HybridEventHandler] Registered client window %u", mapRequestEvent->window);
                 // Register any existing child windows so their damage events are tracked
                 [self registerChildWindowsForCompositor:mapRequestEvent->window depth:3];
                 // If the client got framed, register children of the frame too
                 XCBWindow *clientWindow = [connection windowForXCBId:mapRequestEvent->window];
                 if (clientWindow && [[clientWindow parentWindow] isKindOfClass:[XCBFrame class]]) {
                     XCBFrame *frame = (XCBFrame *)[clientWindow parentWindow];
+                    NSLog(@"[HybridEventHandler] Registering frame window %u for client %u", [frame window], mapRequestEvent->window);
                     [self.compositingManager registerWindow:[frame window]];
                     [self registerChildWindowsForCompositor:[frame window] depth:3];
                 }

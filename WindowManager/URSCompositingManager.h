@@ -58,6 +58,13 @@
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade;
 
+// Non-compositing zoom rect animation (outline-based, fast)
++ (void)animateZoomRectsFromRect:(XCBRect)startRect
+                          toRect:(XCBRect)endRect
+                      connection:(XCBConnection *)connection
+                          screen:(xcb_screen_t *)screen
+                        duration:(NSTimeInterval)duration;
+
 // Force immediate repair without deferring to next runloop (use during interactive drag)
 - (void)performRepairNow;
 
