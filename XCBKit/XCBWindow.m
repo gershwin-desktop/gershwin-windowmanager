@@ -6,6 +6,9 @@
 //  Copyright (c) 2019 alex. All rights reserved.
 //
 
+#include <unistd.h>
+#import <dispatch/dispatch.h>
+
 #import "XCBWindow.h"
 #import "XCBConnection.h"
 #import "XCBTitleBar.h"
@@ -418,7 +421,7 @@
 
 - (void)createPixmapDelayed
 {
-    [NSThread sleepForTimeInterval:1];
+    sleep(1); // 1 second
     [self createPixmap];
 }
 

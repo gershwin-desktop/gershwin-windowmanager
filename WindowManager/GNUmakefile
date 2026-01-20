@@ -36,7 +36,7 @@ $(APP_NAME)_HEADER_FILES = \
 		URSThemeIntegration.h \
 		GSThemeTitleBar.h
 
-$(APP_NAME)_GUI_LIBS = -lXCBKit -lxcb -lxcb-icccm -lxcb-util $(shell pkg-config --libs cairo xcb) -lX11 -lXcomposite -lXext -lxcb-composite -lxcb-render -lxcb-damage -lxcb-xfixes -lxcb-shm
+$(APP_NAME)_GUI_LIBS = -lXCBKit -lxcb -lxcb-icccm -lxcb-util $(shell pkg-config --libs cairo xcb) -lX11 -lXcomposite -lXext -lxcb-composite -lxcb-render -lxcb-damage -lxcb-xfixes -lxcb-shm -ldispatch
 
 ADDITIONAL_OBJCFLAGS = -std=c99 -g -O0 -fobjc-arc -Wall -Wno-typedef-redefinition #-Wno-unused -Werror -Wall
 

@@ -20,6 +20,7 @@
 #import <enums/EIcccm.h>
 #import "services/TitleBarSettingsService.h"
 #import "utils/XCBShape.h"
+#import <dispatch/dispatch.h>
 
 #import <objc/message.h> // for dynamic messaging to compositor helper
 
@@ -859,7 +860,9 @@ static XCBConnection *sharedInstance;
         }
 
         /** check allowed actions **/
-        [NSThread detachNewThreadSelector:@selector(checkNetWMAllowedActions) toTarget:window withObject:nil];
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+          [window checkNetWMAllowedActions];
+        });
 
 
         NSLog(@"Window Type %@ and window: %u", [ewmhService EWMHWMWindowType], [window window]);
