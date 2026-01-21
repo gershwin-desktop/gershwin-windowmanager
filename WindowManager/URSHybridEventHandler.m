@@ -363,9 +363,12 @@
     xcb_motion_notify_event_t *lastMotionEvent = NULL;
     BOOL needFlush = NO;
     NSUInteger eventsProcessed = 0;
+    const NSUInteger maxEventsPerCall = 50; // Limit to prevent CPU hogging
+    BOOL moreEventsAvailable = NO;
 
     // Use xcb_poll_for_event (non-blocking) instead of xcb_wait_for_event (blocking)
-    while ((e = xcb_poll_for_event([connection connection]))) {
+    while ((e = xcb_poll_for_event([connection connection])) &&
+           eventsProcessed < maxEventsPerCall) {
         eventsProcessed++;
 
         // Handle motion event compression (same as original)
@@ -429,8 +432,21 @@
         [self.compositingManager performRepairNow];
     }
 
+    // Check if there are more events available
+    if (xcb_poll_for_event([connection connection])) {
+        moreEventsAvailable = YES;
+    }
+
     // Update event statistics
     self.eventCount += eventsProcessed;
+
+    // If we hit the limit and there are more events, reschedule processing
+    // This prevents CPU hogging while maintaining responsiveness
+    if (eventsProcessed >= maxEventsPerCall && moreEventsAvailable) {
+        [self performSelector:@selector(processAvailableXCBEvents)
+                   withObject:nil
+                   afterDelay:0.001]; // Very short delay to yield CPU
+    }
 
 }
 
