@@ -1443,6 +1443,8 @@ static XCBConnection *sharedInstance;
         {
             XCBRect startRect = [frame windowRect];
             [frame restoreDimensionAndPosition];
+            xcb_flush([self connection]);
+            [frame applyRoundedCornersShapeMask];
 
             {
                 Class compositorClass = NSClassFromString(@"URSCompositingManager");
@@ -1523,6 +1525,12 @@ static XCBConnection *sharedInstance;
         
         /*** Update resize zone positions if they exist ***/
         [frame updateAllResizeZonePositions];
+
+        /*** Flush to ensure X server has processed configure requests ***/
+        xcb_flush([self connection]);
+
+        /*** Update shape mask for new dimensions ***/
+        [frame applyRoundedCornersShapeMask];
 
         ewmhService = nil;
         rootWindow = nil;

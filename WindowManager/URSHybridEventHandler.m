@@ -432,8 +432,10 @@
         [self.compositingManager performRepairNow];
     }
 
-    // Check if there are more events available
-    if (xcb_poll_for_event([connection connection])) {
+    // If we hit the event limit, assume more events may be available
+    // Don't poll again here as both xcb_poll_for_event and xcb_poll_for_queued_event
+    // remove events from the queue, which would cause lost events
+    if (eventsProcessed >= maxEventsPerCall) {
         moreEventsAvailable = YES;
     }
 
