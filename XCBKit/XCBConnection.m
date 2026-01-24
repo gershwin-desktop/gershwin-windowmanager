@@ -1074,21 +1074,44 @@ static XCBConnection *sharedInstance;
     }
 
     [window onScreen]; // TODO: Just called in the else before this? really necessary?
-    XCBScreen *screen =  [window screen];
+    XCBScreen *screen = [window screen];
+    if (screen == nil && [screens count] > 0) screen = [screens objectAtIndex:0];
     XCBVisual *visual = [[XCBVisual alloc] initWithVisualId:[screen screen]->root_visual];
     [visual setVisualTypeForScreen:screen];
 
-    uint32_t values[] = {[screen screen]->white_pixel, /*XCB_BACKING_STORE_WHEN_MAPPED,*/ FRAMEMASK};
+    uint32_t values[] = {(screen ? [screen screen]->white_pixel : 0), /*XCB_BACKING_STORE_WHEN_MAPPED,*/ FRAMEMASK};
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
+    // Determine if we should use golden ratio placement.
+    BOOL useGoldenRatio = NO;
+    if ([window windowRect].position.x == 0 && [window windowRect].position.y == 0) {
+        useGoldenRatio = YES;
+    }
+
+    int16_t xPos = [window windowRect].position.x;
+    int16_t yPos = [window windowRect].position.y;
+    uint16_t winWidth = [window windowRect].size.width;
+    uint16_t winHeight = [window windowRect].size.height + titleHeight;
+
+    if (useGoldenRatio && screen) {
+        uint16_t screenWidth = [screen screen]->width_in_pixels;
+        uint16_t screenHeight = [screen screen]->height_in_pixels;
+        xPos = (screenWidth - winWidth) / 2;
+        yPos = (screenHeight - winHeight) * 0.381966;
+        XCBRect newRect = [window windowRect];
+        newRect.position.x = xPos;
+        newRect.position.y = yPos;
+        [window setWindowRect:newRect];
+    }
+
     XCBCreateWindowTypeRequest *request = [[XCBCreateWindowTypeRequest alloc] initForWindowType:XCBFrameRequest];
-    [request setDepth:[screen screen]->root_depth];
+    [request setDepth:(screen ? [screen screen]->root_depth : 24)];
     [request setParentWindow:[screen rootWindow]];
-    [request setXPosition:[window windowRect].position.x];
-    [request setYPosition:[window windowRect].position.y];
-    [request setWidth:[window windowRect].size.width];
-    [request setHeight:[window windowRect].size.height + titleHeight];
+    [request setXPosition:xPos];
+    [request setYPosition:yPos];
+    [request setWidth:winWidth];
+    [request setHeight:winHeight];
     [request setBorderWidth:0];
     [request setXcbClass:XCB_WINDOW_CLASS_INPUT_OUTPUT];
     [request setVisual:visual];
