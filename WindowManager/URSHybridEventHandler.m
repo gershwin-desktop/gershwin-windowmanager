@@ -1703,25 +1703,22 @@
                     // Restore from maximized
                     NSLog(@"GSTheme: Restoring window from maximized state");
                     XCBRect startRect = [frame windowRect];
-                    [frame restoreDimensionAndPosition];
+                    XCBRect restoredRect = [frame oldRect];  // Get saved pre-maximize rect
 
-                    // Explicitly resize the titlebar to match restored frame width
-                    XCBRect restoredFrameRect = [frame windowRect];
-                    uint16_t titleHgt = [titlebar windowRect].size.height;
-                    XCBSize restoredTitleSize = XCBMakeSize(restoredFrameRect.size.width, titleHgt);
-                    [titlebar maximizeToSize:restoredTitleSize andPosition:XCBMakePoint(0.0, 0.0)];
-
-                    // Also resize client window
+                    // Use programmatic resize that follows the same code path as manual resize
+                    [frame programmaticResizeToRect:restoredRect];
+                    [frame setFullScreen:NO];
+                    [titlebar setFullScreen:NO];
                     if (clientWindow) {
-                        XCBSize clientSize = XCBMakeSize(restoredFrameRect.size.width,
-                                                         restoredFrameRect.size.height - titleHgt);
-                        XCBPoint clientPos = XCBMakePoint(0.0, titleHgt - 1);
-                        [clientWindow maximizeToSize:clientSize andPosition:clientPos];
+                        [clientWindow setFullScreen:NO];
                     }
+                    [frame setIsMaximized:NO];
 
                     // Recreate the titlebar pixmap at the restored size
                     [titlebar destroyPixmap];
                     [titlebar createPixmap];
+                    XCBRect restoredFrameRect = [frame windowRect];
+                    uint16_t titleHgt = [titlebar windowRect].size.height;
                     NSLog(@"GSTheme: Titlebar pixmap recreated for restored size %dx%d",
                           restoredFrameRect.size.width, titleHgt);
 
@@ -1734,6 +1731,10 @@
                     // Update background pixmap and copy to window
                     [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
                     [titlebar drawArea:[titlebar windowRect]];
+
+                    // Update resize zone positions and shape mask for new dimensions
+                    [frame updateAllResizeZonePositions];
+                    [frame applyRoundedCornersShapeMask];
 
                     {
                         Class compositorClass = NSClassFromString(@"URSCompositingManager");
@@ -1758,28 +1759,32 @@
                     // Maximize to workarea size (respects struts)
                     NSLog(@"GSTheme: Maximizing window");
                     XCBRect startRect = [frame windowRect];
+
+                    /*** Save pre-maximize rect for restore ***/
+                    [frame setOldRect:startRect];
+                    [titlebar setOldRect:[titlebar windowRect]];
+                    if (clientWindow) {
+                        [clientWindow setOldRect:[clientWindow windowRect]];
+                    }
+
                     NSRect workarea = [self currentWorkarea];
-                    XCBSize size = XCBMakeSize((uint32_t)workarea.size.width, (uint32_t)workarea.size.height);
-                    XCBPoint position = XCBMakePoint((int32_t)workarea.origin.x, (int32_t)workarea.origin.y);
-
-                    [frame maximizeToSize:size andPosition:position];
-
-                    // Resize titlebar and client window (positions are relative to frame, not absolute)
-                    uint16_t titleHgt = [titlebar windowRect].size.height;
-                    XCBSize titleSize = XCBMakeSize((uint32_t)workarea.size.width, titleHgt);
-                    [titlebar maximizeToSize:titleSize andPosition:XCBMakePoint(0, 0)];
+                    /*** Use programmatic resize that follows the same code path as manual resize ***/
+                    XCBRect targetRect = XCBMakeRect(XCBMakePoint((int32_t)workarea.origin.x, (int32_t)workarea.origin.y),
+                                                      XCBMakeSize((uint32_t)workarea.size.width, (uint32_t)workarea.size.height));
+                    [frame programmaticResizeToRect:targetRect];
+                    [frame setFullScreen:YES];
+                    [frame setIsMaximized:YES];
+                    [titlebar setFullScreen:YES];
+                    if (clientWindow) {
+                        [clientWindow setFullScreen:YES];
+                    }
 
                     // Recreate the titlebar pixmap at the new size
                     [titlebar destroyPixmap];
                     [titlebar createPixmap];
+                    uint16_t titleHgt = [titlebar windowRect].size.height;
                     NSLog(@"GSTheme: Titlebar pixmap recreated for maximized size %dx%d",
                           (uint32_t)workarea.size.width, titleHgt);
-
-                    if (clientWindow) {
-                        XCBSize clientSize = XCBMakeSize((uint32_t)workarea.size.width, (uint32_t)(workarea.size.height - titleHgt));
-                        XCBPoint clientPos = XCBMakePoint(0, titleHgt - 1);
-                        [clientWindow maximizeToSize:clientSize andPosition:clientPos];
-                    }
 
                     // Redraw titlebar with GSTheme at new size
                     [URSThemeIntegration renderGSThemeToWindow:frame
@@ -1790,6 +1795,10 @@
                     // Update background pixmap and copy to window
                     [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
                     [titlebar drawArea:[titlebar windowRect]];
+
+                    // Update resize zone positions and shape mask for new dimensions
+                    [frame updateAllResizeZonePositions];
+                    [frame applyRoundedCornersShapeMask];
 
                     {
                         Class compositorClass = NSClassFromString(@"URSCompositingManager");

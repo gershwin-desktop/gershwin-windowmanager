@@ -1509,8 +1509,15 @@ static XCBConnection *sharedInstance;
         if ([frame isMaximized])
         {
             XCBRect startRect = [frame windowRect];
-            [frame restoreDimensionAndPosition];
-            xcb_flush([self connection]);
+            XCBRect restoredRect = [frame oldRect];  // Get saved pre-maximize rect
+
+            // Use programmatic resize that follows the same code path as manual resize
+            [frame programmaticResizeToRect:restoredRect];
+            [frame setFullScreen:NO];
+            [titleBar setFullScreen:NO];
+            [clientWindow setFullScreen:NO];
+            [frame setIsMaximized:NO];
+            [frame updateAllResizeZonePositions];
             [frame applyRoundedCornersShapeMask];
 
             {
@@ -1554,22 +1561,21 @@ static XCBConnection *sharedInstance;
         }
 
         XCBRect startRect = [frame windowRect];
-        /*** frame - maximize to workarea, not full screen **/
-        XCBSize size = XCBMakeSize(workareaWidth, workareaHeight);
-        XCBPoint position = XCBMakePoint(workareaX, workareaY);
-        NSLog(@"[Maximize] frame=%u startRect=(%d,%d %u x %u) target=(%d,%d %u x %u)", [frame window], (int)startRect.position.x, (int)startRect.position.y, (unsigned)startRect.size.width, (unsigned)startRect.size.height, (int)position.x, (int)position.y, (unsigned)size.width, (unsigned)size.height);
-        [frame maximizeToSize:size andPosition:position];
+        /*** Save pre-maximize rect for restore ***/
+        [frame setOldRect:startRect];
+        [titleBar setOldRect:[titleBar windowRect]];
+        [clientWindow setOldRect:[clientWindow windowRect]];
 
-        /*** title bar ***/
-        size = XCBMakeSize([frame windowRect].size.width, titleHgt);
-        position = XCBMakePoint(0.0,0.0);
-        [titleBar maximizeToSize:size andPosition:position];
+        /*** Use programmatic resize that follows the same code path as manual resize ***/
+        XCBRect targetRect = XCBMakeRect(XCBMakePoint(workareaX, workareaY),
+                                          XCBMakeSize(workareaWidth, workareaHeight));
+        NSLog(@"[Maximize] frame=%u startRect=(%d,%d %u x %u) target=(%d,%d %u x %u)", [frame window], (int)startRect.position.x, (int)startRect.position.y, (unsigned)startRect.size.width, (unsigned)startRect.size.height, (int)targetRect.position.x, (int)targetRect.position.y, (unsigned)targetRect.size.width, (unsigned)targetRect.size.height);
+        [frame programmaticResizeToRect:targetRect];
+        [frame setFullScreen:YES];
+        [frame setIsMaximized:YES];
+        [titleBar setFullScreen:YES];
+        [clientWindow setFullScreen:YES];
         [titleBar drawTitleBarComponents];
-
-        /***client window **/
-        size = XCBMakeSize([frame windowRect].size.width, [frame windowRect].size.height - titleHgt);
-        position = XCBMakePoint(0.0, titleHgt - 1);
-        [clientWindow maximizeToSize:size andPosition:position];
 
         {
             Class compositorClass = NSClassFromString(@"URSCompositingManager");
