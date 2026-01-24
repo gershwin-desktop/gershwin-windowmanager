@@ -55,6 +55,10 @@
 @property (nonatomic, assign) uint32_t cachedWorkareaWidth;
 @property (nonatomic, assign) uint32_t cachedWorkareaHeight;
 
+// Expected focus tracking to prevent race conditions
+@property (nonatomic, assign) xcb_window_t expectedFocusWindow;
+@property (nonatomic, assign) xcb_timestamp_t expectedFocusTimestamp;
+
 + (XCBConnection *) sharedConnectionAsWindowManager:(BOOL)asWindowManager;
 - (xcb_connection_t *) connection;
 /**

@@ -985,10 +985,16 @@
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
 
     NSLog(@"[FOCUS] XCBWindow::focus called for window %u", window);
-    
+
     // CRITICAL SAFETY: Ungrab keyboard once to prevent stuck keyboard focus
     xcb_ungrab_keyboard([connection connection], XCB_CURRENT_TIME);
     NSLog(@"[FOCUS] Keyboard ungrabbed");
+
+    // Set expected focus BEFORE calling setInputFocus to prevent race condition
+    // with handleFocusIn: processing the FocusIn event before we update _NET_ACTIVE_WINDOW
+    [connection setExpectedFocusWindow:window];
+    [connection setExpectedFocusTimestamp:[connection currentTime]];
+    NSLog(@"[FOCUS] Set expected focus to window %u", window);
 
     // ALWAYS set input focus, regardless of hasInputHint
     // This ensures we can type in the window even if hints are incorrect

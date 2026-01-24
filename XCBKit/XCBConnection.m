@@ -133,6 +133,10 @@ static XCBConnection *sharedInstance;
 
     resizeState = NO;
 
+    // Initialize expected focus tracking
+    _expectedFocusWindow = 0;
+    _expectedFocusTimestamp = 0;
+
     [self flush];
     return self;
 }
@@ -1639,14 +1643,19 @@ static XCBConnection *sharedInstance;
     {
         frame = (XCBFrame *) [window parentWindow];
         clientWindow = [frame childWindowForKey:ClientWindow];
-        
+
         // Check if this is the resize handle - if so, use client window for active window
         XCBWindow *resizeHandle = [frame childWindowForKey:ResizeHandle];
         BOOL isResizeHandle = (resizeHandle && [resizeHandle window] == [window window]);
-        
+
+        // Set expected focus to prevent handleFocusIn: from making a duplicate update
+        XCBWindow *targetWindow = isResizeHandle ? clientWindow : window;
+        self.expectedFocusWindow = [targetWindow window];
+        self.expectedFocusTimestamp = currentTime;
+
         EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
         // Use client window for active window, not the resize handle
-        [ewmhService updateNetActiveWindow:isResizeHandle ? clientWindow : window];
+        [ewmhService updateNetActiveWindow:targetWindow];
         ewmhService = nil;
         resizeHandle = nil;
 
@@ -1909,23 +1918,55 @@ static XCBConnection *sharedInstance;
     // Update _NET_ACTIVE_WINDOW when focus changes (e.g., from Alt-Tab)
     // Only handle focus changes that aren't from pointer grabs to avoid feedback loops
     if (anEvent->mode == XCB_NOTIFY_MODE_NORMAL || anEvent->mode == XCB_NOTIFY_MODE_WHILE_GRABBED) {
+        // Clear stale expected focus (older than 100ms)
+        // xcb_timestamp_t is in milliseconds from server
+        if (self.expectedFocusWindow != 0 &&
+            self.expectedFocusTimestamp != 0 &&
+            currentTime > self.expectedFocusTimestamp &&
+            (currentTime - self.expectedFocusTimestamp) > 100) {
+            NSLog(@"[FOCUS] handleFocusIn: Clearing stale expected focus (age: %u ms)",
+                  (unsigned int)(currentTime - self.expectedFocusTimestamp));
+            self.expectedFocusWindow = 0;
+            self.expectedFocusTimestamp = 0;
+        }
+
         XCBWindow *window = [self windowForXCBId:anEvent->event];
         if (window) {
+            // Determine the target window for _NET_ACTIVE_WINDOW
+            xcb_window_t targetWindowId = 0;
+            XCBWindow *targetWindow = nil;
+
             // If this is a frame window, get the client window
             if ([window isKindOfClass:[XCBFrame class]]) {
                 XCBFrame *frame = (XCBFrame *)window;
                 XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
                 if (clientWindow) {
-                    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
-                    [ewmhService updateNetActiveWindow:clientWindow];
-                    ewmhService = nil;
+                    targetWindowId = [clientWindow window];
+                    targetWindow = clientWindow;
                 }
-            } 
+            }
             // If this is a client window directly, use it
             else if ([window decorated]) {
-                EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
-                [ewmhService updateNetActiveWindow:window];
-                ewmhService = nil;
+                targetWindowId = [window window];
+                targetWindow = window;
+            }
+
+            if (targetWindow != nil && targetWindowId != 0) {
+                // Check if this FocusIn is from our own focus call
+                if (targetWindowId == self.expectedFocusWindow) {
+                    // Skip - this FocusIn is from our own explicit focus call
+                    // The updateNetActiveWindow was already called in the focus method
+                    NSLog(@"[FOCUS] handleFocusIn: Skipping expected window %u (already updated)", targetWindowId);
+                } else {
+                    // External focus change - do the update
+                    NSLog(@"[FOCUS] handleFocusIn: External focus to %u", targetWindowId);
+                    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+                    [ewmhService updateNetActiveWindow:targetWindow];
+                    ewmhService = nil;
+                }
+                // Clear expected focus after processing
+                self.expectedFocusWindow = 0;
+                self.expectedFocusTimestamp = 0;
             }
         }
     }
