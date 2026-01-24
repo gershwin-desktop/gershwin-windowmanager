@@ -1178,6 +1178,12 @@
     xcb_configure_window([connection connection], [frame window], config_frame_mask, config_frame_vals);
     xcb_configure_window([connection connection], [titleBar window], config_title_mask, config_title_vals);
 
+    // Flush immediately and update frame state (critical for proper resizing)
+    xcb_flush([connection connection]);
+    [frame setOriginalRect:frameRect];
+    [frame updateAllResizeZonePositions];
+    [frame applyRoundedCornersShapeMask];
+
     [titleBar updateRectsFromGeometries];
     //[titleBar drawTitleBarComponents]; FIXME: why this draw here?
     [frame setWindowRect:frameRect];

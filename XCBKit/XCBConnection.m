@@ -2946,4 +2946,72 @@ static XCBConnection *sharedInstance;
     [self setNeedFlush:YES];
 }
 
+#pragma mark - Directional Maximize
+
+- (void)ensureWorkareaCache:(XCBFrame*)frame {
+    // Ensure workarea is cached if not already valid
+    if (!self.workareaValid) {
+        XCBScreen *screen = [frame screen];
+        if (screen) {
+            XCBWindow *rootWindow = [screen rootWindow];
+            EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+            self.workareaValid = [ewmhService readWorkareaForRootWindow:rootWindow
+                                                                      x:&_cachedWorkareaX
+                                                                      y:&_cachedWorkareaY
+                                                                  width:&_cachedWorkareaWidth
+                                                                 height:&_cachedWorkareaHeight];
+            if (!self.workareaValid) {
+                // Fallback to screen dimensions
+                _cachedWorkareaX = 0;
+                _cachedWorkareaY = 0;
+                _cachedWorkareaWidth = [screen width];
+                _cachedWorkareaHeight = [screen height];
+                self.workareaValid = YES;
+            }
+        }
+    }
+}
+
+- (void)maximizeFrameVertically:(XCBFrame*)frame {
+    [self ensureWorkareaCache:frame];
+
+    // Keep current X and width, expand Y and height to workarea
+    XCBRect current = [frame windowRect];
+
+    // Save pre-maximize rect for restore
+    [frame setOldRect:current];
+
+    XCBRect target = XCBMakeRect(
+        XCBMakePoint(current.position.x, _cachedWorkareaY),
+        XCBMakeSize(current.size.width, _cachedWorkareaHeight));
+
+    [frame programmaticResizeToRect:target];
+    [frame setMaximizedVertically:YES];
+    [frame updateAllResizeZonePositions];
+    [frame applyRoundedCornersShapeMask];
+
+    [self flush];
+}
+
+- (void)maximizeFrameHorizontally:(XCBFrame*)frame {
+    [self ensureWorkareaCache:frame];
+
+    // Keep current Y and height, expand X and width to workarea
+    XCBRect current = [frame windowRect];
+
+    // Save pre-maximize rect for restore
+    [frame setOldRect:current];
+
+    XCBRect target = XCBMakeRect(
+        XCBMakePoint(_cachedWorkareaX, current.position.y),
+        XCBMakeSize(_cachedWorkareaWidth, current.size.height));
+
+    [frame programmaticResizeToRect:target];
+    [frame setMaximizedHorizontally:YES];
+    [frame updateAllResizeZonePositions];
+    [frame applyRoundedCornersShapeMask];
+
+    [self flush];
+}
+
 @end
