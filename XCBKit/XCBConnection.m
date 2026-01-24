@@ -516,6 +516,7 @@ static XCBConnection *sharedInstance;
 - (void)handleMapRequest:(xcb_map_request_event_t *)anEvent
 {
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:self];
     BOOL isManaged = NO;
     XCBWindow *window = [self windowForXCBId:anEvent->window];
     
@@ -1075,15 +1076,23 @@ static XCBConnection *sharedInstance;
 
     [window onScreen]; // TODO: Just called in the else before this? really necessary?
     XCBScreen *screen = [window screen];
-    if (screen == nil && [screens count] > 0) screen = [screens objectAtIndex:0];
-    XCBVisual *visual = [[XCBVisual alloc] initWithVisualId:[screen screen]->root_visual];
-    [visual setVisualTypeForScreen:screen];
+    if (screen == nil && [screens count] > 0) {
+        screen = [screens objectAtIndex:0];
+    }
+    
+    XCBVisual *visual = nil;
+    if (screen) {
+        visual = [[XCBVisual alloc] initWithVisualId:[screen screen]->root_visual];
+        [visual setVisualTypeForScreen:screen];
+    }
 
-    uint32_t values[] = {(screen ? [screen screen]->white_pixel : 0), /*XCB_BACKING_STORE_WHEN_MAPPED,*/ FRAMEMASK};
+    uint32_t values[] = { (screen ? [screen screen]->white_pixel : 0), /*XCB_BACKING_STORE_WHEN_MAPPED,*/ FRAMEMASK};
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
     // Determine if we should use golden ratio placement.
+    // We use it if the application hasn't explicitly specified a position (i.e. x=0, y=0).
+    // Also check if the window is a normal window that should be decorated.
     BOOL useGoldenRatio = NO;
     if ([window windowRect].position.x == 0 && [window windowRect].position.y == 0) {
         useGoldenRatio = YES;
@@ -1094,11 +1103,18 @@ static XCBConnection *sharedInstance;
     uint16_t winWidth = [window windowRect].size.width;
     uint16_t winHeight = [window windowRect].size.height + titleHeight;
 
+    NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
+
     if (useGoldenRatio && screen) {
         uint16_t screenWidth = [screen screen]->width_in_pixels;
         uint16_t screenHeight = [screen screen]->height_in_pixels;
+        
         xPos = (screenWidth - winWidth) / 2;
-        yPos = (screenHeight - winHeight) * 0.381966;
+        yPos = (screenHeight - winHeight) * 0.381966; // Golden ratio from top
+        
+        NSLog(@"[MapRequest] Applying golden ratio placement for window %u: %d, %d", [window window], xPos, yPos);
+        
+        // Update the window's rect so subsequent logic uses the new position
         XCBRect newRect = [window windowRect];
         newRect.position.x = xPos;
         newRect.position.y = yPos;
@@ -1120,8 +1136,14 @@ static XCBConnection *sharedInstance;
     [request setClientWindow:window];
 
     XCBWindowTypeResponse *response = [self createWindowForRequest:request registerWindow:YES];
-
+    
     XCBFrame *frame = [response frame];
+    
+    // Ensure icccmService is valid
+    if (icccmService == nil) {
+        icccmService = [ICCCMService sharedInstanceWithConnection:self];
+    }
+    
     const xcb_atom_t atomProtocols[1] = {[[icccmService atomService] atomFromCachedAtomsWithKey:[icccmService WMDeleteWindow]]};
 
     [icccmService changePropertiesForWindow:frame
@@ -1136,7 +1158,7 @@ static XCBConnection *sharedInstance;
     /*[self mapWindow:frame];
     [self registerWindow:window];*/
 
-    NSLog(@"Client window decorated with id %u", [window window]);
+    NSLog(@"Client window decorated with id %u at %d,%d", [window window], xPos, yPos);
     [frame initCursor];  // Must init cursor BEFORE decorateClientWindow - resize zones need it
     [frame decorateClientWindow];
     [self mapWindow:frame];
@@ -1513,21 +1535,19 @@ static XCBConnection *sharedInstance;
         /*** frame - maximize to workarea, not full screen **/
         XCBSize size = XCBMakeSize(workareaWidth, workareaHeight);
         XCBPoint position = XCBMakePoint(workareaX, workareaY);
+        NSLog(@"[Maximize] frame=%u startRect=(%d,%d %u x %u) target=(%d,%d %u x %u)", [frame window], (int)startRect.position.x, (int)startRect.position.y, (unsigned)startRect.size.width, (unsigned)startRect.size.height, (int)position.x, (int)position.y, (unsigned)size.width, (unsigned)size.height);
         [frame maximizeToSize:size andPosition:position];
-        [frame setFullScreen:YES];
 
         /*** title bar ***/
         size = XCBMakeSize([frame windowRect].size.width, titleHgt);
         position = XCBMakePoint(0.0,0.0);
         [titleBar maximizeToSize:size andPosition:position];
         [titleBar drawTitleBarComponents];
-        [titleBar setFullScreen:YES];
 
         /***client window **/
         size = XCBMakeSize([frame windowRect].size.width, [frame windowRect].size.height - titleHgt);
         position = XCBMakePoint(0.0, titleHgt - 1);
         [clientWindow maximizeToSize:size andPosition:position];
-        [clientWindow setFullScreen:YES];
 
         {
             Class compositorClass = NSClassFromString(@"URSCompositingManager");
@@ -1549,11 +1569,18 @@ static XCBConnection *sharedInstance;
         /*** Update resize zone positions if they exist ***/
         [frame updateAllResizeZonePositions];
 
+        // Log geometry right before flushing and applying shape masks
+        NSLog(@"[Maximize] pre-flush geometry frameRect=(%d,%d %u x %u) titleRect=(%d,%d %u x %u) clientRect=(%d,%d %u x %u)",
+              (int)[frame windowRect].position.x, (int)[frame windowRect].position.y, (unsigned)[frame windowRect].size.width, (unsigned)[frame windowRect].size.height,
+              (int)[titleBar windowRect].position.x, (int)[titleBar windowRect].position.y, (unsigned)[titleBar windowRect].size.width, (unsigned)[titleBar windowRect].size.height,
+              (int)[clientWindow windowRect].position.x, (int)[clientWindow windowRect].position.y, (unsigned)[clientWindow windowRect].size.width, (unsigned)[clientWindow windowRect].size.height);
+
         /*** Flush to ensure X server has processed configure requests ***/
         xcb_flush([self connection]);
 
         /*** Update shape mask for new dimensions ***/
         [frame applyRoundedCornersShapeMask];
+        NSLog(@"[Maximize] applied rounded corners for frame %u", [frame window]);
 
         ewmhService = nil;
         rootWindow = nil;
