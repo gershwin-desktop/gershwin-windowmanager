@@ -1264,6 +1264,89 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     settings = nil;
 }
 
+- (void)configureClientWithFramePosition:(XCBPoint)framePos
+                              clientSize:(XCBSize)clientSize
+{
+    XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
+    if (!clientWindow) return;
+
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+
+    // Use the static helper with explicit dimensions (same as manual resize)
+    sendSyntheticConfigureNotify([connection connection], clientWindow,
+                                  framePos.x,
+                                  framePos.y + titleHgt,
+                                  clientSize.width,
+                                  clientSize.height);
+
+    clientWindow = nil;
+    settings = nil;
+}
+
+- (void)programmaticResizeToRect:(XCBRect)targetRect
+{
+    XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
+    XCBTitleBar *titleBar = (XCBTitleBar*)[self childWindowForKey:TitleBar];
+    if (!clientWindow || !titleBar) return;
+
+    xcb_connection_t *conn = [connection connection];
+
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+
+    // Calculate child window dimensions (same as manual resize functions)
+    XCBRect titleBarRect = XCBMakeRect(XCBMakePoint(0, 0),
+                                        XCBMakeSize(targetRect.size.width, titleHgt));
+    XCBRect clientRect = XCBMakeRect(XCBMakePoint(0, titleHgt - 1),
+                                      XCBMakeSize(targetRect.size.width,
+                                                   targetRect.size.height - titleHgt));
+
+    // Configure frame window (position + size)
+    uint32_t frameValues[4] = {(uint32_t)targetRect.position.x, (uint32_t)targetRect.position.y,
+                               targetRect.size.width, targetRect.size.height};
+    xcb_configure_window(conn, [self window],
+                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+                         XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                         frameValues);
+
+    // Configure titlebar window (size only, position relative to frame)
+    uint32_t titleValues[2] = {titleBarRect.size.width, titleBarRect.size.height};
+    xcb_configure_window(conn, [titleBar window],
+                         XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                         titleValues);
+
+    // Configure client window (position + size relative to frame)
+    uint32_t clientValues[4] = {(uint32_t)clientRect.position.x, (uint32_t)clientRect.position.y,
+                                clientRect.size.width, clientRect.size.height};
+    xcb_configure_window(conn, [clientWindow window],
+                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+                         XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                         clientValues);
+
+    // Flush immediately (critical - this is what manual resize does)
+    xcb_flush(conn);
+
+    // Update both windowRect AND originalRect for all windows (like manual resize)
+    [self setWindowRect:targetRect];
+    [self setOriginalRect:targetRect];
+
+    [titleBar setWindowRect:titleBarRect];
+    [titleBar setOriginalRect:titleBarRect];
+
+    [clientWindow setWindowRect:clientRect];
+    [clientWindow setOriginalRect:clientRect];
+
+    // Send synthetic ConfigureNotify with the calculated dimensions
+    sendSyntheticConfigureNotify(conn, clientWindow,
+                                  targetRect.position.x,
+                                  targetRect.position.y + titleHgt,
+                                  clientRect.size.width,
+                                  clientRect.size.height);
+
+    settings = nil;
+}
+
 - (MousePosition) mouseIsOnWindowBorderForEvent:(xcb_motion_notify_event_t *)anEvent
 {
     int rightBorder = [super windowRect].size.width;
