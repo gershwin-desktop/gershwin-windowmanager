@@ -836,20 +836,20 @@
                     frame = (XCBFrame*)[aWindow parentWindow];
                     titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
 
-                    /*** frame size and position - use workarea width ***/
-                    size = XCBMakeSize(workareaWidth, [frame windowRect].size.height);
-                    position = XCBMakePoint(workareaX, [frame windowRect].position.y);
-                    [frame maximizeToSize:size andPosition:position];
+                    // Save pre-maximize rect for restore
+                    [frame setOldRect:[frame windowRect]];
 
-                    /*** titlebar size and position ***/
-                    size = XCBMakeSize([frame windowRect].size.width, titleHgt);
-                    position = XCBMakePoint(0.0,0.0);
-                    [titleBar maximizeToSize:size andPosition:position];
+                    /*** Use programmaticResizeToRect - keeps width, expands to workarea width ***/
+                    XCBRect targetRect = XCBMakeRect(
+                        XCBMakePoint(workareaX, [frame windowRect].position.y),
+                        XCBMakeSize(workareaWidth, [frame windowRect].size.height));
+                    [frame programmaticResizeToRect:targetRect];
+
+                    // Update resize zones and shape mask
+                    [frame updateAllResizeZonePositions];
+                    [frame applyRoundedCornersShapeMask];
+
                     [titleBar drawTitleBarComponents];
-
-                    /*** client window size and position ***/
-                    size = XCBMakeSize([frame windowRect].size.width - 2, [frame windowRect].size.height - titleHgt - 2);
-                    position = XCBMakePoint(0.0, titleHgt - 1);
 
                     frame = nil;
                     titleBar = nil;
@@ -858,9 +858,9 @@
                 {
                     size = XCBMakeSize(workareaWidth, [aWindow windowRect].size.height);
                     position = XCBMakePoint(workareaX, [aWindow windowRect].position.y);
+                    [aWindow maximizeToSize:size andPosition:position];
                 }
 
-                [aWindow maximizeToSize:size andPosition:position];
                 [aWindow setMaximizedHorizontally:maxHorz];
                 screen = nil;
             }
@@ -898,20 +898,21 @@
                     frame = (XCBFrame*)[aWindow parentWindow];
                     titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
 
-                    /*** frame size and position - use workarea height ***/
-                    size = XCBMakeSize([frame windowRect].size.width, workareaHeight);
-                    position = XCBMakePoint([frame windowRect].position.x, workareaY);
-                    [frame maximizeToSize:size andPosition:position];
+                    // Save pre-maximize rect for restore
+                    [frame setOldRect:[frame windowRect]];
 
-                    /*** titlebar size and position ***/
-                    size = XCBMakeSize(size.width, titleHgt);
-                    position = XCBMakePoint(0.0, 0.0);
-                    [titleBar maximizeToSize:size andPosition:position];
+                    /*** Use programmaticResizeToRect - keeps width, expands to workarea height ***/
+                    XCBRect targetRect = XCBMakeRect(
+                        XCBMakePoint([frame windowRect].position.x, workareaY),
+                        XCBMakeSize([frame windowRect].size.width, workareaHeight));
+                    [frame programmaticResizeToRect:targetRect];
+
+                    // Update resize zones and shape mask
+                    [frame updateAllResizeZonePositions];
+                    [frame applyRoundedCornersShapeMask];
+
                     [titleBar drawTitleBarComponents];
 
-                    /*** client window size and position ***/
-                    size = XCBMakeSize([aWindow windowRect].size.width - 2, [frame windowRect].size.height - titleHgt - 2); //TODO:why - 2?
-                    position = XCBMakePoint(0.0, titleHgt - 1);
                     frame = nil;
                     titleBar = nil;
                 }
@@ -919,9 +920,9 @@
                 {
                     size = XCBMakeSize([aWindow windowRect].size.width, workareaHeight);
                     position = XCBMakePoint([aWindow windowRect].position.x, workareaY);
+                    [aWindow maximizeToSize:size andPosition:position];
                 }
 
-                [aWindow maximizeToSize:size andPosition:position];
                 [aWindow setMaximizedVertically:maxVert];
                 screen = nil;
             }
@@ -961,20 +962,23 @@
                     frame = (XCBFrame*)[aWindow parentWindow];
                     titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
 
-                    /*** frame size and position - use workarea ***/
-                    size = XCBMakeSize(workareaWidth, workareaHeight);
-                    position = XCBMakePoint(workareaX, workareaY);
-                    [frame maximizeToSize:size andPosition:position];
+                    // Save pre-maximize rect for restore
+                    [frame setOldRect:[frame windowRect]];
 
-                    /*** titlebar size and position ***/
-                    size = XCBMakeSize([frame windowRect].size.width, titleHgt);
-                    position = XCBMakePoint(0.0, 0.0);
-                    [titleBar maximizeToSize:size andPosition:position];
+                    /*** Use programmaticResizeToRect - fullscreen to workarea ***/
+                    XCBRect targetRect = XCBMakeRect(
+                        XCBMakePoint(workareaX, workareaY),
+                        XCBMakeSize(workareaWidth, workareaHeight));
+                    [frame programmaticResizeToRect:targetRect];
+                    [frame setIsMaximized:YES];
+                    [frame setMaximizedHorizontally:YES];
+                    [frame setMaximizedVertically:YES];
+
+                    // Update resize zones and shape mask
+                    [frame updateAllResizeZonePositions];
+                    [frame applyRoundedCornersShapeMask];
+
                     [titleBar drawTitleBarComponents];
-
-                    /*** client window size and position ***/
-                    size = XCBMakeSize([frame windowRect].size.width - 2, [frame windowRect].size.height - 2);
-                    position = XCBMakePoint(0, titleHgt - 1);
 
                     frame = nil;
                     titleBar = nil;
@@ -983,10 +987,9 @@
                 {
                     size = XCBMakeSize(workareaWidth, workareaHeight);
                     position = XCBMakePoint(workareaX, workareaY);
+                    [aWindow maximizeToSize:size andPosition:position];
                 }
 
-
-                [aWindow maximizeToSize:size andPosition:position];
                 [aWindow setFullScreen:fullscr];
                 screen = nil;
             }

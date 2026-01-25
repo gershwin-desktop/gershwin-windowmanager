@@ -59,12 +59,14 @@ typedef NS_ENUM(NSInteger, childrenMask)
 - (void) resize:(xcb_motion_notify_event_t *)anEvent xcbConnection:(xcb_connection_t*)aXcbConnection;
 - (void) moveTo:(XCBPoint)coordinates;
 - (void) configureClient;
+- (void) configureClientWithFramePosition:(XCBPoint)framePos clientSize:(XCBSize)clientSize;
 - (MousePosition) mouseIsOnWindowBorderForEvent:(xcb_motion_notify_event_t *)anEvent;
 - (void) restoreDimensionAndPosition;
 - (void) createResizeHandle;
 - (void) updateResizeHandlePosition;
 - (void) raiseResizeHandle;
 - (void) applyRoundedCornersShapeMask;
+- (void) programmaticResizeToRect:(XCBRect)targetRect;
 
 // Theme-driven resize zones
 - (void) createResizeZonesFromTheme;

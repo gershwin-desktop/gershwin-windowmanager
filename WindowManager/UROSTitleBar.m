@@ -338,9 +338,20 @@
                 workareaHeight = [screen height];
             }
             
-            XCBSize maxSize = XCBMakeSize(workareaWidth, workareaHeight);
-            XCBPoint maxPosition = XCBMakePoint(workareaX, workareaY);
-            [frame maximizeToSize:maxSize andPosition:maxPosition];
+            // Save pre-maximize rect for restore
+            [frame setOldRect:[frame windowRect]];
+
+            // Use programmatic resize that follows the same code path as manual resize
+            XCBRect targetRect = XCBMakeRect(XCBMakePoint(workareaX, workareaY),
+                                              XCBMakeSize(workareaWidth, workareaHeight));
+            [frame programmaticResizeToRect:targetRect];
+            [frame setIsMaximized:YES];
+            [frame setMaximizedHorizontally:YES];
+            [frame setMaximizedVertically:YES];
+
+            // Update resize zone positions and shape mask for new dimensions
+            [frame updateAllResizeZonePositions];
+            [frame applyRoundedCornersShapeMask];
         }
         [self.connection flush];
     }
