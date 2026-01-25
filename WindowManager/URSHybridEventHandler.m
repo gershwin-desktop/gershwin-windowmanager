@@ -20,6 +20,7 @@
 #import <X11/keysym.h>
 #import <XCBKit/services/EWMHService.h>
 #import <XCBKit/services/XCBAtomService.h>
+#import <XCBKit/services/ICCCMService.h>
 #import <XCBKit/XCBFrame.h>
 #import "URSThemeIntegration.h"
 #import "GSThemeTitleBar.h"
@@ -698,6 +699,7 @@
             xcb_property_notify_event_t *propEvent = (xcb_property_notify_event_t *)event;
             // Check if this is a strut property change
             [self handleStrutPropertyChange:propEvent];
+            [self handleWindowTitlePropertyChange:propEvent];
             [connection handlePropertyNotify:propEvent];
             break;
         }
@@ -2397,6 +2399,167 @@
         
         // Recalculate workarea after strut change
         [self recalculateWorkarea];
+    }
+}
+
+#pragma mark - Window Title Updates
+
+- (NSString *)readUTF8Property:(NSString *)propertyName forWindow:(XCBWindow *)window
+{
+    if (!propertyName || !window) {
+        return nil;
+    }
+
+    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+
+    xcb_atom_t propertyAtom = [atomService atomFromCachedAtomsWithKey:propertyName];
+    if (propertyAtom == XCB_ATOM_NONE) {
+        propertyAtom = [atomService cacheAtom:propertyName];
+    }
+
+    xcb_atom_t utf8Atom = [atomService atomFromCachedAtomsWithKey:[ewmhService UTF8_STRING]];
+    if (utf8Atom == XCB_ATOM_NONE) {
+        utf8Atom = [atomService cacheAtom:[ewmhService UTF8_STRING]];
+    }
+
+    xcb_get_property_cookie_t cookie = xcb_get_property([connection connection],
+                                                         0,
+                                                         [window window],
+                                                         propertyAtom,
+                                                         utf8Atom,
+                                                         0,
+                                                         1024);
+    xcb_get_property_reply_t *reply = xcb_get_property_reply([connection connection], cookie, NULL);
+    if (!reply) {
+        return nil;
+    }
+
+    int length = xcb_get_property_value_length(reply);
+    if (length <= 0) {
+        free(reply);
+        return nil;
+    }
+
+    const char *bytes = (const char *)xcb_get_property_value(reply);
+    NSString *value = [[NSString alloc] initWithBytes:bytes length:(NSUInteger)length encoding:NSUTF8StringEncoding];
+    free(reply);
+    return value;
+}
+
+- (NSString *)titleForClientWindow:(XCBWindow *)clientWindow
+{
+    if (!clientWindow) {
+        return @"";
+    }
+
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+
+    NSString *title = [self readUTF8Property:[ewmhService EWMHWMVisibleName] forWindow:clientWindow];
+    if (!title || [title length] == 0) {
+        title = [self readUTF8Property:[ewmhService EWMHWMName] forWindow:clientWindow];
+    }
+
+    if (!title || [title length] == 0) {
+        ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
+        title = [icccmService getWmNameForWindow:clientWindow];
+    }
+
+    if (!title) {
+        title = @"";
+    }
+
+    return title;
+}
+
+- (void)handleWindowTitlePropertyChange:(xcb_property_notify_event_t*)event
+{
+    if (!event) {
+        return;
+    }
+
+    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
+
+    NSString *atomName = [atomService atomNameFromAtom:event->atom];
+    if (!atomName) {
+        return;
+    }
+
+    BOOL isWmName = [atomName isEqualToString:[icccmService WMName]];
+    BOOL isNetWmName = [atomName isEqualToString:[ewmhService EWMHWMName]];
+    BOOL isNetWmVisibleName = [atomName isEqualToString:[ewmhService EWMHWMVisibleName]];
+
+    if (!isWmName && !isNetWmName && !isNetWmVisibleName) {
+        return;
+    }
+
+    XCBWindow *eventWindow = [connection windowForXCBId:event->window];
+    if (!eventWindow) {
+        return;
+    }
+
+    XCBFrame *frame = nil;
+    XCBTitleBar *titlebar = nil;
+    XCBWindow *clientWindow = nil;
+
+    if ([eventWindow isKindOfClass:[XCBFrame class]]) {
+        frame = (XCBFrame *)eventWindow;
+        clientWindow = [frame childWindowForKey:ClientWindow];
+    } else if ([eventWindow isKindOfClass:[XCBTitleBar class]]) {
+        titlebar = (XCBTitleBar *)eventWindow;
+        frame = (XCBFrame *)[titlebar parentWindow];
+        if (frame) {
+            clientWindow = [frame childWindowForKey:ClientWindow];
+        }
+    } else if ([eventWindow parentWindow] && [[eventWindow parentWindow] isKindOfClass:[XCBFrame class]]) {
+        frame = (XCBFrame *)[eventWindow parentWindow];
+        clientWindow = [frame childWindowForKey:ClientWindow];
+    } else {
+        NSDictionary *windowsMap = [connection windowsMap];
+        for (NSString *mapWindowId in windowsMap) {
+            XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
+            if (mapWindow && [mapWindow isKindOfClass:[XCBFrame class]]) {
+                XCBFrame *testFrame = (XCBFrame *)mapWindow;
+                XCBWindow *testClient = [testFrame childWindowForKey:ClientWindow];
+                if (testClient && [testClient window] == event->window) {
+                    frame = testFrame;
+                    clientWindow = testClient;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (frame && !titlebar) {
+        XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
+        if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
+            titlebar = (XCBTitleBar *)titlebarWindow;
+        }
+    }
+
+    if (!titlebar) {
+        return;
+    }
+
+    NSString *newTitle = [self titleForClientWindow:(clientWindow ? clientWindow : eventWindow)];
+
+    [titlebar setInternalTitle:newTitle];
+
+    if ([titlebar isGSThemeActive] && [[URSThemeIntegration sharedInstance] enabled]) {
+        BOOL isActive = frame ? frame.isFocused : NO;
+        [URSThemeIntegration renderGSThemeToWindow:frame
+                                             frame:frame
+                                             title:newTitle
+                                            active:isActive];
+        [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+        [titlebar drawArea:[titlebar windowRect]];
+        [connection flush];
+    } else {
+        [titlebar setWindowTitle:newTitle];
+        [titlebar drawArea:[titlebar windowRect]];
+        [connection flush];
     }
 }
 

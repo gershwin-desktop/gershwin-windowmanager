@@ -388,7 +388,7 @@
 
 - (void) setWindowTitle:(NSString *) title
 {
-    if (titleIsSet)
+    if (titleIsSet && windowTitle && [windowTitle isEqualToString:title])
         return;
 
     windowTitle = title;
