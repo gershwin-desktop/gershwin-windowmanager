@@ -1387,6 +1387,74 @@ static XCBConnection *sharedInstance;
         [frame moveTo:destPoint];
         [frame configureClient];
 
+        // Edge and corner snap detection - check if mouse is near screen edges/corners
+        if (self.workareaValid) {
+            SnapZone detectedZone = SnapZoneNone;
+
+            // Calculate edge proximity (within SNAP_EDGE_THRESHOLD of edge)
+            BOOL nearTop = mouseY <= _cachedWorkareaY + SNAP_EDGE_THRESHOLD;
+            BOOL nearBottom = mouseY >= _cachedWorkareaY + (int32_t)_cachedWorkareaHeight - SNAP_EDGE_THRESHOLD;
+            BOOL nearLeft = mouseX <= _cachedWorkareaX + SNAP_EDGE_THRESHOLD;
+            BOOL nearRight = mouseX >= _cachedWorkareaX + (int32_t)_cachedWorkareaWidth - SNAP_EDGE_THRESHOLD;
+
+            // Corner zones: within SNAP_CORNER_THRESHOLD of the corner
+            // These define rectangular areas in each corner where quarter-snap triggers
+            BOOL inLeftCornerZone = mouseX <= _cachedWorkareaX + SNAP_CORNER_THRESHOLD;
+            BOOL inRightCornerZone = mouseX >= _cachedWorkareaX + (int32_t)_cachedWorkareaWidth - SNAP_CORNER_THRESHOLD;
+            BOOL inTopCornerZone = mouseY <= _cachedWorkareaY + SNAP_CORNER_THRESHOLD;
+            BOOL inBottomCornerZone = mouseY >= _cachedWorkareaY + (int32_t)_cachedWorkareaHeight - SNAP_CORNER_THRESHOLD;
+
+            // Corners: must be near an edge AND in the corner zone of the perpendicular edge
+            // e.g., TopLeft = near top edge AND in the left corner zone (not just near left edge)
+            if (nearTop && inLeftCornerZone && inTopCornerZone) {
+                detectedZone = SnapZoneTopLeft;
+            } else if (nearTop && inRightCornerZone && inTopCornerZone) {
+                detectedZone = SnapZoneTopRight;
+            } else if (nearBottom && inLeftCornerZone && inBottomCornerZone) {
+                detectedZone = SnapZoneBottomLeft;
+            } else if (nearBottom && inRightCornerZone && inBottomCornerZone) {
+                detectedZone = SnapZoneBottomRight;
+            } else if (nearLeft && inTopCornerZone && inLeftCornerZone) {
+                detectedZone = SnapZoneTopLeft;
+            } else if (nearLeft && inBottomCornerZone && inLeftCornerZone) {
+                detectedZone = SnapZoneBottomLeft;
+            } else if (nearRight && inTopCornerZone && inRightCornerZone) {
+                detectedZone = SnapZoneTopRight;
+            } else if (nearRight && inBottomCornerZone && inRightCornerZone) {
+                detectedZone = SnapZoneBottomRight;
+            }
+            // Edges: must be near edge but NOT in a corner zone
+            else if (nearTop && !inLeftCornerZone && !inRightCornerZone) {
+                detectedZone = SnapZoneTop;
+            } else if (nearLeft && !inTopCornerZone && !inBottomCornerZone) {
+                detectedZone = SnapZoneLeft;
+            } else if (nearRight && !inTopCornerZone && !inBottomCornerZone) {
+                detectedZone = SnapZoneRight;
+            }
+
+            // State machine: track zone entry time, show preview after linger
+            if (detectedZone != self.pendingSnapZone) {
+                // Entered a new zone (or left all zones)
+                if (detectedZone != SnapZoneNone) {
+                    NSLog(@"[Snap] Entered zone %ld (was %ld)", (long)detectedZone, (long)self.pendingSnapZone);
+                }
+                self.pendingSnapZone = detectedZone;
+                self.snapZoneEntryTime = anEvent->time;
+                if (self.snapPreviewShown) {
+                    [self hideSnapPreview];
+                    self.snapPreviewShown = NO;
+                }
+            } else if (detectedZone != SnapZoneNone) {
+                // Still in the same zone - check if linger time has elapsed
+                xcb_timestamp_t elapsed = anEvent->time - self.snapZoneEntryTime;
+                if (elapsed >= SNAP_LINGER_TIME && !self.snapPreviewShown) {
+                    NSLog(@"[Snap] Linger time elapsed, showing preview for zone %ld", (long)detectedZone);
+                    [self showSnapPreviewForZone:detectedZone frame:frame];
+                    self.snapPreviewShown = YES;
+                }
+            }
+        }
+
         window = nil;
         frame = nil;
         needFlush = YES;
@@ -1905,6 +1973,26 @@ static XCBConnection *sharedInstance;
 
         clientWindow = nil;
     }*/
+
+    // Execute snap if preview was shown and we're in a snap zone
+    if (self.snapPreviewShown && self.pendingSnapZone != SnapZoneNone) {
+        // Get the frame from the titlebar if we were dragging it
+        XCBFrame *snapFrame = nil;
+        if ([window isKindOfClass:[XCBTitleBar class]]) {
+            snapFrame = (XCBFrame *)[window parentWindow];
+        } else if ([window isKindOfClass:[XCBFrame class]]) {
+            snapFrame = (XCBFrame *)window;
+        }
+
+        if (snapFrame) {
+            [self executeSnapForZone:self.pendingSnapZone frame:snapFrame];
+        }
+    }
+
+    // Always clean up snap state
+    [self hideSnapPreview];
+    self.pendingSnapZone = SnapZoneNone;
+    self.snapPreviewShown = NO;
 
     [window ungrabPointer];
     dragState = NO;
@@ -3097,7 +3185,7 @@ static XCBConnection *sharedInstance;
     [self flush];
 }
 
-#pragma mark - Window Tiling
+#pragma mark - Window Snap/Tiling
 
 - (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame {
     if (!frame || zone == SnapZoneNone) {
@@ -3173,15 +3261,151 @@ static XCBConnection *sharedInstance;
             break;
 
         default:
-            NSLog(@"[Snap] Unknown snap zone: %ld", (long)zone);
             return;
     }
 
-    [frame programmaticResizeToRect:targetRect];
+    // Animate if compositor is active
+    {
+        Class compositorClass = NSClassFromString(@"URSCompositingManager");
+        id<URSCompositingManaging> compositor = nil;
+        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+            compositor = [compositorClass performSelector:@selector(sharedManager)];
+        }
+        if (compositor && [compositor compositingActive] &&
+            [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
+            XCBRect startRect = [frame windowRect];
+            [frame programmaticResizeToRect:targetRect];
+            XCBRect endRect = [frame windowRect];
+            [compositor animateWindowTransition:[frame window]
+                                       fromRect:startRect
+                                         toRect:endRect
+                                       duration:0.2
+                                           fade:NO];
+        } else {
+            [frame programmaticResizeToRect:targetRect];
+        }
+    }
+
     [frame updateAllResizeZonePositions];
     [frame applyRoundedCornersShapeMask];
 
+    // Redraw title bar
+    XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+    if (titleBar) {
+        [titleBar drawTitleBarComponents];
+    }
+
     [self flush];
+}
+
+- (void)showSnapPreviewForZone:(SnapZone)zone frame:(XCBFrame *)frame {
+    NSLog(@"[Snap] showSnapPreviewForZone called with zone=%ld", (long)zone);
+
+    if (zone == SnapZoneNone) {
+        [self hideSnapPreview];
+        return;
+    }
+
+    // Use URSSnapPreviewOverlay if available (loaded from WindowManager app)
+    Class overlayClass = NSClassFromString(@"URSSnapPreviewOverlay");
+    if (overlayClass && [overlayClass respondsToSelector:@selector(sharedOverlay)]) {
+        id overlay = [overlayClass performSelector:@selector(sharedOverlay)];
+
+        // Calculate preview rect based on snap zone
+        [self ensureWorkareaCache:frame];
+
+        // Get screen height for X11 to GNUstep coordinate conversion
+        // X11: Y=0 at top, GNUstep/NSWindow: Y=0 at bottom
+        XCBScreen *xcbScreen = [screens firstObject];
+        CGFloat screenHeight = [xcbScreen height];
+
+        CGFloat previewX = 0, previewWidth = 0, previewHeight = 0;
+        NSRect previewRect = NSZeroRect;
+
+        switch (zone) {
+            case SnapZoneTop:
+                previewWidth = _cachedWorkareaWidth;
+                previewHeight = _cachedWorkareaHeight;
+                previewX = _cachedWorkareaX;
+                previewRect = NSMakeRect(previewX,
+                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         previewWidth, previewHeight);
+                break;
+            case SnapZoneLeft:
+                previewWidth = _cachedWorkareaWidth / 2;
+                previewHeight = _cachedWorkareaHeight;
+                previewX = _cachedWorkareaX;
+                previewRect = NSMakeRect(previewX,
+                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         previewWidth, previewHeight);
+                break;
+            case SnapZoneRight:
+                previewWidth = _cachedWorkareaWidth / 2;
+                previewHeight = _cachedWorkareaHeight;
+                previewX = _cachedWorkareaX + _cachedWorkareaWidth / 2;
+                previewRect = NSMakeRect(previewX,
+                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         previewWidth, previewHeight);
+                break;
+            case SnapZoneTopLeft:
+                previewWidth = _cachedWorkareaWidth / 2;
+                previewHeight = _cachedWorkareaHeight / 2;
+                previewX = _cachedWorkareaX;
+                // Top quarter: X11 Y is at workarea top
+                previewRect = NSMakeRect(previewX,
+                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         previewWidth, previewHeight);
+                break;
+            case SnapZoneTopRight:
+                previewWidth = _cachedWorkareaWidth / 2;
+                previewHeight = _cachedWorkareaHeight / 2;
+                previewX = _cachedWorkareaX + _cachedWorkareaWidth / 2;
+                // Top quarter: X11 Y is at workarea top
+                previewRect = NSMakeRect(previewX,
+                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         previewWidth, previewHeight);
+                break;
+            case SnapZoneBottomLeft:
+                previewWidth = _cachedWorkareaWidth / 2;
+                previewHeight = _cachedWorkareaHeight / 2;
+                previewX = _cachedWorkareaX;
+                // Bottom quarter: X11 Y is at workarea midpoint
+                previewRect = NSMakeRect(previewX,
+                                         screenHeight - (_cachedWorkareaY + _cachedWorkareaHeight / 2) - previewHeight,
+                                         previewWidth, previewHeight);
+                break;
+            case SnapZoneBottomRight:
+                previewWidth = _cachedWorkareaWidth / 2;
+                previewHeight = _cachedWorkareaHeight / 2;
+                previewX = _cachedWorkareaX + _cachedWorkareaWidth / 2;
+                // Bottom quarter: X11 Y is at workarea midpoint
+                previewRect = NSMakeRect(previewX,
+                                         screenHeight - (_cachedWorkareaY + _cachedWorkareaHeight / 2) - previewHeight,
+                                         previewWidth, previewHeight);
+                break;
+            default:
+                NSLog(@"[Snap] WARNING: Unknown zone %ld in showSnapPreviewForZone", (long)zone);
+                return;
+        }
+
+        NSLog(@"[Snap] Showing preview for zone=%ld rect=(%.0f,%.0f,%.0f,%.0f)",
+              (long)zone, previewRect.origin.x, previewRect.origin.y,
+              previewRect.size.width, previewRect.size.height);
+
+        if ([overlay respondsToSelector:@selector(showPreviewForRect:)]) {
+            [overlay performSelector:@selector(showPreviewForRect:) withObject:[NSValue valueWithRect:previewRect]];
+        }
+    }
+}
+
+- (void)hideSnapPreview {
+    Class overlayClass = NSClassFromString(@"URSSnapPreviewOverlay");
+    if (overlayClass && [overlayClass respondsToSelector:@selector(sharedOverlay)]) {
+        id overlay = [overlayClass performSelector:@selector(sharedOverlay)];
+        if ([overlay respondsToSelector:@selector(hide)]) {
+            [overlay performSelector:@selector(hide)];
+        }
+    }
 }
 
 - (XCBFrame *)getActiveFrame {

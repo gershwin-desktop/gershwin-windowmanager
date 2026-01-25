@@ -24,7 +24,12 @@
 #define CLIENTLISTSIZE 1000
 #define WINDOWSMAPUPDATED @"windowsMapUpdated"
 
-// Snap zone types for window tiling
+// Edge snap detection constants
+#define SNAP_EDGE_THRESHOLD 5    // Pixels from screen edge to trigger snap detection
+#define SNAP_CORNER_THRESHOLD 50 // Pixels from corner to trigger quarter snap
+#define SNAP_LINGER_TIME 300     // Milliseconds to linger before snap activates
+
+// Snap zone types for drag-to-edge window snapping
 typedef NS_ENUM(NSInteger, SnapZone) {
     SnapZoneNone = 0,
     SnapZoneTop,         // Maximize window
@@ -70,6 +75,11 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 // Expected focus tracking to prevent race conditions
 @property (nonatomic, assign) xcb_window_t expectedFocusWindow;
 @property (nonatomic, assign) xcb_timestamp_t expectedFocusTimestamp;
+
+// Edge snap detection state
+@property (nonatomic, assign) SnapZone pendingSnapZone;
+@property (nonatomic, assign) xcb_timestamp_t snapZoneEntryTime;
+@property (nonatomic, assign) BOOL snapPreviewShown;
 
 + (XCBConnection *) sharedConnectionAsWindowManager:(BOOL)asWindowManager;
 - (xcb_connection_t *) connection;
@@ -159,6 +169,8 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void)tileActiveWindowLeft;
 - (void)tileActiveWindowRight;
 - (void)tileActiveWindowToZone:(SnapZone)zone;
+- (void)showSnapPreviewForZone:(SnapZone)zone frame:(XCBFrame *)frame;
+- (void)hideSnapPreview;
 - (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame;
 
 @end
