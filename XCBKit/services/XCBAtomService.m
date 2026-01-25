@@ -92,16 +92,33 @@
 
 - (NSString*) atomNameFromAtom:(xcb_atom_t)anAtom
 {
+    if (anAtom == XCB_ATOM_NONE) {
+        return @"NONE";
+    }
+
     xcb_get_atom_name_cookie_t cookie = xcb_get_atom_name([connection connection], anAtom);
     xcb_get_atom_name_reply_t *reply = xcb_get_atom_name_reply([connection connection], cookie, NULL);
+
+    if (!reply) {
+        NSLog(@"[XCBAtomService] Failed to get atom name for atom id: %u", anAtom);
+        return nil;
+    }
+
     int length = xcb_get_atom_name_name_length(reply);
 
-    if (length == 0)
+    if (length == 0) {
+        free(reply);
         return @"No atom name!";
+    }
 
     char* n = xcb_get_atom_name_name(reply);
-    NSString *name = [NSString stringWithUTF8String:n];
+    // Create a properly null-terminated copy
+    char *nameCopy = malloc(length + 1);
+    memcpy(nameCopy, n, length);
+    nameCopy[length] = '\0';
 
+    NSString *name = [NSString stringWithUTF8String:nameCopy];
+    free(nameCopy);
     free(reply);
     return name;
 }
