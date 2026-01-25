@@ -354,8 +354,8 @@ static const CGFloat kSelectionPadding = 6.0;
     if (windowWidth > 800) {
         windowWidth = 800;
     }
-    if (windowWidth < 200) {
-        windowWidth = 200;
+    if (windowWidth < 400) {
+        windowWidth = 400;
     }
     
     // Update window frame, keeping centered

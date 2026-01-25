@@ -33,6 +33,10 @@
 @property (assign, nonatomic) BOOL nsRunLoopActive;
 @property (assign, nonatomic) NSUInteger eventCount;
 
+// Focus tracking to ensure a focused window exists
+@property (assign, nonatomic) xcb_window_t lastFocusedWindowId;
+@property (assign, nonatomic) xcb_window_t previousFocusedWindowId;
+
 // Window Switcher (Alt-Tab)
 @property (strong, nonatomic) URSWindowSwitcher* windowSwitcher;
 @property (assign, nonatomic) BOOL altKeyPressed;
