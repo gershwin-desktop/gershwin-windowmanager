@@ -20,6 +20,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSHybridEventHandler.m \
 		URSWindowSwitcher.m \
 		URSWindowSwitcherOverlay.m \
+		URSSnapPreviewOverlay.m \
 		URSCompositingManager.m \
 		URSRenderingContext.m \
 		UROSWMApplication.m \
@@ -30,6 +31,7 @@ $(APP_NAME)_HEADER_FILES = \
 		URSHybridEventHandler.h \
 		URSWindowSwitcher.h \
 		URSWindowSwitcherOverlay.h \
+		URSSnapPreviewOverlay.h \
 		URSCompositingManager.h \
 		URSRenderingContext.h \
 		UROSWMApplication.h \
