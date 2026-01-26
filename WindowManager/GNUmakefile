@@ -9,7 +9,7 @@ VERSION = 0.1.0
 DEPENDENCIES = XCBKit
 
 .PHONY: XCBKit
-all: XCBKit
+all:: XCBKit
 
 XCBKit:
 	$(MAKE) -C ../XCBKit -f GNUmakefile

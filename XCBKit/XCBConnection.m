@@ -805,6 +805,53 @@ static XCBConnection *sharedInstance;
         else
         {
             NSLog(@"[MapRequest] Window has no frame parent, mapping directly");
+            // No frame, consider applying golden ratio if it would otherwise be
+            // placed at the bottom-left (GNUstep default origin).
+            XCBRect winRect = [window windowRect];
+            int16_t reqX = winRect.position.x;
+            int16_t reqY = winRect.position.y;
+            uint16_t reqW = winRect.size.width;
+            uint16_t reqH = winRect.size.height;
+
+            XCBScreen *screenObj = nil;
+            xcb_screen_t *screen = NULL;
+            if ([[self screens] count] > 0) {
+                screenObj = [[self screens] objectAtIndex:0];
+                screen = [screenObj screen];
+            }
+
+            if (screen) {
+                int16_t screenHeight = screen->height_in_pixels;
+                int16_t screenWidth = screen->width_in_pixels;
+
+                // Candidate for bottom-left default: near left edge and near bottom
+                if (reqX < 64 && abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100 && reqW < screenWidth) {
+                    xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
+                    if (hints) {
+                        // Respect user specified position (USPosition). If not present, apply golden ratio.
+                        if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
+                            int16_t xPos = (screenWidth - reqW) / 2;
+                            int16_t yPos = (screenHeight - reqH) * 0.381966; // Golden ratio from top
+                            XCBRect newRect = winRect;
+                            newRect.position.x = xPos;
+                            newRect.position.y = yPos;
+                            [window setWindowRect:newRect];
+                            NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
+                        }
+                        free(hints);
+                    } else {
+                        // No hints: assume default -> apply golden ratio
+                        int16_t xPos = (screenWidth - reqW) / 2;
+                        int16_t yPos = (screenHeight - reqH) * 0.381966; // Golden ratio from top
+                        XCBRect newRect = winRect;
+                        newRect.position.x = xPos;
+                        newRect.position.y = yPos;
+                        [window setWindowRect:newRect];
+                        NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
+                    }
+                }
+            }
+
             // No frame, just map the window
             [self mapWindow:window];
         }
@@ -1099,35 +1146,56 @@ static XCBConnection *sharedInstance;
     uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
     // Determine if we should use golden ratio placement.
-    // We use it if the application hasn't explicitly specified a position (i.e. x=0, y=0).
-    // If it's at (0,0), we check ICCCM hints to see if this was intentional.
+    // We use it if the application hasn't explicitly specified a position.
+    // We consider (0,0) (top-left) and the GNUstep default (bottom-left) as candidates.
+    // If it's at one of these defaults, we check ICCCM hints to see if this was intentional.
     // Also, if the window has full screen width (like the Menu bar), don't move it.
     BOOL useGoldenRatio = NO;
-    if ([window windowRect].position.x == 0 && [window windowRect].position.y == 0) {
+    
+    int16_t reqX = [window windowRect].position.x;
+    int16_t reqY = [window windowRect].position.y;
+    uint16_t reqW = [window windowRect].size.width;
+    uint16_t reqH = [window windowRect].size.height;
+    
+    BOOL isAtDefaultPos = NO;
+    if (screen) {
+        int16_t screenHeight = [screen screen]->height_in_pixels;
+        // Case 1: Near top (X11 style default, typically 0,0 but could be centered at y=0)
+        if (reqY < 64) {
+            isAtDefaultPos = YES;
+        } 
+        // Case 2: Near bottom (GNUstep style default, origin 0 is bottom)
+        else if (abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100) {
+            isAtDefaultPos = YES;
+        }
+    }
+
+    if (isAtDefaultPos) {
         BOOL isFullWidth = NO;
-        if (screen && [window windowRect].size.width >= [screen screen]->width_in_pixels) {
+        if (screen && reqW >= [screen screen]->width_in_pixels) {
             isFullWidth = YES;
         }
 
         if (!isFullWidth) {
             xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
             if (hints) {
-                if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION) && 
-                    !(hints->flags & XCB_ICCCM_SIZE_HINT_P_POSITION)) {
+                // We respect USPosition (user specified). 
+                // We override PPosition (program specified) if it matches a default coordinate.
+                if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
                     useGoldenRatio = YES;
                 }
                 free(hints);
             } else {
-                // No hints at all, assume (0,0) is just the default and apply golden ratio
+                // No hints at all, assume the position is the default and apply golden ratio
                 useGoldenRatio = YES;
             }
         }
     }
 
-    int16_t xPos = [window windowRect].position.x;
-    int16_t yPos = [window windowRect].position.y;
-    uint16_t winWidth = [window windowRect].size.width;
-    uint16_t winHeight = [window windowRect].size.height + titleHeight;
+    int16_t xPos = reqX;
+    int16_t yPos = reqY;
+    uint16_t winWidth = reqW;
+    uint16_t winHeight = reqH + titleHeight;
 
     NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
