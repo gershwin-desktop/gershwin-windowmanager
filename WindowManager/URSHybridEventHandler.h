@@ -49,6 +49,9 @@
 // ICCCM/EWMH Strut and Workarea Tracking
 @property (strong, nonatomic) NSMutableDictionary* windowStruts; // Maps window ID to strut data
 
+// Auto-focus tracking to prevent double-focusing windows
+@property (strong, nonatomic) NSMutableSet* recentlyAutoFocusedWindowIds;
+
 // Original URSEventHandler methods (preserved for compatibility)
 - (BOOL)registerAsWindowManager;
 - (void)decorateExistingWindowsOnStartup;

@@ -41,6 +41,7 @@
 @synthesize compositingManager;
 @synthesize compositingRequested;
 @synthesize windowStruts;
+@synthesize recentlyAutoFocusedWindowIds;
 
 #pragma mark - Initialization
 
@@ -70,6 +71,9 @@
     
     // Initialize strut tracking dictionary
     self.windowStruts = [[NSMutableDictionary alloc] init];
+    
+    // Initialize set to track recently auto-focused windows (to prevent double-focus)
+    self.recentlyAutoFocusedWindowIds = [[NSMutableSet alloc] init];
     
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -621,6 +625,16 @@
 
             // Apply GSTheme immediately with no delay
             [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:mapRequestEvent->window]];
+
+            // Fallback: Try to focus the client window if it's focusable but GSTheme wasn't applied
+            // This ensures dialogs, alerts, sheets and other special windows get focused too
+            XCBWindow *clientWindow = [connection windowForXCBId:mapRequestEvent->window];
+            if (clientWindow && [self isWindowFocusable:clientWindow allowDesktop:NO]) {
+                // Schedule focus after a brief delay to ensure the window is fully set up
+                [self performSelector:@selector(focusWindowAfterThemeApplied:)
+                           withObject:clientWindow
+                           afterDelay:0.1];
+            }
             break;
         }
         case XCB_UNMAP_NOTIFY: {
@@ -1287,6 +1301,12 @@
                                 [self.compositingManager updateWindow:[frame window]];
                             }
 
+                            // Auto-focus the client window - the frame and titlebar are now fully set up
+                            // Focus after a small delay to ensure the window is properly rendered and ready
+                            [self performSelector:@selector(focusWindowAfterThemeApplied:)
+                                       withObject:clientWindow
+                                       afterDelay:0.1];
+
                             // Apply GSTheme again after a short delay to override any subsequent XCBKit drawing
                             [self performSelector:@selector(reapplyGSThemeToTitlebar:)
                                        withObject:titlebar
@@ -1298,6 +1318,19 @@
                         return; // Found and processed
                     }
                 }
+            }
+        }
+
+        // If we couldn't find a frame, the window may be undecorated (dialogs, alerts, sheets).
+        // Attempt a direct focus on the client window as a fallback.
+        XCBWindow *directWindow = [self.connection windowForXCBId:windowId];
+        if (directWindow) {
+            NSLog(@"[Focus] No frame found for %u; attempting direct focus on window %u", windowId, [directWindow window]);
+            if ([self isWindowFocusable:directWindow allowDesktop:NO]) {
+                [self performSelector:@selector(focusWindowAfterThemeApplied:)
+                           withObject:directWindow
+                           afterDelay:0.1];
+                return;
             }
         }
 
@@ -2711,6 +2744,16 @@
         return NO;
     }
 
+    BOOL isOtherNonFocusType = [windowType isEqualToString:[ewmhService EWMHWMWindowTypeTooltip]] ||
+                               [windowType isEqualToString:[ewmhService EWMHWMWindowTypeNotification]] ||
+                               [windowType isEqualToString:[ewmhService EWMHWMWindowTypeDock]] ||
+                               [windowType isEqualToString:[ewmhService EWMHWMWindowTypeToolbar]] ||
+                               [windowType isEqualToString:[ewmhService EWMHWMWindowTypeSplash]];
+
+    if (isOtherNonFocusType) {
+        return NO;
+    }
+
     BOOL isDesktopWindow = [windowType isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]];
     if (isDesktopWindow && !allowDesktop) {
         return NO;
@@ -2992,6 +3035,41 @@
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 
     // ARC handles memory management automatically
+}
+
+- (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow
+{
+    if (!clientWindow) {
+        return;
+    }
+    
+    xcb_window_t windowId = [clientWindow window];
+    NSNumber *windowIdNum = [NSNumber numberWithUnsignedInt:windowId];
+    
+    // Check if we already focused this window recently (prevent double-focus)
+    if ([self.recentlyAutoFocusedWindowIds containsObject:windowIdNum]) {
+        NSLog(@"[Focus] Window %u already auto-focused recently, skipping", windowId);
+        return;
+    }
+    
+    NSLog(@"[Focus] Focusing window %u after theme applied", windowId);
+    if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
+        [clientWindow focus];
+        [self.recentlyAutoFocusedWindowIds addObject:windowIdNum];
+        NSLog(@"[Focus] Successfully focused window %u", windowId);
+        
+        // Remove from set after 1 second to allow the window to be focused again if needed
+        [self performSelector:@selector(removeWindowFromRecentlyFocused:)
+                   withObject:windowIdNum
+                   afterDelay:1.0];
+    } else {
+        NSLog(@"[Focus] Window %u is not focusable", windowId);
+    }
+}
+
+- (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum
+{
+    [self.recentlyAutoFocusedWindowIds removeObject:windowIdNum];
 }
 
 @end

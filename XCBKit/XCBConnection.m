@@ -1684,8 +1684,6 @@ static XCBConnection *sharedInstance;
         }
 
         XCBScreen *screen = [frame onScreen];
-        TitleBarSettingsService *settingsService = [TitleBarSettingsService sharedInstance];
-        uint16_t titleHgt = [settingsService heightDefined] ? [settingsService height] : [settingsService defaultHeight];
 
         // Read workarea from root window to respect struts (e.g., menu bar)
         EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
@@ -1756,7 +1754,6 @@ static XCBConnection *sharedInstance;
         window = nil;
         frame = nil;
         clientWindow = nil;
-        settingsService = nil;
         titleBar = nil;
         return;
     }
