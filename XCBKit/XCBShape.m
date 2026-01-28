@@ -165,13 +165,20 @@
 {
     xcb_connection_t *conn = [connection connection];
 
+    NSLog(@"XCBShape: Creating rounded corners with topRadius=%d, bottomRadius=%d", topRadius, bottomRadius);
+    NSLog(@"XCBShape: Window dimensions: width=%d, height=%d, orWidth=%d, orHeight=%d, borderWidth=%d",
+          width, height, orWidth, orHeight, borderWidth);
+
     // Clear pixmap to black (transparent)
     xcb_rectangle_t bounding = {0, 0, orWidth, orHeight};
     xcb_poly_fill_rectangle(conn, borderPixmap, black, 1, &bounding);
 
     // Build rectangles for the straight edges
-    int topDiameter = topRadius * 2;
-    int bottomDiameter = bottomRadius * 2;
+    // Note: diameter is (radius * 2) to match createTopArcsWithRadius
+    int topDiameter = (topRadius > 0) ? (topRadius * 2) : 0;
+    int bottomDiameter = (bottomRadius > 0) ? (bottomRadius * 2) : 0;
+
+    NSLog(@"XCBShape: Calculated diameters: topDiameter=%d, bottomDiameter=%d", topDiameter, bottomDiameter);
 
     // Center strip (between left and right corners)
     int leftEdge = (topRadius > bottomRadius) ? topRadius : bottomRadius;
