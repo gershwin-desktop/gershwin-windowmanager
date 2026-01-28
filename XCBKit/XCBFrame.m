@@ -15,6 +15,12 @@
 #import <AppKit/NSScroller.h>
 #import <GNUstepGUI/GSTheme.h>
 
+// Protocol for compositor manager to check if compositing is active
+@protocol URSCompositingManaging <NSObject>
++ (instancetype)sharedManager;
+- (BOOL)compositingActive;
+@end
+
 // Informal protocol for theme-driven resize zones
 // Themes implementing these methods enable the resize zone protocol
 @interface NSObject (GSThemeResizeZones)
@@ -56,6 +62,32 @@ static void sendSyntheticConfigureNotify(xcb_connection_t *conn,
 
     xcb_send_event(conn, 0, [clientWindow window],
                    XCB_EVENT_MASK_STRUCTURE_NOTIFY, (const char *)&event);
+}
+
+// Find 32-bit ARGB visual for alpha transparency support
+// Returns visual ID and fills in visualType if found
+static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **outVisualType) {
+    if (!screen) return 0;
+
+    xcb_depth_iterator_t depth_iter = xcb_screen_allowed_depths_iterator(screen);
+
+    for (; depth_iter.rem; xcb_depth_next(&depth_iter)) {
+        if (depth_iter.data->depth != 32) continue;
+
+        xcb_visualtype_iterator_t visual_iter = xcb_depth_visuals_iterator(depth_iter.data);
+
+        for (; visual_iter.rem; xcb_visualtype_next(&visual_iter)) {
+            xcb_visualtype_t *visual = visual_iter.data;
+
+            // Look for TrueColor with 8-bit alpha channel
+            if (visual->_class == XCB_VISUAL_CLASS_TRUE_COLOR) {
+                if (outVisualType) *outVisualType = visual;
+                return visual->visual_id;
+            }
+        }
+    }
+
+    return 0;
 }
 
 @implementation XCBFrame
@@ -174,18 +206,64 @@ static void sendSyntheticConfigureNotify(xcb_connection_t *conn,
     XCBVisual *rootVisual = [[XCBVisual alloc] initWithVisualId:[scr screen]->root_visual];
     [rootVisual setVisualTypeForScreen:scr];
 
-    uint32_t values[2];
+    // Check if compositor is active for ARGB alpha transparency support
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    BOOL compositorActive = NO;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        id manager = [compositorClass sharedManager];
+        if ([manager respondsToSelector:@selector(compositingActive)]) {
+            compositorActive = [manager compositingActive];
+        }
+    }
+
+    uint32_t values[4];  // May need up to 4 values for ARGB (back_pixel, colormap, border_pixel, event_mask)
     uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
+    uint8_t depth = XCB_COPY_FROM_PARENT;
+    XCBVisual *titlebarVisual = rootVisual;
+    xcb_colormap_t argbColormap = XCB_NONE;
 
     values[0] = [scr screen]->white_pixel;
     values[1] = TITLE_MASK_VALUES;
+
+    // If compositor is active, try to use 32-bit ARGB visual for alpha transparency
+    if (compositorActive) {
+        xcb_visualtype_t *argbVisualType = NULL;
+        xcb_visualid_t argbVisualId = findARGBVisual([scr screen], &argbVisualType);
+
+        if (argbVisualId != 0 && argbVisualType != NULL) {
+            NSLog(@"[XCBFrame] Creating titlebar with 32-bit ARGB visual (0x%x) for compositor alpha", argbVisualId);
+
+            // Create colormap for ARGB visual (required for 32-bit windows)
+            argbColormap = xcb_generate_id([connection connection]);
+            xcb_create_colormap([connection connection],
+                               XCB_COLORMAP_ALLOC_NONE,
+                               argbColormap,
+                               [scr screen]->root,
+                               argbVisualId);
+
+            // Set up ARGB visual
+            titlebarVisual = [[XCBVisual alloc] initWithVisualId:argbVisualId];
+            [titlebarVisual setVisualType:argbVisualType];
+            depth = 32;
+
+            // For 32-bit windows: back_pixel, border_pixel, event_mask, colormap
+            // XCB_CW values must be in ascending bit order: 2, 8, 2048, 8192
+            mask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_EVENT_MASK | XCB_CW_COLORMAP;
+            values[0] = 0;  // back_pixel = transparent black
+            values[1] = 0;  // border_pixel = transparent
+            values[2] = TITLE_MASK_VALUES;  // event_mask
+            values[3] = argbColormap;  // colormap
+        } else {
+            NSLog(@"[XCBFrame] No ARGB visual found, using standard 24-bit titlebar");
+        }
+    }
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
 
     uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
     XCBCreateWindowTypeRequest* request = [[XCBCreateWindowTypeRequest alloc] initForWindowType:XCBTitleBarRequest];
-    [request setDepth:XCB_COPY_FROM_PARENT];
+    [request setDepth:depth];
     [request setParentWindow:self];
     [request setXPosition:0];
     [request setYPosition:0];
@@ -193,12 +271,19 @@ static void sendSyntheticConfigureNotify(xcb_connection_t *conn,
     [request setHeight:height];
     [request setBorderWidth:0];
     [request setXcbClass:XCB_WINDOW_CLASS_INPUT_OUTPUT];
-    [request setVisual:rootVisual];
+    [request setVisual:titlebarVisual];
     [request setValueMask:mask];
     [request setValueList:values];
 
     XCBWindowTypeResponse* response = [[super connection] createWindowForRequest:request registerWindow:YES];
     XCBTitleBar *titleBar = [response titleBar];
+
+    // If using ARGB visual, configure titlebar for 32-bit pixmaps
+    if (depth == 32 && argbColormap != XCB_NONE) {
+        [titleBar setUse32BitDepth:YES];
+        [titleBar setArgbVisualId:[titlebarVisual visualId]];
+        NSLog(@"[XCBFrame] Configured titlebar for 32-bit ARGB pixmaps");
+    }
 
     [self addChildWindow:titleBar withKey:TitleBar];
 
@@ -680,11 +765,17 @@ static void sendSyntheticConfigureNotify(xcb_connection_t *conn,
 
     if ([theme respondsToSelector:@selector(titlebarCornerRadius)]) {
         topRadius = [theme titlebarCornerRadius];
+        NSLog(@"XCBFrame: Theme titlebarCornerRadius = %.1f", topRadius);
+    } else {
+        NSLog(@"XCBFrame: Theme does NOT respond to titlebarCornerRadius selector");
     }
 
     if ([theme respondsToSelector:@selector(windowBottomCornerRadius)]) {
         bottomRadius = [theme windowBottomCornerRadius];
     }
+
+    NSLog(@"XCBFrame: Applying rounded corners - top=%.1f, bottom=%.1f for window %u",
+          topRadius, bottomRadius, window);
 
     if (topRadius > 0 || bottomRadius > 0) {
         XCBShape *shape = [[XCBShape alloc] initWithConnection:connection withWinId:window];
@@ -693,6 +784,7 @@ static void sendSyntheticConfigureNotify(xcb_connection_t *conn,
             [shape calculateDimensionsFromGeometries:geometry];
             [shape createPixmapsAndGCs];
             [shape createRoundedCornersWithTopRadius:(int)topRadius bottomRadius:(int)bottomRadius];
+            NSLog(@"XCBFrame: Shape mask applied with topRadius=%d", (int)topRadius);
         }
     }
 }
