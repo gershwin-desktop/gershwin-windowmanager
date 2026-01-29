@@ -793,6 +793,21 @@
             if (above)
                 [aWindow stackAbove];
 
+            /* Ensure dock windows remain above normal windows: when a non-dock window
+               is requested to be above, re-raise any registered dock windows so they
+               stay on top of the stack. */
+            if (above && ![self isWindowTypeDock:aWindow]) {
+                // Iterate known clients and re-raise dock windows
+                uint32_t size = [connection clientListIndex];
+                for (uint32_t i = 0; i < size; i++) {
+                    xcb_window_t winId = [connection clientList][i];
+                    XCBWindow *w = [connection windowForXCBId:winId];
+                    if (w && [self isWindowTypeDock:w]) {
+                        [w stackAbove];
+                    }
+                }
+            }
+
             [self updateNetWmState:aWindow];
         }
 

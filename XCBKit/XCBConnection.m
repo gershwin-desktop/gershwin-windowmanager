@@ -1359,6 +1359,19 @@ static XCBConnection *sharedInstance;
 
         /*** necessary? ***/
 
+        /* Re-assert windows that requested _NET_WM_STATE_ABOVE (or were stacked above)
+           to prevent them being hidden by subsequent raises of normal windows. */
+        if (anEvent->value_mask & XCB_CONFIG_WINDOW_STACK_MODE) {
+            uint32_t size = [self clientListIndex];
+            for (uint32_t i = 0; i < size; i++) {
+                xcb_window_t winId = [self clientList][i];
+                XCBWindow *cw = [self windowForXCBId: winId];
+                if (cw && [cw isAbove]) {
+                    [cw stackAbove];
+                }
+            }
+        }
+
         xcb_configure_notify_event_t event;
 
         event.event = anEvent->window;
