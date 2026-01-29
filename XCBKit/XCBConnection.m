@@ -45,6 +45,32 @@
                         duration:(NSTimeInterval)duration;
 @end
 
+// Find 32-bit ARGB visual for alpha transparency support
+// Returns visual ID and fills in visualType if found
+static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **outVisualType) {
+    if (!screen) return 0;
+
+    xcb_depth_iterator_t depth_iter = xcb_screen_allowed_depths_iterator(screen);
+
+    for (; depth_iter.rem; xcb_depth_next(&depth_iter)) {
+        if (depth_iter.data->depth != 32) continue;
+
+        xcb_visualtype_iterator_t visual_iter = xcb_depth_visuals_iterator(depth_iter.data);
+
+        for (; visual_iter.rem; xcb_visualtype_next(&visual_iter)) {
+            xcb_visualtype_t *visual = visual_iter.data;
+
+            // Look for TrueColor with 8-bit alpha channel
+            if (visual->_class == XCB_VISUAL_CLASS_TRUE_COLOR) {
+                if (outVisualType) *outVisualType = visual;
+                return visual->visual_id;
+            }
+        }
+    }
+
+    return 0;
+}
+
 @implementation XCBConnection
 
 @synthesize dragState;
@@ -1135,13 +1161,71 @@ static XCBConnection *sharedInstance;
         screen = [screens objectAtIndex:0];
     }
     
+    // Check if compositor is active for ARGB alpha transparency support
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    BOOL compositorActive = NO;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        id manager = [compositorClass sharedManager];
+        if ([manager respondsToSelector:@selector(compositingActive)]) {
+            compositorActive = [manager compositingActive];
+        }
+    }
+
     XCBVisual *visual = nil;
+    uint32_t values[4];  // May need up to 4 values for ARGB (back_pixel, border_pixel, colormap, event_mask)
+    uint32_t valueMask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
+    uint8_t depth = 0;  // 0 = use root_depth
+    xcb_colormap_t argbColormap = XCB_NONE;
+    xcb_visualid_t argbVisualId = 0;
+
     if (screen) {
         visual = [[XCBVisual alloc] initWithVisualId:[screen screen]->root_visual];
         [visual setVisualTypeForScreen:screen];
+        depth = [screen screen]->root_depth;
+
+        // If compositor is active, try to use 32-bit ARGB visual for alpha transparency
+        if (compositorActive) {
+            xcb_visualtype_t *argbVisualType = NULL;
+            argbVisualId = findARGBVisual([screen screen], &argbVisualType);
+
+            if (argbVisualId != 0 && argbVisualType != NULL) {
+                NSLog(@"[XCBConnection] Creating frame with 32-bit ARGB visual (0x%x) for compositor alpha", argbVisualId);
+
+                // Create colormap for ARGB visual (required for 32-bit windows)
+                argbColormap = xcb_generate_id(connection);
+                xcb_create_colormap(connection,
+                                   XCB_COLORMAP_ALLOC_NONE,
+                                   argbColormap,
+                                   [screen screen]->root,
+                                   argbVisualId);
+
+                // Set up ARGB visual
+                visual = [[XCBVisual alloc] initWithVisualId:argbVisualId];
+                [visual setVisualType:argbVisualType];
+                depth = 32;
+
+                // For 32-bit windows: back_pixel, border_pixel, event_mask, colormap
+                // XCB_CW values must be in ascending bit order: 2, 8, 2048, 8192
+                valueMask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_EVENT_MASK | XCB_CW_COLORMAP;
+                values[0] = 0;  // back_pixel = transparent black
+                values[1] = 0;  // border_pixel = transparent
+                values[2] = FRAMEMASK;  // event_mask
+                values[3] = argbColormap;  // colormap
+            } else {
+                NSLog(@"[XCBConnection] No ARGB visual found, using standard 24-bit frame");
+                values[0] = [screen screen]->white_pixel;
+                values[1] = FRAMEMASK;
+            }
+        } else {
+            // Non-compositor mode: use white background
+            values[0] = [screen screen]->white_pixel;
+            values[1] = FRAMEMASK;
+        }
+    } else {
+        values[0] = 0;
+        values[1] = FRAMEMASK;
     }
 
-    uint32_t values[] = { (screen ? [screen screen]->white_pixel : 0), /*XCB_BACKING_STORE_WHEN_MAPPED,*/ FRAMEMASK};
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
@@ -1216,7 +1300,7 @@ static XCBConnection *sharedInstance;
     }
 
     XCBCreateWindowTypeRequest *request = [[XCBCreateWindowTypeRequest alloc] initForWindowType:XCBFrameRequest];
-    [request setDepth:(screen ? [screen screen]->root_depth : 24)];
+    [request setDepth:(depth > 0 ? depth : 24)];
     [request setParentWindow:(screen ? [screen rootWindow] : 0)];
     [request setXPosition:xPos];
     [request setYPosition:yPos];
@@ -1225,14 +1309,21 @@ static XCBConnection *sharedInstance;
     [request setBorderWidth:0];
     [request setXcbClass:XCB_WINDOW_CLASS_INPUT_OUTPUT];
     [request setVisual:visual];
-    [request setValueMask:XCB_CW_BACK_PIXEL /*| XCB_CW_BACKING_STORE*/ | XCB_CW_EVENT_MASK];
+    [request setValueMask:valueMask];
     [request setValueList:values];
     [request setClientWindow:window];
 
     XCBWindowTypeResponse *response = [self createWindowForRequest:request registerWindow:YES];
-    
+
     XCBFrame *frame = [response frame];
-    
+
+    // If using ARGB visual, configure frame for 32-bit rendering
+    if (depth == 32 && argbColormap != XCB_NONE) {
+        [frame setUse32BitDepth:YES];
+        [frame setArgbVisualId:argbVisualId];
+        NSLog(@"[XCBConnection] Configured frame for 32-bit ARGB rendering");
+    }
+
     // Ensure icccmService is valid
     if (icccmService == nil) {
         icccmService = [ICCCMService sharedInstanceWithConnection:self];

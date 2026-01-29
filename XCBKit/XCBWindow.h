@@ -111,6 +111,9 @@ typedef NS_ENUM(NSInteger, WindowState)
 
 @property (nonatomic, assign) u_int32_t pid;
 
+// ARGB visual support for compositor alpha transparency
+@property (nonatomic, assign) BOOL use32BitDepth;           // Use 32-bit depth for pixmaps (compositor mode)
+@property (nonatomic, assign) xcb_visualid_t argbVisualId;  // 32-bit ARGB visual ID (0 = not set)
 
 - (xcb_window_t) window;
 - (void) setWindow:(xcb_window_t) aWindow;

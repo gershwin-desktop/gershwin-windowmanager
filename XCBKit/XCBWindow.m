@@ -76,6 +76,8 @@
 @synthesize gotAttention;
 @synthesize alwaysOnTop;
 @synthesize pid;
+@synthesize use32BitDepth;
+@synthesize argbVisualId;
 
 
 - (id)initWithXCBWindow:(xcb_window_t)aWindow
@@ -355,17 +357,27 @@
         return;
     }
 
+    // ARGB support: Use 32-bit depth when compositor mode requires alpha transparency
+    // The caller must set use32BitDepth=YES and argbVisualId before calling createPixmap
+    xcb_drawable_t drawable = window;
+    if (use32BitDepth && argbVisualId != 0) {
+        depth = 32;
+        // Use the window itself as drawable since it's already 32-bit ARGB
+        // The drawable parameter only determines the screen association
+        NSLog(@"[XCBWindow:createPixmap] Using 32-bit ARGB depth for compositor alpha (visual: 0x%x)", argbVisualId);
+    }
+
     xcb_create_pixmap([connection connection],
                       depth,
                       pixmap,
-                      window,
+                      drawable,
                       windowRect.size.width,
                       windowRect.size.height);
 
     xcb_create_pixmap([connection connection],
                       depth,
                       dPixmap,
-                      window,
+                      drawable,
                       windowRect.size.width,
                       windowRect.size.height);
 
@@ -406,7 +418,11 @@
 
 - (void) drawArea:(XCBRect)aRect
 {
-    [self clearArea:aRect generatesExposure:NO];
+    // Skip clearArea in compositor mode - transparent pixmap content should not be
+    // overwritten by window background. The xcb_copy_area will replace all pixels.
+    if (!use32BitDepth) {
+        [self clearArea:aRect generatesExposure:NO];
+    }
     xcb_copy_area([connection connection],
                   isAbove ? pixmap : dPixmap,
                   window,
