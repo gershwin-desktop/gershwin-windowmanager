@@ -816,10 +816,7 @@
             XCBPoint position;
             XCBFrame *frame;
             XCBTitleBar *titleBar;
-            TitleBarSettingsService *settingsService = [TitleBarSettingsService sharedInstance];
 
-            uint16_t titleHgt = [settingsService heightDefined] ? [settingsService height] : [settingsService defaultHeight];
-            
             // Read workarea to respect struts
             int32_t workareaX = 0, workareaY = 0;
             uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
@@ -876,7 +873,6 @@
             }
 
             [self updateNetWmState:aWindow];
-            settingsService = nil;
         }
 
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateMaximizedVert] ||
@@ -888,10 +884,7 @@
             XCBPoint position;
             XCBFrame *frame;
             XCBTitleBar *titleBar;
-            TitleBarSettingsService *settingsService = [TitleBarSettingsService sharedInstance];
 
-            uint16_t titleHgt = [settingsService heightDefined] ? [settingsService height] : [settingsService defaultHeight];
-            
             // Read workarea to respect struts
             int32_t workareaX = 0, workareaY = 0;
             uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
@@ -948,24 +941,18 @@
             }
 
             [self updateNetWmState:aWindow];
-            settingsService = nil;
         }
-
-        /***TODO: test it ***/
 
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateFullscreen] ||
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateFullscreen])
         {
             BOOL fullscr = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow isMaximized]);
             XCBScreen *screen = [aWindow screen];
-            TitleBarSettingsService *settingsService = [TitleBarSettingsService sharedInstance];
             XCBFrame *frame;
             XCBTitleBar *titleBar;
             XCBSize size;
             XCBPoint position;
 
-            uint16_t titleHgt = [settingsService heightDefined] ? [settingsService height] : [settingsService defaultHeight];
-            
             // Read workarea to respect struts (fullscreen should also respect workarea)
             int32_t workareaX = 0, workareaY = 0;
             uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
@@ -1025,7 +1012,6 @@
             }
 
             [self updateNetWmState:aWindow];
-            settingsService = nil;
         }
 
         /*** TODO: test and complete it, but shading support has really low priority ***/

@@ -96,13 +96,11 @@ static void sendSyntheticConfigureNotify(xcb_connection_t *conn,
     [self setMinWidthHint:sizeHints->min_width];
 
     // Respect ICCCM WM_NORMAL_HINTS: if min == max for both dimensions, treat as non-resizable
-    BOOL fixedSizeWindow = NO;
     if ((sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
         (sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MAX_SIZE) &&
         sizeHints->min_width == sizeHints->max_width &&
         sizeHints->min_height == sizeHints->max_height)
     {
-        fixedSizeWindow = YES;
         NSLog(@"[XCBFrame] Detected fixed-size (non-resizable) client window %u (min==max)", [aClientWindow window]);
         // Disable resizing for the client window so WM won't offer resize handles etc.
         [aClientWindow setCanResize:NO];
@@ -1075,12 +1073,12 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
         // When hitting minimum height, maintain the bottom edge position
         // Calculate the correct top position to preserve bottom edge
         int bottomEdge = rect.position.y + rect.size.height;
-        int newY = bottomEdge - (minH + titleBarHeight + 2);  // +2 for top and bottom borders
+        int newY = bottomEdge - (minH + titleBarHeight);
 
-        rect.size.height = minH + titleBarHeight + 2;  // +2 for borders
+        rect.size.height = minH + titleBarHeight;
         rect.position.y = newY;
         clientRect.size.height = minH;
-        clientRect.position.y = 1 + titleBarHeight;  // Inside top border + titlebar
+        clientRect.position.y = titleBarHeight;
 
         values[0] = clientRect.position.y;
         values[1] = clientRect.size.height;
@@ -1115,14 +1113,14 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
 
     rect.position.y = values[0];
     rect.size.height = values[1];
-    values[0] = 1;  // Inside top border
+    values[0] = 0;
 
     xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_Y, &values);
 
     titleBarRect.position.y = values[0];
 
-    values[0] = 1 + titleBarHeight;  // Inside top border + titlebar height
-    values[1] = rect.size.height - titleBarHeight;  // Subtract titlebar height only
+    values[0] = titleBarHeight;
+    values[1] = rect.size.height - titleBarHeight;
 
     xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_HEIGHT, &values);
     clientRect.size.height = values[1];
@@ -1341,7 +1339,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     // Calculate child window dimensions (same as manual resize functions)
     XCBRect titleBarRect = XCBMakeRect(XCBMakePoint(0, 0),
                                         XCBMakeSize(targetRect.size.width, titleHgt));
-    XCBRect clientRect = XCBMakeRect(XCBMakePoint(0, titleHgt - 1),
+    XCBRect clientRect = XCBMakeRect(XCBMakePoint(0, titleHgt),
                                       XCBMakeSize(targetRect.size.width,
                                                    targetRect.size.height - titleHgt));
 
