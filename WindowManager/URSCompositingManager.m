@@ -25,9 +25,9 @@
 
 // Shadow configuration
 #define SHADOW_RADIUS 12
-#define SHADOW_OFFSET_X -10
+#define SHADOW_OFFSET_X -18
 #define SHADOW_OFFSET_Y -10
-#define SHADOW_OPACITY 0.66
+#define SHADOW_OPACITY 0.40
 
 // Per-window compositing data
 @interface URSCompositeWindow : NSObject
@@ -41,6 +41,7 @@
 @property (assign, nonatomic) BOOL damaged;
 @property (assign, nonatomic) BOOL viewable;
 @property (assign, nonatomic) BOOL redirected;
+@property (assign, nonatomic) BOOL overrideRedirect;
 // OPTIMIZATION: Lazy picture creation - defer until first paint
 @property (assign, nonatomic) BOOL pictureValid;
 @property (assign, nonatomic) BOOL needsPictureCreation;
@@ -83,6 +84,7 @@
         _damaged = NO;
         _viewable = NO;
         _redirected = YES;
+        _overrideRedirect = NO;
         // OPTIMIZATION: Lazy picture creation
         _pictureValid = NO;
         _needsPictureCreation = YES;
@@ -830,13 +832,6 @@
         return;
     }
     
-    // Skip override-redirect windows (menus, tooltips, selection rectangles, etc.)
-    // These are temporary UI elements that should not be composited
-    if (attr->override_redirect) {
-        free(attr);
-        return;
-    }
-    
     // Get geometry
     xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(conn, windowId);
     xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(conn, geom_cookie, NULL);
@@ -857,6 +852,7 @@
     cw.visual = attr->visual;
     cw.viewable = (attr->map_state == XCB_MAP_STATE_VIEWABLE);
     cw.redirected = YES;
+    cw.overrideRedirect = attr->override_redirect;
 
     // Track parent and compute absolute position in root coordinates
     xcb_query_tree_cookie_t tree_cookie = xcb_query_tree(conn, windowId);
@@ -1784,8 +1780,11 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 - (void)markStackingOrderDirty {
     self.stackingOrderDirty = YES;
     if (self.compositingActive) {
-        // Ensure compositor refreshes even if no damage was reported
-        [self scheduleComposite];
+        // ALWAYS damage the screen on stacking order change.
+        // If we don't, and some other damage was already pending,
+        // we might only repaint a small part of the screen while the
+        // stacking change requires a full redraw of the affected windows.
+        [self damageScreen];
     }
 }
 
@@ -2061,8 +2060,8 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 - (void)createShadowForWindow:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];
     
-    if (self.argbFormat == XCB_NONE || !self.gaussianMap) {
-        return; // Can't create shadow without alpha support or Gaussian map
+    if (self.argbFormat == XCB_NONE || !self.gaussianMap || cw.overrideRedirect) {
+        return; // Can't create shadow without alpha support, Gaussian map, or if it's override-redirect
     }
     
     // Generate shadow image in memory
@@ -2217,9 +2216,6 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         int16_t shadowX = screenX + cw.shadowOffsetX;
         int16_t shadowY = screenY + cw.shadowOffsetY;
         
-        // Use clip region for shadow (performance optimization)
-        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
-        
         // Composite ARGB32 shadow with proper alpha blending
         xcb_render_composite(conn,
                             XCB_RENDER_PICT_OP_OVER,
@@ -2233,9 +2229,6 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
                             cw.shadowWidth,
                             cw.shadowHeight);
     }
-    
-    // Use clip region for window painting (performance optimization)
-    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
     
     // OPTIMIZATION: Lazy picture creation - only create when first painting
     // NOTE: The underlying NameWindowPixmap is automatically updated by X server on damage
@@ -2352,6 +2345,11 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     uint32_t pa_mask = XCB_RENDER_CP_SUBWINDOW_MODE;
     uint32_t pa_values[] = { XCB_SUBWINDOW_MODE_INCLUDE_INFERIORS };
     xcb_render_create_picture(conn, picture, draw, format, pa_mask, pa_values);
+    
+    // BEST PRACTICE: Set picture filter to 'good' or 'bilinear' for smooth scaling
+    // especially during minimize/restore animations
+    const char *filter = "good";
+    xcb_render_set_picture_filter(conn, picture, strlen(filter), filter, 0, NULL);
     
     return picture;
 }
