@@ -9,6 +9,8 @@
 #import "GSThemeTitleBar.h"
 #import <cairo/cairo.h>
 #import <cairo/cairo-xcb.h>
+#import <XCBKit/services/ICCCMService.h>
+#import "URSThemeIntegration.h"
 
 @implementation GSThemeTitleBar
 
@@ -246,7 +248,45 @@
 }
 
 - (NSUInteger)windowStyleMask {
-    return NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask;
+    // Determine style mask dynamically based on client window capabilities.
+    XCBWindow *parentFrame = [self parentWindow];
+    XCBWindow *clientWindow = nil;
+    if (parentFrame && [parentFrame isKindOfClass:[XCBFrame class]]) {
+        clientWindow = [(XCBFrame *)parentFrame childWindowForKey:ClientWindow];
+    }
+
+    NSUInteger styleMask = NSTitledWindowMask;
+
+    if (clientWindow) {
+        // If close is not supported or the client does not implement WM_DELETE_WINDOW,
+        // do not render any control buttons (alerts/sheets and similar transient dialogs).
+        ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[self connection]];
+        BOOL supportsDelete = [icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow];
+
+        if (![clientWindow canClose] || !supportsDelete) {
+            NSLog(@"GSThemeTitleBar: Client %u reports canClose=NO or lacks WM_DELETE_WINDOW - omitting control buttons", [clientWindow window]);
+            return styleMask; // Only title
+        }
+
+        // Close button supported
+        styleMask |= NSClosableWindowMask;
+
+        // Show minimize if client allows it
+        if ([clientWindow respondsToSelector:@selector(canMinimize)] && [clientWindow canMinimize]) {
+            styleMask |= NSMiniaturizableWindowMask;
+        }
+
+        // Show resize if client is not fixed-size
+        xcb_window_t clientId = [clientWindow window];
+        if (clientId == 0 || ![URSThemeIntegration isFixedSizeWindow:clientId]) {
+            styleMask |= NSResizableWindowMask;
+        }
+    } else {
+        // Fallback to default mask when client unknown
+        styleMask |= NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask;
+    }
+
+    return styleMask;
 }
 
 - (GSThemeControlState)themeStateForActive:(BOOL)isActive {

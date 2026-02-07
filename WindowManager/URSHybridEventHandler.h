@@ -52,6 +52,10 @@
 // Auto-focus tracking to prevent double-focusing windows
 @property (strong, nonatomic) NSMutableSet* recentlyAutoFocusedWindowIds;
 
+// Cached Alt keycodes and poll timer to robustly detect Alt release
+@property (strong, nonatomic) NSMutableArray* altKeycodes;
+@property (strong, nonatomic) NSTimer* altReleasePollTimer;
+
 // Original URSEventHandler methods (preserved for compatibility)
 - (BOOL)registerAsWindowManager;
 - (void)decorateExistingWindowsOnStartup;

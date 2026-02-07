@@ -13,6 +13,7 @@
 #import <cairo/cairo-xcb.h>
 #import <objc/runtime.h>
 #import "GSThemeTitleBar.h"
+#import <XCBKit/services/ICCCMService.h>
 
 // Category to expose private GSTheme methods for theme-agnostic titlebar rendering
 // These methods exist in GSTheme but aren't in the public header
@@ -280,8 +281,40 @@ static NSMutableSet *fixedSizeWindows = nil;
         // Define the titlebar rect
         NSRect titlebarRect = NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height);
 
-        // Use GSTheme to draw titlebar decoration with all button types
-        NSUInteger styleMask = NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask;
+        // Determine style mask based on client capabilities
+        // (re-use parentFrame variable declared above)
+        XCBWindow *clientWindow = nil;
+        if (parentFrame && [parentFrame isKindOfClass:[XCBFrame class]]) {
+            clientWindow = [(XCBFrame*)parentFrame childWindowForKey:ClientWindow];
+        }
+
+        NSUInteger styleMask = NSTitledWindowMask;
+        if (clientWindow) {
+            // Require both canClose and WM_DELETE_WINDOW support before showing controls
+            ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[titlebar connection]];
+            BOOL supportsDelete = [icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow];
+
+            if (![clientWindow canClose] || !supportsDelete) {
+                NSLog(@"GSTheme: Client %u reports canClose=NO or lacks WM_DELETE_WINDOW - omitting control buttons", [clientWindow window]);
+            } else {
+                styleMask |= NSClosableWindowMask;
+
+                // Respect fixed-size windows (hide resize)
+                xcb_window_t clientId = [clientWindow window];
+                if (clientId == 0 || ![URSThemeIntegration isFixedSizeWindow:clientId]) {
+                    styleMask |= NSResizableWindowMask;
+                }
+
+                // Show minimize if client supports it
+                if ([clientWindow respondsToSelector:@selector(canMinimize)] && [clientWindow canMinimize]) {
+                    styleMask |= NSMiniaturizableWindowMask;
+                }
+            }
+        } else {
+            // Fallback to all buttons when client unknown
+            styleMask |= NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask;
+        }
+
         GSThemeControlState state = isActive ? GSThemeNormalState : GSThemeSelectedState;
 
         NSLog(@"Drawing GSTheme titlebar with styleMask: 0x%lx, state: %d", (unsigned long)styleMask, (int)state);
@@ -754,23 +787,41 @@ static NSMutableSet *fixedSizeWindows = nil;
         // Use GSTheme to draw titlebar decoration
         NSRect drawRect = NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height);
 
-        // Check if this is a fixed-size window (only show close button)
+        // Check if this is a fixed-size window (hide resize but show minimize when supported)
         XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
         xcb_window_t clientWindowId = clientWindow ? [clientWindow window] : 0;
         BOOL isFixedSize = clientWindowId && [URSThemeIntegration isFixedSizeWindow:clientWindowId];
 
-        NSUInteger styleMask;
-        if (isFixedSize) {
-            // Fixed-size windows only get close button
-            styleMask = NSTitledWindowMask | NSClosableWindowMask;
-            NSLog(@"Using fixed-size styleMask (close button only) for window %u", clientWindowId);
-        } else {
-            // Normal windows get all buttons
-            styleMask = NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask;
+        // Base style: title only
+        NSUInteger styleMask = NSTitledWindowMask;
+
+        // Determine whether control buttons should be shown. Require both canClose
+        // and presence of WM_DELETE_WINDOW (ICCCM WMProtocols) to consider close functional.
+        BOOL showControls = NO;
+        if (clientWindow && [clientWindow canClose]) {
+            ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[frame connection]];
+            if ([icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow]) {
+                showControls = YES;
+            }
         }
+
+        if (showControls) {
+            styleMask |= NSClosableWindowMask;
+
+            // If not fixed-size, include resize button
+            if (!isFixedSize) {
+                styleMask |= NSResizableWindowMask;
+            }
+
+            // If the client supports minimization, include miniaturize button
+            if ([clientWindow respondsToSelector:@selector(canMinimize)] && [clientWindow canMinimize]) {
+                styleMask |= NSMiniaturizableWindowMask;
+            }
+        }
+
         GSThemeControlState state = isActive ? GSThemeNormalState : GSThemeSelectedState;
 
-        NSLog(@"Drawing standalone GSTheme titlebar with styleMask: 0x%lx, state: %d", (unsigned long)styleMask, (int)state);
+        NSLog(@"Drawing standalone GSTheme titlebar with styleMask: 0x%lx, state: %d (fixedSize=%d, mini=%d)", (unsigned long)styleMask, (int)state, (int)isFixedSize, clientWindow ? (int)[clientWindow canMinimize] : 0);
 
         // Log GSTheme padding and size values to verify Eau theme values
         if ([theme respondsToSelector:@selector(titlebarPaddingLeft)]) {

@@ -17,6 +17,7 @@
 #import <xcb/xcb_icccm.h>
 #import <xcb/xcb_aux.h>
 #import <xcb/damage.h>
+#import <xcb/xproto.h>
 #import <X11/keysym.h>
 #import <XCBKit/services/EWMHService.h>
 #import <XCBKit/services/XCBAtomService.h>
@@ -74,6 +75,10 @@
     
     // Initialize set to track recently auto-focused windows (to prevent double-focus)
     self.recentlyAutoFocusedWindowIds = [[NSMutableSet alloc] init];
+    
+    // Cache Alt keycodes (populated during setupKeyboardGrabbing)
+    self.altKeycodes = [[NSMutableArray alloc] init];
+    self.altReleasePollTimer = nil;
     
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -2004,6 +2009,9 @@
         free(reply);
         [connection flush];
         NSLog(@"[Alt-Tab] Successfully ungrabbed keyboard");
+
+        // Ensure poll timer is stopped
+        [self stopAltReleasePoll];
         
     } @catch (NSException *exception) {
         NSLog(@"[Alt-Tab] Exception in cleanupKeyboardGrabbing: %@", exception.reason);
@@ -2053,10 +2061,11 @@
         // But we need to grab all variations
         
         // Get the keyboard mapping to find Tab key
+        const xcb_setup_t *setup = xcb_get_setup(conn);
         xcb_get_keyboard_mapping_cookie_t cookie = xcb_get_keyboard_mapping(
             conn,
-            8,   // min_keycode
-            248  // count (255 - 8 + 1)
+            setup->min_keycode,
+            setup->max_keycode - setup->min_keycode + 1
         );
         
         xcb_get_keyboard_mapping_reply_t *reply = xcb_get_keyboard_mapping_reply(conn, cookie, NULL);
@@ -2070,17 +2079,31 @@
         
         NSLog(@"[Alt-Tab] Found %d keysyms in keyboard mapping", keysyms_len);
         
-        // Find Tab key and grab it
+        // Find Tab key and grab it, and cache Alt keycodes
         BOOL tabFound = NO;
         for (int i = 0; i < keysyms_len; i++) {
+            // Cache Alt/Meta keycodes for query_keymap polling
+            // We look for Alt, Meta, or Super keys as candidates for Mod1
+            if (keysyms[i] == XK_Alt_L || keysyms[i] == XK_Alt_R ||
+                keysyms[i] == XK_Meta_L || keysyms[i] == XK_Meta_R ||
+                keysyms[i] == XK_Super_L || keysyms[i] == XK_Super_R) {
+                xcb_keycode_t altcode = setup->min_keycode + (i / reply->keysyms_per_keycode);
+                
+                // Avoid duplicates
+                if (![self.altKeycodes containsObject:@(altcode)]) {
+                    NSLog(@"[Alt-Tab] Caching potential modifier key: %d (sym=0x%x)", altcode, (unsigned int)keysyms[i]);
+                    [self.altKeycodes addObject:@(altcode)];
+                }
+            }
+
             if (keysyms[i] == XK_Tab) {
                 // Calculate keycode from index
                 // keycode = min_keycode + (index / keysyms_per_keycode)
-                xcb_keycode_t keycode = 8 + (i / reply->keysyms_per_keycode);
+                xcb_keycode_t keycode = setup->min_keycode + (i / reply->keysyms_per_keycode);
                 
                 NSLog(@"[Alt-Tab] Found Tab key at keycode %d", keycode);
                 
-                // Grab Alt+Tab
+                // Grab Alt+Tab (Mod1)
                 xcb_grab_key(conn,
                            0,  // owner_events
                            root,
@@ -2099,8 +2122,29 @@
                            XCB_GRAB_MODE_ASYNC);
                 
                 tabFound = YES;
-                break;
+                // Don't break, keep scanning for Alt keycodes
             }
+        }
+        
+        // Also explicitly query the modifier mapping to find all keycodes assigned to Mod1
+        xcb_get_modifier_mapping_cookie_t modCookie = xcb_get_modifier_mapping(conn);
+        xcb_get_modifier_mapping_reply_t *modReply = xcb_get_modifier_mapping_reply(conn, modCookie, NULL);
+        if (modReply) {
+            int keycodesPerMod = modReply->keycodes_per_modifier;
+            xcb_keycode_t *modKeycodes = xcb_get_modifier_mapping_keycodes(modReply);
+            
+            // Mod1 is index 3
+            NSLog(@"[Alt-Tab] Querying Mod1 (Alt) modifier mapping (%d keycodes per modifier)", keycodesPerMod);
+            for (int i = 0; i < keycodesPerMod; i++) {
+                xcb_keycode_t kc = modKeycodes[3 * keycodesPerMod + i];
+                if (kc != 0) {
+                    if (![self.altKeycodes containsObject:@(kc)]) {
+                        NSLog(@"[Alt-Tab] Adding Mod1 keycode from mapping: %d", kc);
+                        [self.altKeycodes addObject:@(kc)];
+                    }
+                }
+            }
+            free(modReply);
         }
         
         if (!tabFound) {
@@ -2133,10 +2177,10 @@
         NSLog(@"[Alt-Tab] Key press: keycode=%d, state=0x%x, alt=%d, shift=%d", 
               event->detail, event->state, altPressed, shiftPressed);
         
-        // Track Alt key state
-        if (event->detail == 64 || event->detail == 108) {  // Alt keys
+        // Track Alt key state using cached keycodes
+        if ([self.altKeycodes containsObject:@(event->detail)]) {
             self.altKeyPressed = YES;
-            NSLog(@"[Alt-Tab] Alt key pressed");
+            NSLog(@"[Alt-Tab] Alt-class key pressed: keycode=%d", event->detail);
         }
         
         // Track Shift key state
@@ -2184,6 +2228,9 @@
                 NSLog(@"[Alt-Tab] Cycling forward");
                 [self.windowSwitcher cycleForward];
             }
+
+            // Start polling for Alt release as a robust fallback in case release events are missed
+            [self startAltReleasePoll];
         }
         
     } @catch (NSException *exception) {
@@ -2193,24 +2240,38 @@
 
 - (void)handleKeyReleaseEvent:(xcb_key_release_event_t*)event {
     @try {
-        NSLog(@"[Alt-Tab] Key release: keycode=%d", event->detail);
-        
-        // Check if Alt key was released
-        if (event->detail == 64 || event->detail == 108) {  // Alt keys
+        // Track Alt key state using cached keycodes
+        if ([self.altKeycodes containsObject:@(event->detail)]) {
             self.altKeyPressed = NO;
-            NSLog(@"[Alt-Tab] Alt key released");
-            
-            // Complete the window switch when Alt is released
-            if (self.windowSwitcher.isSwitching) {
-                NSLog(@"[Alt-Tab] Completing window switch and ungrabbing keyboard");
-                
-                // First ungrab the keyboard
+            NSLog(@"[Alt-Tab] Alt-class key release: keycode=%d", event->detail);
+        }
+
+        // If we're currently switching, check if the switch should be completed.
+        // We ONLY close when Alt is fully released. We use the server-side keymap 
+        // query for maximum robustness, as event->state can sometimes be unreliable 
+        // during grabs or focus changes.
+        if (self.windowSwitcher.isSwitching) {
+            // Check if ANY modifier key that acts as Alt (Mod1) is still pressed
+            if (![self altModifierCurrentlyDown]) {
+                NSLog(@"[Alt-Tab] Alt release confirmed via keymap query - completing switch");
+
+                // Ungrab the keyboard so normal input is restored
                 xcb_connection_t *conn = [connection connection];
                 xcb_ungrab_keyboard(conn, XCB_CURRENT_TIME);
                 [connection flush];
-                
-                // Then complete the switching (which hides the overlay)
+
+                // Perform the actual window activation and hide the overlay
                 [self.windowSwitcher completeSwitching];
+
+                // Stop the poll timer
+                [self stopAltReleasePoll];
+            } else {
+                // If Alt is still down, just log for debugging
+                if ([self.altKeycodes containsObject:@(event->detail)]) {
+                    NSLog(@"[Alt-Tab] One Alt key released, but another Alt/Meta key is still held.");
+                } else if (event->detail == 23) {
+                    NSLog(@"[Alt-Tab] Tab released, keeping switcher open as Alt is still held.");
+                }
             }
         }
         
@@ -2221,6 +2282,65 @@
         
     } @catch (NSException *exception) {
         NSLog(@"[Alt-Tab] Exception in handleKeyReleaseEvent: %@", exception.reason);
+    }
+}
+
+// Polling helpers for robust Alt release detection
+- (BOOL)altModifierCurrentlyDown {
+    xcb_connection_t *conn = [connection connection];
+    xcb_query_keymap_cookie_t cookie = xcb_query_keymap(conn);
+    xcb_query_keymap_reply_t *reply = xcb_query_keymap_reply(conn, cookie, NULL);
+    if (!reply) return NO;
+
+    const uint8_t *keys = reply->keys;  // Use reply->keys array from xcb_query_keymap_reply
+    BOOL down = NO;
+
+    for (NSNumber *num in self.altKeycodes) {
+        xcb_keycode_t keycode = (xcb_keycode_t)[num unsignedCharValue];
+        if (keycode < 8) continue; // safety
+        uint8_t byte = keys[keycode >> 3];
+        uint8_t mask = (1 << (keycode & 7));
+        if (byte & mask) {
+            down = YES;
+            break;
+        }
+    }
+
+    free(reply);
+    return down;
+}
+
+- (void)startAltReleasePoll {
+    if (self.altReleasePollTimer) return;
+    NSLog(@"[Alt-Tab] Starting Alt release poll timer");
+    self.altReleasePollTimer = [NSTimer scheduledTimerWithTimeInterval:0.05
+                                                                 target:self
+                                                               selector:@selector(checkAltReleaseTimerFired:)
+                                                               userInfo:nil
+                                                                repeats:YES];
+}
+
+- (void)stopAltReleasePoll {
+    if (!self.altReleasePollTimer) return;
+    NSLog(@"[Alt-Tab] Stopping Alt release poll timer");
+    [self.altReleasePollTimer invalidate];
+    self.altReleasePollTimer = nil;
+}
+
+- (void)checkAltReleaseTimerFired:(NSTimer*)timer {
+    if (!self.windowSwitcher.isSwitching) {
+        [self stopAltReleasePoll];
+        return;
+    }
+
+    if (![self altModifierCurrentlyDown]) {
+        NSLog(@"[Alt-Tab] Alt release detected via poll - completing switch");
+        xcb_connection_t *conn = [connection connection];
+        xcb_ungrab_keyboard(conn, XCB_CURRENT_TIME);
+        [connection flush];
+
+        [self.windowSwitcher completeSwitching];
+        [self stopAltReleasePoll];
     }
 }
 

@@ -12,6 +12,7 @@
 #import <cairo/cairo-xcb.h>
 #import <xcb/xcb.h>
 #import <XCBKit/services/EWMHService.h>
+#import <XCBKit/services/ICCCMService.h>
 
 @implementation UROSTitleBar
 
@@ -110,13 +111,49 @@
         // Use GSTheme to draw titlebar
         NSRect drawRect = NSMakeRect(0, 0, self.frame.size.width, self.frame.size.height);
 
-        // If the client is a fixed-size window (per URSThemeIntegration), only show close button
+        // If the client is a fixed-size window (per URSThemeIntegration), only hide resize
+        // but still show minimize if the client supports minimization. If close is not supported,
+        // do not render any control buttons (use only titlebar).
         BOOL isFixedSizeClient = (self.parentClientWindow != 0) && [URSThemeIntegration isFixedSizeWindow:self.parentClientWindow];
-        NSUInteger styleMask = isFixedSizeClient ? (NSTitledWindowMask | NSClosableWindowMask) : (NSTitledWindowMask | NSClosableWindowMask | NSResizableWindowMask);
+        XCBWindow *client = self.parentClientWindow ? [self.connection windowForXCBId:self.parentClientWindow] : nil;
+
+        NSUInteger styleMask = NSTitledWindowMask;
+
+        // If client exists, check capabilities
+        if (client) {
+            // Also require the WM_DELETE_WINDOW protocol to consider closing functional
+            ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:self.connection];
+            BOOL supportsDelete = NO;
+            if (client && icccm) {
+                supportsDelete = [icccm hasProtocol:[icccm WMDeleteWindow] forWindow:client];
+            }
+
+            if (![client canClose] || !supportsDelete) {
+                // No close capability or no WM_DELETE support: per guideline, do not render control buttons (alerts/sheets)
+                NSLog(@"UROSTitleBar: Client %u reports canClose=NO or lacks WM_DELETE_WINDOW - omitting control buttons", [client window]);
+            } else {
+                // Close supported
+                styleMask |= NSClosableWindowMask;
+
+                // If the client is NOT fixed-size, allow resize
+                if (!isFixedSizeClient) {
+                    styleMask |= NSResizableWindowMask;
+                }
+
+                // Query client for minimizable capability and show minimize when supported
+                if ([client respondsToSelector:@selector(canMinimize)] && [client canMinimize]) {
+                    styleMask |= NSMiniaturizableWindowMask;
+                }
+            }
+        } else {
+            // No client found: fall back to showing all buttons
+            styleMask |= NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask;
+        }
+
         GSThemeControlState state = self.isActive ? GSThemeNormalState : GSThemeSelectedState;
 
         if (isFixedSizeClient) {
-            NSLog(@"UROSTitleBar: Rendering fixed-size titlebar (close-only) for client %u", self.parentClientWindow);
+            NSLog(@"UROSTitleBar: Rendering fixed-size titlebar (resize hidden) for client %u; mini=%d", self.parentClientWindow, client ? (int)[client canMinimize] : 0);
         }
 
         [theme drawWindowBorder:drawRect
