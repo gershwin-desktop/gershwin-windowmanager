@@ -515,12 +515,10 @@
         }
         case XCB_FOCUS_IN: {
             xcb_focus_in_event_t *focusInEvent = (xcb_focus_in_event_t *)event;
-            NSLog(@"XCB_FOCUS_IN received for window %u", focusInEvent->event);
+            NSLog(@"XCB_FOCUS_IN received for window %u (detail=%d, mode=%d)",
+                  focusInEvent->event, focusInEvent->detail, focusInEvent->mode);
             [connection handleFocusIn:focusInEvent];
-            // Re-render titlebar with GSTheme as active
             [self handleFocusChange:focusInEvent->event isActive:YES];
-            
-            // Focus change typically means stacking order changed (window raised)
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager markStackingOrderDirty];
             }
@@ -528,10 +526,14 @@
         }
         case XCB_FOCUS_OUT: {
             xcb_focus_out_event_t *focusOutEvent = (xcb_focus_out_event_t *)event;
-            NSLog(@"XCB_FOCUS_OUT received for window %u", focusOutEvent->event);
+            NSLog(@"XCB_FOCUS_OUT received for window %u (detail=%d, mode=%d)",
+                  focusOutEvent->event, focusOutEvent->detail, focusOutEvent->mode);
             [connection handleFocusOut:focusOutEvent];
-            // Re-render titlebar with GSTheme as inactive
-            [self handleFocusChange:focusOutEvent->event isActive:NO];
+            // Skip inferior focus changes - focus moved to a child window
+            // within the same managed window (e.g., frame -> client)
+            if (focusOutEvent->detail != XCB_NOTIFY_DETAIL_INFERIOR) {
+                [self handleFocusChange:focusOutEvent->event isActive:NO];
+            }
             break;
         }
         case XCB_BUTTON_PRESS: {
