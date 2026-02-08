@@ -1166,7 +1166,6 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
         // Calculate the correct top position to preserve bottom edge
         int bottomEdge = rect.position.y + rect.size.height;
         int newY = bottomEdge - (minH + titleBarHeight);
-
         rect.size.height = minH + titleBarHeight;
         rect.position.y = newY;
         clientRect.size.height = minH;
@@ -1206,9 +1205,7 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
     rect.position.y = values[0];
     rect.size.height = values[1];
     values[0] = 0;
-
     xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_Y, &values);
-
     titleBarRect.position.y = values[0];
 
     values[0] = titleBarHeight;

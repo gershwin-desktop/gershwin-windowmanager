@@ -1327,6 +1327,12 @@ static XCBConnection *sharedInstance;
 
     XCBFrame *frame = [response frame];
 
+    // Prevent X server from clearing the frame to background_pixel (white) on
+    // every resize.  Default ForgetGravity discards all pixels; NorthWestGravity
+    // preserves existing content and only exposes truly new areas.
+    uint32_t gravity = XCB_GRAVITY_NORTH_WEST;
+    xcb_change_window_attributes(connection, [frame window], XCB_CW_BIT_GRAVITY, &gravity);
+
     // If using ARGB visual, configure frame for 32-bit rendering
     if (depth == 32 && argbColormap != XCB_NONE) {
         [frame setUse32BitDepth:YES];

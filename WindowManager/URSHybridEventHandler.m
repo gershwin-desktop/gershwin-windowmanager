@@ -1493,28 +1493,30 @@
 
 - (void)clearTitlebarBackgroundBeforeResize:(xcb_motion_notify_event_t*)motionEvent {
     @try {
-        // Find the frame
         XCBWindow *window = [connection windowForXCBId:motionEvent->event];
         if (!window || ![window isKindOfClass:[XCBFrame class]]) {
             return;
         }
         XCBFrame *frame = (XCBFrame*)window;
 
-        // Get the titlebar
+        // Only clear background when width may change (horizontal or diagonal resize).
+        // During vertical-only resize the pixmap width still matches the window —
+        // clearing would cause the X server to fall back to white_pixel for exposed areas.
+        if (![frame leftBorderClicked] && ![frame rightBorderClicked]) {
+            return;
+        }
+
         XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
         if (!titlebarWindow || ![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
             return;
         }
 
-        // Set background to NONE to prevent X11 from tiling the old pixmap
-        // XCB_BACK_PIXMAP_NONE = 0
         uint32_t value = 0; // XCB_BACK_PIXMAP_NONE
         xcb_change_window_attributes([connection connection],
                                      [titlebarWindow window],
                                      XCB_CW_BACK_PIXMAP,
                                      &value);
     } @catch (NSException *exception) {
-        // Silently ignore
     }
 }
 
@@ -1568,11 +1570,18 @@
             [titlebar drawArea:titlebarRect];
 
             [connection flush];
-            
+
             // Notify compositor about the window content change
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager updateWindow:[frame window]];
             }
+        } else {
+            // Width unchanged — restore background and repaint.
+            // Covers: vertical-only resize (background wasn't cleared, this is a no-op)
+            // and horizontal resize that hit min-width (background was cleared, need repaint).
+            [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+            [titlebar drawArea:titlebarRect];
+            [connection flush];
         }
     } @catch (NSException *exception) {
         // Silently ignore exceptions during resize motion to avoid spam
