@@ -63,7 +63,7 @@
 
 // Determine which button (if any) is at a given coordinate
 // Returns: 0=close, 1=mini, 2=zoom, -1=none
-// Stacked layout: Close (X) on left full height, Zoom (+) top-right, Minimize (-) bottom-right
+// Side-by-side layout: Close (X) on left | title | Minimize (-) | Maximize (+) on right
 + (NSInteger)buttonIndexAtX:(CGFloat)x forWidth:(CGFloat)width hasMaximize:(BOOL)hasMax;
 + (NSInteger)buttonIndexAtX:(CGFloat)x y:(CGFloat)y forWidth:(CGFloat)width height:(CGFloat)height hasMaximize:(BOOL)hasMax;
 

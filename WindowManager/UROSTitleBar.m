@@ -306,9 +306,9 @@
 - (void)handleButtonPress:(xcb_button_press_event_t*)event {
     NSLog(@"UROSTitleBar: Button press at %d,%d", event->event_x, event->event_y);
 
-    // Stacked button metrics (must match URSThemeIntegration.m)
+    // Side-by-side button metrics (must match URSThemeIntegration.m)
     static const CGFloat EDGE_BUTTON_WIDTH = 28.0;       // Close button width
-    static const CGFloat STACKED_REGION_WIDTH = 28.0;    // Width for stacked buttons
+    static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;      // Width for each right-side button
     static const CGFloat TITLEBAR_HEIGHT = 24.0;         // Total titlebar height
 
     CGFloat titlebarWidth = self.frame.size.width;
@@ -323,21 +323,17 @@
         return;
     }
 
-    // Stacked buttons on right edge
-    CGFloat stackedRegionStart = titlebarWidth - STACKED_REGION_WIDTH;
+    // Side-by-side buttons on right edge
+    // Minimize (inner right)
+    if (clickPoint.x >= titlebarWidth - 2 * RIGHT_BUTTON_WIDTH &&
+        clickPoint.x < titlebarWidth - RIGHT_BUTTON_WIDTH) {
+        [self handleMinimizeButton];
+        return;
+    }
 
-    if (clickPoint.x >= stackedRegionStart && clickPoint.x <= titlebarWidth) {
-        // Zoom (+) on top half, Minimize (-) on bottom half
-        // X11 coordinates: Y=0 is at TOP, so y < midY means top half
-        CGFloat midY = titlebarHeight / 2.0;
-
-        if (clickPoint.y < midY) {
-            // Top half (Y=0 to midY) = Zoom button
-            [self handleMaximizeButton];
-        } else {
-            // Bottom half (Y=midY to height) = Minimize button
-            [self handleMinimizeButton];
-        }
+    // Zoom/maximize (far right)
+    if (clickPoint.x >= titlebarWidth - RIGHT_BUTTON_WIDTH) {
+        [self handleMaximizeButton];
         return;
     }
 

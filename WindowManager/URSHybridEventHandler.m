@@ -1689,7 +1689,7 @@
         BOOL hasMaximize = clientWindowId ? ![URSThemeIntegration isFixedSizeWindow:clientWindowId] : YES;
 
         // Determine which button (if any) is under the cursor
-        // Use both X and Y coordinates for stacked button layout
+        // Use X coordinate for side-by-side button layout
         CGFloat mouseX = motionEvent->event_x;
         CGFloat mouseY = motionEvent->event_y;
         NSInteger newButtonIndex = [URSThemeIntegration buttonIndexAtX:mouseX
@@ -1846,13 +1846,12 @@
 
 #pragma mark - Titlebar Button Handling
 
-// Button hit detection for stacked titlebar buttons
-// Layout: Close (X) at left edge full height, stacked Zoom (+) top / Minimize (-) bottom at right
+// Button hit detection for side-by-side titlebar buttons
+// Layout: Close (X) at left edge | title | Minimize (-) | Maximize (+) at right
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point forTitlebar:(XCBTitleBar*)titlebar {
-    // Stacked button metrics (must match URSThemeIntegration.m)
+    // Side-by-side button metrics (must match URSThemeIntegration.m)
     static const CGFloat EDGE_BUTTON_WIDTH = 28.0;       // Close button width
-    static const CGFloat STACKED_REGION_WIDTH = 28.0;    // Width for stacked buttons
-    static const CGFloat STACKED_BUTTON_HEIGHT = 12.0;   // Half of titlebar height
+    static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;      // Width for each right-side button
 
     // Get titlebar dimensions
     XCBRect titlebarRect = [titlebar windowRect];
@@ -1883,28 +1882,29 @@
         return GSThemeTitleBarButtonClose;
     }
 
-    // Stacked buttons on right edge
-    CGFloat stackedRegionStart = titlebarWidth - STACKED_REGION_WIDTH;
+    // Side-by-side buttons on right edge
+    if (hasMaximize) {
+        // Minimize rect (inner right)
+        NSRect miniRect = NSMakeRect(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH, 0,
+                                     RIGHT_BUTTON_WIDTH, titlebarHeight);
+        if (NSPointInRect(point, miniRect)) {
+            NSLog(@"GSTheme: Hit miniaturize button (inner right)");
+            return GSThemeTitleBarButtonMiniaturize;
+        }
 
-    if (point.x >= stackedRegionStart && point.x <= titlebarWidth) {
-        if (hasMaximize) {
-            // Window has both zoom and minimize stacked vertically
-            // Zoom (+) on top half, Minimize (-) on bottom half
-            // X11 coordinates: Y=0 is at TOP, so y < midY means top half
-            CGFloat midY = titlebarHeight / 2.0;
-
-            if (point.y < midY) {
-                // Top half (Y=0 to midY) = Zoom button
-                NSLog(@"GSTheme: Hit zoom button (top of stacked)");
-                return GSThemeTitleBarButtonZoom;
-            } else {
-                // Bottom half (Y=midY to height) = Minimize button
-                NSLog(@"GSTheme: Hit miniaturize button (bottom of stacked)");
-                return GSThemeTitleBarButtonMiniaturize;
-            }
-        } else {
-            // Window has only minimize (no maximize) - minimize takes full height
-            NSLog(@"GSTheme: Hit miniaturize button (full height, no zoom)");
+        // Zoom rect (far right)
+        NSRect zoomRect = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH, 0,
+                                     RIGHT_BUTTON_WIDTH, titlebarHeight);
+        if (NSPointInRect(point, zoomRect)) {
+            NSLog(@"GSTheme: Hit zoom button (far right)");
+            return GSThemeTitleBarButtonZoom;
+        }
+    } else {
+        // Only minimize button at far right
+        NSRect miniRect = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH, 0,
+                                     RIGHT_BUTTON_WIDTH, titlebarHeight);
+        if (NSPointInRect(point, miniRect)) {
+            NSLog(@"GSTheme: Hit miniaturize button (far right, no zoom)");
             return GSThemeTitleBarButtonMiniaturize;
         }
     }

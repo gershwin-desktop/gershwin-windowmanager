@@ -243,27 +243,24 @@
 // Edge button metrics (matching Eau theme)
 static const CGFloat TB_HEIGHT = 24.0;
 static const CGFloat TB_EDGE_BUTTON_WIDTH = 28.0;
-static const CGFloat TB_STACKED_REGION_WIDTH = 28.0;
-static const CGFloat TB_STACKED_BUTTON_HEIGHT = 12.0;
+static const CGFloat TB_RIGHT_BUTTON_WIDTH = 28.0;
 
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point {
     XCBRect titlebarRect = [self windowRect];
     CGFloat titlebarWidth = titlebarRect.size.width;
     NSUInteger styleMask = [self windowStyleMask];
 
-    // Close button at left edge
+    // Close button at left edge (full height)
     NSRect closeRect = NSMakeRect(0, 0, TB_EDGE_BUTTON_WIDTH, TB_HEIGHT);
 
-    // Stacked region on right
-    CGFloat rightRegionX = titlebarWidth - TB_STACKED_REGION_WIDTH;
+    // Side-by-side buttons on right
+    // Minimize button (inner right, full height)
+    NSRect miniaturizeRect = NSMakeRect(titlebarWidth - 2 * TB_RIGHT_BUTTON_WIDTH, 0,
+                                         TB_RIGHT_BUTTON_WIDTH, TB_HEIGHT);
 
-    // Zoom button (top half)
-    NSRect zoomRect = NSMakeRect(rightRegionX, TB_STACKED_BUTTON_HEIGHT,
-                                  TB_STACKED_REGION_WIDTH, TB_STACKED_BUTTON_HEIGHT);
-
-    // Minimize button (bottom half)
-    NSRect miniaturizeRect = NSMakeRect(rightRegionX, 0,
-                                         TB_STACKED_REGION_WIDTH, TB_STACKED_BUTTON_HEIGHT);
+    // Zoom button (far right, full height)
+    NSRect zoomRect = NSMakeRect(titlebarWidth - TB_RIGHT_BUTTON_WIDTH, 0,
+                                  TB_RIGHT_BUTTON_WIDTH, TB_HEIGHT);
 
     if ((styleMask & NSClosableWindowMask) && NSPointInRect(point, closeRect)) {
         return GSThemeTitleBarButtonClose;
