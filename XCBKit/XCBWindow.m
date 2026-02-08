@@ -584,29 +584,29 @@
 
 - (BOOL) changeAttributes:(uint32_t[])values withMask:(uint32_t)aMask checked:(BOOL)check
 {
-    xcb_void_cookie_t cookie;
-
     BOOL attributesChanged = NO;
 
     //NSLog(@"Changing attributes for window: %u", window);
 
     if (check)
     {
-        cookie = xcb_change_window_attributes_checked([connection connection], window, aMask, values);
-    } else
-    {
-        cookie = xcb_change_window_attributes([connection connection], window, aMask, values);
+        xcb_void_cookie_t cookie = xcb_change_window_attributes_checked([connection connection], window, aMask, values);
+        xcb_generic_error_t *error = xcb_request_check([connection connection], cookie);
+
+        if (error != NULL)
+        {
+            NSLog(@"Unable to change the attributes for window %u with error code: %d", window,
+                  error->error_code);
+            free(error);
+        }
+        else
+            attributesChanged = YES;
     }
-
-    xcb_generic_error_t *error = xcb_request_check([connection connection], cookie);
-
-    if (error != NULL)
-        NSLog(@"Unable to change the attributes for window %u with error code: %d", window,
-              error->error_code);
     else
+    {
+        xcb_change_window_attributes([connection connection], window, aMask, values);
         attributesChanged = YES;
-
-    free(error);
+    }
 
     return attributesChanged;
 }
@@ -1151,10 +1151,10 @@
             config_frame_mask |= XCB_CONFIG_WINDOW_WIDTH;
             config_win_mask |= XCB_CONFIG_WINDOW_WIDTH;
             config_title_mask |= XCB_CONFIG_WINDOW_WIDTH;
-            config_frame_vals[frame_i++] = anEvent->width;
+            config_frame_vals[frame_i++] = anEvent->width + 2;
             config_win_vals[win_i++] = anEvent->width;
-            config_title_vals[title_i++] = anEvent->width;
-            frameRect.size.width = anEvent->width;
+            config_title_vals[title_i++] = anEvent->width + 2;
+            frameRect.size.width = anEvent->width + 2;
         } else {
             NSDebugLog(@"Ignoring width change request in ConfigureRequest for non-resizable window %u", window);
         }
@@ -1165,9 +1165,9 @@
         if ([self canResize]) {
             config_frame_mask |= XCB_CONFIG_WINDOW_HEIGHT;
             config_win_mask |= XCB_CONFIG_WINDOW_HEIGHT;
-            config_frame_vals[frame_i++] = anEvent->height + titleHeight;
+            config_frame_vals[frame_i++] = anEvent->height + titleHeight + 1;
             config_win_vals[win_i++] = anEvent->height;
-            frameRect.size.height = anEvent->height + titleHeight;
+            frameRect.size.height = anEvent->height + titleHeight + 1;
         } else {
             NSDebugLog(@"Ignoring height change request in ConfigureRequest for non-resizable window %u", window);
         }

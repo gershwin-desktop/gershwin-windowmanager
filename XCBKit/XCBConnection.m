@@ -1217,22 +1217,22 @@ static XCBConnection *sharedInstance;
                 // For 32-bit windows: back_pixel, border_pixel, event_mask, colormap
                 // XCB_CW values must be in ascending bit order: 2, 8, 2048, 8192
                 valueMask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_EVENT_MASK | XCB_CW_COLORMAP;
-                values[0] = 0;  // back_pixel = transparent black
+                values[0] = 0xFFC0C0C0;  // back_pixel = border color (#C0C0C0, opaque)
                 values[1] = 0;  // border_pixel = transparent
                 values[2] = FRAMEMASK;  // event_mask
                 values[3] = argbColormap;  // colormap
             } else {
                 NSLog(@"[XCBConnection] No ARGB visual found, using standard 24-bit frame");
-                values[0] = [screen screen]->white_pixel;
+                values[0] = 0xC0C0C0;  // border color
                 values[1] = FRAMEMASK;
             }
         } else {
-            // Non-compositor mode: use white background
-            values[0] = [screen screen]->white_pixel;
+            // Non-compositor mode: use border color background
+            values[0] = 0xC0C0C0;  // border color
             values[1] = FRAMEMASK;
         }
     } else {
-        values[0] = 0;
+        values[0] = 0xC0C0C0;  // border color
         values[1] = FRAMEMASK;
     }
 
@@ -1288,8 +1288,8 @@ static XCBConnection *sharedInstance;
 
     int16_t xPos = reqX;
     int16_t yPos = reqY;
-    uint16_t winWidth = reqW;
-    uint16_t winHeight = reqH + titleHeight;
+    uint16_t winWidth = reqW + 2;         // 1px border on left + right
+    uint16_t winHeight = reqH + titleHeight + 1;  // 1px border on bottom
 
     NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
@@ -1686,6 +1686,24 @@ static XCBConnection *sharedInstance;
                     [frame showResizeCursorForPosition:position];
                 }
                 break;
+            case TopLeftCorner:
+                if (![[frame cursor] resizeTopLeftCornerSelected])
+                {
+                    [frame showResizeCursorForPosition:position];
+                }
+                break;
+            case TopRightCorner:
+                if (![[frame cursor] resizeTopRightCornerSelected])
+                {
+                    [frame showResizeCursorForPosition:position];
+                }
+                break;
+            case BottomLeftCorner:
+                if (![[frame cursor] resizeBottomLeftCornerSelected])
+                {
+                    [frame showResizeCursorForPosition:position];
+                }
+                break;
             default:
                 if (![[frame cursor] leftPointerSelected])
                 {
@@ -1695,13 +1713,40 @@ static XCBConnection *sharedInstance;
         }
 
     }
-    else
+    else if (!dragState)
     {
-        if (![[frame cursor] leftPointerSelected])
+        // Find the frame from window's parent chain
+        XCBWindow *parent = [window parentWindow];
+        if ([parent isKindOfClass:[XCBFrame class]])
         {
-            [frame showLeftPointerCursor];
-            [window showLeftPointerCursor];
+            frame = (XCBFrame *)parent;
+        }
 
+        if (frame)
+        {
+            // Don't reset cursor for resize zone children - they have
+            // their own static cursors set at creation time
+            BOOL isResizeChild = NO;
+            childrenMask zoneKeys[] = {
+                ResizeHandle, ResizeZoneNW, ResizeZoneN, ResizeZoneNE,
+                ResizeZoneE, ResizeZoneSE, ResizeZoneS, ResizeZoneSW,
+                ResizeZoneW, ResizeZoneGrowBox
+            };
+            xcb_window_t eventWindow = [window window];
+            for (int i = 0; i < 10; i++)
+            {
+                XCBWindow *zone = [frame childWindowForKey:zoneKeys[i]];
+                if (zone && [zone window] == eventWindow)
+                {
+                    isResizeChild = YES;
+                    break;
+                }
+            }
+
+            if (!isResizeChild && ![[frame cursor] leftPointerSelected])
+            {
+                [frame showLeftPointerCursor];
+            }
         }
     }
 

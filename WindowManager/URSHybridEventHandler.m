@@ -806,6 +806,8 @@
         case XCB_CLIENT_MESSAGE:
         case XCB_CONFIGURE_REQUEST:
         case XCB_SELECTION_CLEAR:
+        case XCB_ENTER_NOTIFY:
+        case XCB_LEAVE_NOTIFY:
             return YES;
         default:
             return NO;
