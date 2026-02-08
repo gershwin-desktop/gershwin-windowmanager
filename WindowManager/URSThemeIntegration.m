@@ -285,17 +285,23 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     [shadowPath setLineWidth:1.0];
     [shadowPath stroke];
 
-    // Stroke border
-    [borderColor setStroke];
-    [path setLineWidth:1.0];
-    [path stroke];
+    // Stroke border for interior buttons only.
+    // Edge buttons skip the rectangle stroke because it creates a visible gap
+    // between the rectangle's top edge (y=NSMaxY) and the corner arc below it.
+    // Edge button borders are drawn explicitly (edge arcs, top line, bottom line,
+    // interior side line) for seamless rounded corners.
+    if (position == TitleBarButtonPositionRightInner) {
+        [borderColor setStroke];
+        [path setLineWidth:1.0];
+        [path stroke];
+    }
 
     // Draw top border line (replicates titlebar top edge on buttons)
     NSBezierPath *topLine = [NSBezierPath bezierPath];
     CGFloat radius = BUTTON_INNER_RADIUS;
     if (position == TitleBarButtonPositionLeft) {
         // Close button: line from after top-left arc to right edge
-        [topLine moveToPoint:NSMakePoint(NSMinX(rect) + radius, NSMaxY(rect) - 0.5)];
+        [topLine moveToPoint:NSMakePoint(1.5 + radius, NSMaxY(rect) - 0.5)];
         [topLine lineToPoint:NSMakePoint(NSMaxX(rect), NSMaxY(rect) - 0.5)];
     } else if (position == TitleBarButtonPositionRightInner) {
         // Maximize button (inner right): full-width top line (no rounded corners)
@@ -305,7 +311,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                position == TitleBarButtonPositionRightFull) {
         // Minimize button (far right): line from left edge to before top-right arc
         [topLine moveToPoint:NSMakePoint(NSMinX(rect), NSMaxY(rect) - 0.5)];
-        [topLine lineToPoint:NSMakePoint(NSMaxX(rect) - radius, NSMaxY(rect) - 0.5)];
+        [topLine lineToPoint:NSMakePoint(NSMaxX(rect) - 1.5 - radius, NSMaxY(rect) - 0.5)];
     }
     if ([topLine elementCount] > 0) {
         [topBorderColor setStroke];
@@ -332,7 +338,12 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // Draw at x=1.5 to account for X11 window offset (positioned at x=-1)
         NSBezierPath *leftEdge = [NSBezierPath bezierPath];
         [leftEdge moveToPoint:NSMakePoint(1.5, NSMinY(rect))];
-        [leftEdge lineToPoint:NSMakePoint(1.5, NSMaxY(rect))];
+        [leftEdge lineToPoint:NSMakePoint(1.5, NSMaxY(rect) - 0.5 - radius)];
+        [leftEdge appendBezierPathWithArcWithCenter:NSMakePoint(1.5 + radius, NSMaxY(rect) - 0.5 - radius)
+                                             radius:radius
+                                         startAngle:180
+                                           endAngle:90
+                                          clockwise:YES];
         [leftEdge setLineWidth:1.0];
         [leftEdge stroke];
     }
@@ -344,7 +355,11 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // Draw at NSMaxX(rect) - 1.5 to account for X11 window offset (positioned at x=-1, width += 2)
         NSBezierPath *rightEdge = [NSBezierPath bezierPath];
         [rightEdge moveToPoint:NSMakePoint(NSMaxX(rect) - 1.5, NSMinY(rect))];
-        [rightEdge lineToPoint:NSMakePoint(NSMaxX(rect) - 1.5, NSMaxY(rect))];
+        [rightEdge lineToPoint:NSMakePoint(NSMaxX(rect) - 1.5, NSMaxY(rect) - 0.5 - radius)];
+        [rightEdge appendBezierPathWithArcWithCenter:NSMakePoint(NSMaxX(rect) - 1.5 - radius, NSMaxY(rect) - 0.5 - radius)
+                                              radius:radius
+                                          startAngle:0
+                                            endAngle:90];
         [rightEdge setLineWidth:1.0];
         [rightEdge stroke];
     }
@@ -361,57 +376,34 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         [bottomLine setLineWidth:1.0];
         [bottomLine stroke];
     }
+
+    // Interior-side borders for edge buttons (replaces rectangle stroke's side borders)
+    // These border the edge between the button and the adjacent title area
+    if (position == TitleBarButtonPositionLeft) {
+        // Close button: right side border (facing title area)
+        NSBezierPath *rightSide = [NSBezierPath bezierPath];
+        [rightSide moveToPoint:NSMakePoint(NSMaxX(rect), NSMinY(rect))];
+        [rightSide lineToPoint:NSMakePoint(NSMaxX(rect), NSMaxY(rect))];
+        [borderColor setStroke];
+        [rightSide setLineWidth:1.0];
+        [rightSide stroke];
+    } else if (position == TitleBarButtonPositionRightOuter ||
+               position == TitleBarButtonPositionRightFull) {
+        // Minimize button: left side border (facing title/zoom area)
+        NSBezierPath *leftSide = [NSBezierPath bezierPath];
+        [leftSide moveToPoint:NSMakePoint(NSMinX(rect), NSMinY(rect))];
+        [leftSide lineToPoint:NSMakePoint(NSMinX(rect), NSMaxY(rect))];
+        [borderColor setStroke];
+        [leftSide setLineWidth:1.0];
+        [leftSide stroke];
+    }
 }
 
 + (NSBezierPath *)buttonPathForRect:(NSRect)frame position:(TitleBarButtonPosition)position {
-    CGFloat radius = BUTTON_INNER_RADIUS;
+    // All button positions use full rectangles for fill/stroke.
+    // Visible corner rounding is handled by edge border arcs in drawEdgeButtonInRect:.
     NSBezierPath *path = [NSBezierPath bezierPath];
-
-    switch (position) {
-        case TitleBarButtonPositionLeft:
-            // Close button: ONLY top-left corner rounded, full height
-            [path moveToPoint:NSMakePoint(NSMinX(frame), NSMinY(frame))];  // bottom-left
-            [path lineToPoint:NSMakePoint(NSMaxX(frame), NSMinY(frame))];  // bottom-right (straight)
-            [path lineToPoint:NSMakePoint(NSMaxX(frame), NSMaxY(frame))];  // top-right (straight inner edge)
-            [path lineToPoint:NSMakePoint(NSMinX(frame) + radius, NSMaxY(frame))];  // to top-left arc start
-            [path appendBezierPathWithArcWithCenter:NSMakePoint(NSMinX(frame) + radius, NSMaxY(frame) - radius)
-                                             radius:radius
-                                         startAngle:90
-                                           endAngle:180];  // top-left corner
-            [path closePath];
-            break;
-
-        case TitleBarButtonPositionRightInner:
-            // Maximize button (inner right, side-by-side): NO rounding (interior button)
-            [path appendBezierPathWithRect:frame];
-            break;
-
-        case TitleBarButtonPositionRightOuter:
-            // Minimize button (far right, side-by-side): ONLY top-right corner rounded
-            [path moveToPoint:NSMakePoint(NSMinX(frame), NSMinY(frame))];  // bottom-left
-            [path lineToPoint:NSMakePoint(NSMaxX(frame), NSMinY(frame))];  // bottom-right
-            [path lineToPoint:NSMakePoint(NSMaxX(frame), NSMaxY(frame) - radius)];  // up right edge to arc
-            [path appendBezierPathWithArcWithCenter:NSMakePoint(NSMaxX(frame) - radius, NSMaxY(frame) - radius)
-                                             radius:radius
-                                         startAngle:0
-                                           endAngle:90];  // top-right corner
-            [path lineToPoint:NSMakePoint(NSMinX(frame), NSMaxY(frame))];  // straight inner edge (left)
-            [path closePath];
-            break;
-
-        case TitleBarButtonPositionRightFull:
-            // Minimize button alone (full height): ONLY top-right corner rounded
-            [path moveToPoint:NSMakePoint(NSMinX(frame), NSMinY(frame))];  // bottom-left
-            [path lineToPoint:NSMakePoint(NSMaxX(frame), NSMinY(frame))];  // bottom-right
-            [path lineToPoint:NSMakePoint(NSMaxX(frame), NSMaxY(frame) - radius)];  // up right edge to arc
-            [path appendBezierPathWithArcWithCenter:NSMakePoint(NSMaxX(frame) - radius, NSMaxY(frame) - radius)
-                                             radius:radius
-                                         startAngle:0
-                                           endAngle:90];  // top-right corner
-            [path lineToPoint:NSMakePoint(NSMinX(frame), NSMaxY(frame))];  // straight inner edge (left)
-            [path closePath];
-            break;
-    }
+    [path appendBezierPathWithRect:frame];
 
     return path;
 }
