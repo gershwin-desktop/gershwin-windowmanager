@@ -3790,4 +3790,37 @@ static XCBConnection *sharedInstance;
     [self flush];
 }
 
+- (void)centerFrame:(XCBFrame *)frame {
+    if (!frame) {
+        NSLog(@"[Center] No frame to center");
+        return;
+    }
+
+    [self ensureWorkareaCache:frame];
+
+    XCBRect currentRect = [frame windowRect];
+    uint32_t windowWidth = currentRect.size.width;
+    uint32_t windowHeight = currentRect.size.height;
+
+    int32_t centerX = _cachedWorkareaX + (_cachedWorkareaWidth - windowWidth) / 2;
+    int32_t centerY = _cachedWorkareaY + (_cachedWorkareaHeight - windowHeight) / 2;
+
+    if (centerX < _cachedWorkareaX) centerX = _cachedWorkareaX;
+    if (centerY < _cachedWorkareaY) centerY = _cachedWorkareaY;
+
+    XCBRect targetRect = XCBMakeRect(
+        XCBMakePoint(centerX, centerY),
+        XCBMakeSize(windowWidth, windowHeight));
+
+    NSLog(@"[Center] Centering frame to (%d, %d)", centerX, centerY);
+
+    [frame setOldRect:currentRect];
+
+    [frame programmaticResizeToRect:targetRect];
+    [frame updateAllResizeZonePositions];
+    [frame applyRoundedCornersShapeMask];
+
+    [self flush];
+}
+
 @end

@@ -166,9 +166,12 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 /*** WINDOW TILING ***/
 
 - (void)centerActiveWindow;
+- (void)centerFrame:(XCBFrame *)frame;
 - (void)tileActiveWindowLeft;
 - (void)tileActiveWindowRight;
 - (void)tileActiveWindowToZone:(SnapZone)zone;
+- (void)maximizeFrameVertically:(XCBFrame *)frame;
+- (void)maximizeFrameHorizontally:(XCBFrame *)frame;
 - (void)showSnapPreviewForZone:(SnapZone)zone frame:(XCBFrame *)frame;
 - (void)hideSnapPreview;
 - (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame;

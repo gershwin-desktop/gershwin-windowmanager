@@ -1968,6 +1968,26 @@
               (int)titlebarRect.position.x, (int)titlebarRect.position.y,
               [titlebar parentWindow] ? NSStringFromClass([[titlebar parentWindow] class]) : @"nil");
 
+        // Right-click on titlebar → show tiling context menu (deferred)
+        if (pressEvent->detail == 3) {
+            xcb_allow_events([connection connection], XCB_ALLOW_ASYNC_POINTER, pressEvent->time);
+            xcb_ungrab_pointer([connection connection], pressEvent->time);
+            [connection flush];
+
+            XCBFrame *frame = (XCBFrame*)[titlebar parentWindow];
+            if (frame && [frame isKindOfClass:[XCBFrame class]]) {
+                NSDictionary *info = @{
+                    @"frame": frame,
+                    @"x": @((double)pressEvent->root_x),
+                    @"y": @((double)pressEvent->root_y)
+                };
+                [self performSelector:@selector(deferredShowTilingContextMenu:)
+                           withObject:info
+                           afterDelay:0];
+            }
+            return YES;
+        }
+
         // Check which button was clicked using the button layout
         NSPoint clickPoint = NSMakePoint(pressEvent->event_x, pressEvent->event_y);
         NSLog(@"GSTheme: Click at (%.0f, %.0f)", clickPoint.x, clickPoint.y);
@@ -3446,6 +3466,183 @@
 - (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum
 {
     [self.recentlyAutoFocusedWindowIds removeObject:windowIdNum];
+}
+
+#pragma mark - Titlebar Context Menu (Right-Click Tiling)
+
+- (void)deferredShowTilingContextMenu:(NSDictionary *)info
+{
+    XCBFrame *frame = info[@"frame"];
+    NSPoint x11Point = NSMakePoint([info[@"x"] doubleValue], [info[@"y"] doubleValue]);
+    [self showTilingContextMenuForFrame:frame atX11Point:x11Point];
+}
+
+- (void)showTilingContextMenuForFrame:(XCBFrame *)frame atX11Point:(NSPoint)x11Point
+{
+    if (!frame) return;
+
+    // Convert X11 coordinates (Y=0 at top) to GNUstep (Y=0 at bottom)
+    XCBScreen *screen = [[connection screens] objectAtIndex:0];
+    uint16_t screenHeight = [screen height];
+    NSPoint gnustepPoint = NSMakePoint(x11Point.x, screenHeight - x11Point.y);
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Window"];
+
+    NSMenuItem *item;
+
+    item = [[NSMenuItem alloc] initWithTitle:@"Center"
+                                      action:@selector(tilingMenuCenter:)
+                               keyEquivalent:@""];
+    [item setTarget:self];
+    [item setRepresentedObject:frame];
+    [menu addItem:item];
+
+    item = [[NSMenuItem alloc] initWithTitle:@"Maximize Vertically"
+                                      action:@selector(tilingMenuMaximizeVertically:)
+                               keyEquivalent:@""];
+    [item setTarget:self];
+    [item setRepresentedObject:frame];
+    [menu addItem:item];
+
+    item = [[NSMenuItem alloc] initWithTitle:@"Maximize Horizontally"
+                                      action:@selector(tilingMenuMaximizeHorizontally:)
+                               keyEquivalent:@""];
+    [item setTarget:self];
+    [item setRepresentedObject:frame];
+    [menu addItem:item];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    item = [[NSMenuItem alloc] initWithTitle:@"Tile Left"
+                                      action:@selector(tilingMenuTileLeft:)
+                               keyEquivalent:@""];
+    [item setTarget:self];
+    [item setRepresentedObject:frame];
+    [menu addItem:item];
+
+    item = [[NSMenuItem alloc] initWithTitle:@"Tile Right"
+                                      action:@selector(tilingMenuTileRight:)
+                               keyEquivalent:@""];
+    [item setTarget:self];
+    [item setRepresentedObject:frame];
+    [menu addItem:item];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    item = [[NSMenuItem alloc] initWithTitle:@"Tile Top Left"
+                                      action:@selector(tilingMenuTileTopLeft:)
+                               keyEquivalent:@""];
+    [item setTarget:self];
+    [item setRepresentedObject:frame];
+    [menu addItem:item];
+
+    item = [[NSMenuItem alloc] initWithTitle:@"Tile Top Right"
+                                      action:@selector(tilingMenuTileTopRight:)
+                               keyEquivalent:@""];
+    [item setTarget:self];
+    [item setRepresentedObject:frame];
+    [menu addItem:item];
+
+    item = [[NSMenuItem alloc] initWithTitle:@"Tile Bottom Left"
+                                      action:@selector(tilingMenuTileBottomLeft:)
+                               keyEquivalent:@""];
+    [item setTarget:self];
+    [item setRepresentedObject:frame];
+    [menu addItem:item];
+
+    item = [[NSMenuItem alloc] initWithTitle:@"Tile Bottom Right"
+                                      action:@selector(tilingMenuTileBottomRight:)
+                               keyEquivalent:@""];
+    [item setTarget:self];
+    [item setRepresentedObject:frame];
+    [menu addItem:item];
+
+    NSLog(@"[TilingMenu] Showing context menu at GNUstep (%.0f, %.0f) for frame %u",
+          gnustepPoint.x, gnustepPoint.y, [frame window]);
+
+    NSEvent *event = [NSEvent mouseEventWithType: NSRightMouseDown
+                                        location: gnustepPoint
+                                   modifierFlags: 0
+                                       timestamp: 0
+                                    windowNumber: 0
+                                         context: nil
+                                     eventNumber: 0
+                                      clickCount: 1
+                                        pressure: 0];
+    [NSMenu popUpContextMenu: menu withEvent: event forView: nil];
+    menu = nil;
+}
+
+- (void)tilingMenuCenter:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [connection windowForXCBId:[frame window]]) {
+        [connection centerFrame:frame];
+    }
+}
+
+- (void)tilingMenuMaximizeVertically:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [connection windowForXCBId:[frame window]]) {
+        [connection maximizeFrameVertically:frame];
+    }
+}
+
+- (void)tilingMenuMaximizeHorizontally:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [connection windowForXCBId:[frame window]]) {
+        [connection maximizeFrameHorizontally:frame];
+    }
+}
+
+- (void)tilingMenuTileLeft:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [connection windowForXCBId:[frame window]]) {
+        [connection executeSnapForZone:SnapZoneLeft frame:frame];
+    }
+}
+
+- (void)tilingMenuTileRight:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [connection windowForXCBId:[frame window]]) {
+        [connection executeSnapForZone:SnapZoneRight frame:frame];
+    }
+}
+
+- (void)tilingMenuTileTopLeft:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [connection windowForXCBId:[frame window]]) {
+        [connection executeSnapForZone:SnapZoneTopLeft frame:frame];
+    }
+}
+
+- (void)tilingMenuTileTopRight:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [connection windowForXCBId:[frame window]]) {
+        [connection executeSnapForZone:SnapZoneTopRight frame:frame];
+    }
+}
+
+- (void)tilingMenuTileBottomLeft:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [connection windowForXCBId:[frame window]]) {
+        [connection executeSnapForZone:SnapZoneBottomLeft frame:frame];
+    }
+}
+
+- (void)tilingMenuTileBottomRight:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [connection windowForXCBId:[frame window]]) {
+        [connection executeSnapForZone:SnapZoneBottomRight frame:frame];
+    }
 }
 
 @end

@@ -80,6 +80,9 @@
 - (void)handleKeyPressEvent:(xcb_key_press_event_t*)event;
 - (void)handleKeyReleaseEvent:(xcb_key_release_event_t*)event;
 
+// Titlebar Context Menu (right-click tiling)
+- (void)showTilingContextMenuForFrame:(XCBFrame *)frame atX11Point:(NSPoint)x11Point;
+
 // ICCCM/EWMH Strut and Workarea Management
 - (void)handleStrutPropertyChange:(xcb_property_notify_event_t*)event;
 - (void)readAndRegisterStrutForWindow:(xcb_window_t)windowId;
