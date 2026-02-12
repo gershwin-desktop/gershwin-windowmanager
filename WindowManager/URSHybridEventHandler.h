@@ -52,6 +52,9 @@
 // Auto-focus tracking to prevent double-focusing windows
 @property (strong, nonatomic) NSMutableSet* recentlyAutoFocusedWindowIds;
 
+// Active tiling context menu (for dismiss-on-outside-click and double-open guard)
+@property (strong, nonatomic) NSMenu *tilingContextMenu;
+
 // Cached Alt keycodes and poll timer to robustly detect Alt release
 @property (strong, nonatomic) NSMutableArray* altKeycodes;
 @property (strong, nonatomic) NSTimer* altReleasePollTimer;

@@ -547,6 +547,22 @@
             xcb_button_press_event_t *pressEvent = (xcb_button_press_event_t *)event;
             NSLog(@"EVENT: XCB_BUTTON_PRESS received for window %u at (%d, %d)",
                   pressEvent->event, pressEvent->event_x, pressEvent->event_y);
+
+            // Dismiss tiling context menu on any click outside it
+            if (self.tilingContextMenu) {
+                NSEvent *syntheticUp = [NSEvent mouseEventWithType:NSLeftMouseUp
+                                                          location:NSMakePoint(-1, -1)
+                                                     modifierFlags:0
+                                                         timestamp:0
+                                                      windowNumber:0
+                                                           context:nil
+                                                       eventNumber:0
+                                                        clickCount:1
+                                                          pressure:0];
+                [NSApp postEvent:syntheticUp atStart:YES];
+                break;
+            }
+
             // Check if this is a button click on a GSThemeTitleBar
             if (![self handleTitlebarButtonPress:pressEvent]) {
                 // Not a titlebar button, let xcbkit handle normally
@@ -565,6 +581,23 @@
         }
         case XCB_BUTTON_RELEASE: {
             xcb_button_release_event_t *releaseEvent = (xcb_button_release_event_t *)event;
+
+            // Dismiss tiling context menu on button release outside it
+            // (e.g., user held right-click on titlebar and released off the window)
+            if (self.tilingContextMenu) {
+                NSEvent *syntheticUp = [NSEvent mouseEventWithType:NSLeftMouseUp
+                                                          location:NSMakePoint(-1, -1)
+                                                     modifierFlags:0
+                                                         timestamp:0
+                                                      windowNumber:0
+                                                           context:nil
+                                                       eventNumber:0
+                                                        clickCount:1
+                                                          pressure:0];
+                [NSApp postEvent:syntheticUp atStart:YES];
+                break;
+            }
+
             // Let xcbkit handle the release first
             [connection handleButtonRelease:releaseEvent];
             // After resize completes, update the titlebar with GSTheme
@@ -3493,9 +3526,24 @@
 - (void)showTilingContextMenuForFrame:(XCBFrame *)frame atX11Point:(NSPoint)x11Point
 {
     if (!frame) return;
+    if (self.tilingContextMenu) return;  // Prevent double-open
+
+    // Don't show the menu if the right button has already been released.
+    // The deferred perform can fire after the user released — showing a menu
+    // with no button held causes a grab-failure lockup in the tracking loop.
+    XCBScreen *screen = [[connection screens] objectAtIndex:0];
+    xcb_window_t root = [[screen rootWindow] window];
+    xcb_query_pointer_cookie_t cookie = xcb_query_pointer([connection connection], root);
+    xcb_query_pointer_reply_t *reply = xcb_query_pointer_reply([connection connection], cookie, NULL);
+    if (reply) {
+        BOOL rightButtonHeld = (reply->mask & XCB_KEY_BUT_MASK_BUTTON_3) != 0;
+        free(reply);
+        if (!rightButtonHeld) {
+            return;
+        }
+    }
 
     // Convert X11 coordinates (Y=0 at top) to GNUstep (Y=0 at bottom)
-    XCBScreen *screen = [[connection screens] objectAtIndex:0];
     uint16_t screenHeight = [screen height];
     NSPoint gnustepPoint = NSMakePoint(x11Point.x, screenHeight - x11Point.y);
 
@@ -3582,8 +3630,54 @@
                                      eventNumber: 0
                                       clickCount: 1
                                         pressure: 0];
+    self.tilingContextMenu = menu;  // Track before blocking call
+
+    // Watchdog: poll button state during menu tracking. If XGrabPointer fails
+    // (stale Xlib timestamp), the tracking loop won't see the button release.
+    // This timer fires in NSEventTrackingRunLoopMode and injects a synthetic
+    // mouse-up to break the loop when the right button is physically released.
+    NSTimer *watchdog = [NSTimer timerWithTimeInterval:0.05
+                                               target:self
+                                             selector:@selector(tilingMenuButtonWatchdog:)
+                                             userInfo:nil
+                                              repeats:YES];
+    [[NSRunLoop currentRunLoop] addTimer:watchdog forMode:NSEventTrackingRunLoopMode];
+
     [NSMenu popUpContextMenu: menu withEvent: event forView: nil];
+
+    [watchdog invalidate];          // Safety: stop timer after menu dismissed
+    self.tilingContextMenu = nil;   // Clear after menu dismissed
     menu = nil;
+}
+
+- (void)tilingMenuButtonWatchdog:(NSTimer *)timer
+{
+    if (!self.tilingContextMenu) {
+        [timer invalidate];
+        return;
+    }
+
+    XCBScreen *screen = [[connection screens] objectAtIndex:0];
+    xcb_window_t root = [[screen rootWindow] window];
+    xcb_query_pointer_cookie_t cookie = xcb_query_pointer([connection connection], root);
+    xcb_query_pointer_reply_t *reply = xcb_query_pointer_reply([connection connection], cookie, NULL);
+    if (reply) {
+        BOOL rightButtonHeld = (reply->mask & XCB_KEY_BUT_MASK_BUTTON_3) != 0;
+        free(reply);
+        if (!rightButtonHeld) {
+            NSEvent *syntheticUp = [NSEvent mouseEventWithType:NSLeftMouseUp
+                                                      location:NSMakePoint(-1, -1)
+                                                 modifierFlags:0
+                                                     timestamp:0
+                                                  windowNumber:0
+                                                       context:nil
+                                                   eventNumber:0
+                                                    clickCount:1
+                                                      pressure:0];
+            [NSApp postEvent:syntheticUp atStart:YES];
+            [timer invalidate];
+        }
+    }
 }
 
 - (void)tilingMenuCenter:(NSMenuItem *)sender
