@@ -67,4 +67,7 @@
 + (NSInteger)buttonIndexAtX:(CGFloat)x forWidth:(CGFloat)width hasMaximize:(BOOL)hasMax;
 + (NSInteger)buttonIndexAtX:(CGFloat)x y:(CGFloat)y forWidth:(CGFloat)width height:(CGFloat)height hasMaximize:(BOOL)hasMax;
 
+// Orb button style detection (reads EauTitleBarButtonStyle preference)
++ (BOOL)isOrbButtonStyle;
+
 @end

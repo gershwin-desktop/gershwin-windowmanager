@@ -1909,12 +1909,14 @@
 
 #pragma mark - Titlebar Button Handling
 
-// Button hit detection for side-by-side titlebar buttons
-// Layout: Close (X) at left edge | title | Minimize (-) | Maximize (+) at right
+// Button hit detection for titlebar buttons
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point forTitlebar:(XCBTitleBar*)titlebar {
-    // Side-by-side button metrics (must match URSThemeIntegration.m)
-    static const CGFloat EDGE_BUTTON_WIDTH = 28.0;       // Close button width
-    static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;      // Width for each right-side button
+    // Button metrics (must match URSThemeIntegration.m)
+    static const CGFloat EDGE_BUTTON_WIDTH = 28.0;
+    static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;
+    static const CGFloat ORB_SIZE = 15.0;
+    static const CGFloat ORB_PAD_LEFT = 10.5;
+    static const CGFloat ORB_SPACING = 4.0;
 
     // Get titlebar dimensions
     XCBRect titlebarRect = [titlebar windowRect];
@@ -1936,18 +1938,42 @@
     NSLog(@"GSTheme: Button hit test at point (%.0f, %.0f), titlebar size: %.0fx%.0f, hasMaximize: %d",
           point.x, point.y, titlebarWidth, titlebarHeight, hasMaximize);
 
-    // Close button at left edge (full height)
-    NSRect closeRect = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, titlebarHeight);
+    if ([URSThemeIntegration isOrbButtonStyle]) {
+        // Orb layout: all buttons on left, 15x15, vertically centered
+        CGFloat buttonY = (titlebarHeight - ORB_SIZE) / 2.0;
+        CGFloat closeX = ORB_PAD_LEFT;
+        CGFloat miniX = closeX + ORB_SIZE + ORB_SPACING;
+        CGFloat zoomX = miniX + ORB_SIZE + ORB_SPACING;
 
-    // Check close button first (left edge)
+        NSRect closeRect = NSMakeRect(closeX, buttonY, ORB_SIZE, ORB_SIZE);
+        NSRect miniRect = NSMakeRect(miniX, buttonY, ORB_SIZE, ORB_SIZE);
+        NSRect zoomRect = NSMakeRect(zoomX, buttonY, ORB_SIZE, ORB_SIZE);
+
+        if (NSPointInRect(point, closeRect)) {
+            NSLog(@"GSTheme: Hit close orb");
+            return GSThemeTitleBarButtonClose;
+        }
+        if (NSPointInRect(point, miniRect)) {
+            NSLog(@"GSTheme: Hit miniaturize orb");
+            return GSThemeTitleBarButtonMiniaturize;
+        }
+        if (hasMaximize && NSPointInRect(point, zoomRect)) {
+            NSLog(@"GSTheme: Hit zoom orb");
+            return GSThemeTitleBarButtonZoom;
+        }
+
+        NSLog(@"GSTheme: No orb button hit");
+        return GSThemeTitleBarButtonNone;
+    }
+
+    // Edge layout: Close at left | title | Minimize | Maximize at right
+    NSRect closeRect = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, titlebarHeight);
     if (NSPointInRect(point, closeRect)) {
         NSLog(@"GSTheme: Hit close button");
         return GSThemeTitleBarButtonClose;
     }
 
-    // Side-by-side buttons on right edge
     if (hasMaximize) {
-        // Minimize rect (inner right)
         NSRect miniRect = NSMakeRect(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH, 0,
                                      RIGHT_BUTTON_WIDTH, titlebarHeight);
         if (NSPointInRect(point, miniRect)) {
@@ -1955,7 +1981,6 @@
             return GSThemeTitleBarButtonMiniaturize;
         }
 
-        // Zoom rect (far right)
         NSRect zoomRect = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH, 0,
                                      RIGHT_BUTTON_WIDTH, titlebarHeight);
         if (NSPointInRect(point, zoomRect)) {
@@ -1963,7 +1988,6 @@
             return GSThemeTitleBarButtonZoom;
         }
     } else {
-        // Only minimize button at far right
         NSRect miniRect = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH, 0,
                                      RIGHT_BUTTON_WIDTH, titlebarHeight);
         if (NSPointInRect(point, miniRect)) {
