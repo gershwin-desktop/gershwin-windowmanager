@@ -2226,9 +2226,12 @@
         xcb_get_keyboard_mapping_reply_t *reply = xcb_get_keyboard_mapping_reply(conn, cookie, NULL);
         if (!reply) {
             NSLog(@"[Alt-Tab] Warning: Failed to get keyboard mapping during cleanup");
-            // Fallback ungrab with common Tab keycode
-            xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1);
-            xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT);
+            // Fallback ungrab with common Tab keycode, all lock modifier combinations
+            uint16_t fbLockMasks[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
+            for (int j = 0; j < 4; j++) {
+                xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | fbLockMasks[j]);
+                xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | fbLockMasks[j]);
+            }
             [connection flush];
             return;
         }
@@ -2243,12 +2246,13 @@
                 xcb_keycode_t keycode = 8 + (i / reply->keysyms_per_keycode);
                 
                 NSLog(@"[Alt-Tab] Ungrabbing Tab key at keycode %d", keycode);
-                
-                // Ungrab Alt+Tab
-                xcb_ungrab_key(conn, keycode, root, XCB_MOD_MASK_1);
-                
-                // Ungrab Shift+Alt+Tab
-                xcb_ungrab_key(conn, keycode, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT);
+
+                // Ungrab Alt+Tab and Shift+Alt+Tab with all lock modifier combinations
+                uint16_t lockMasks[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
+                for (int j = 0; j < 4; j++) {
+                    xcb_ungrab_key(conn, keycode, root, XCB_MOD_MASK_1 | lockMasks[j]);
+                    xcb_ungrab_key(conn, keycode, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | lockMasks[j]);
+                }
                 
                 tabFound = YES;
                 break;
@@ -2257,8 +2261,11 @@
         
         if (!tabFound) {
             NSLog(@"[Alt-Tab] Using fallback keycode 23 for ungrab");
-            xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1);
-            xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT);
+            uint16_t fbLockMasks2[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
+            for (int j = 0; j < 4; j++) {
+                xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | fbLockMasks2[j]);
+                xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | fbLockMasks2[j]);
+            }
         }
         
         free(reply);
@@ -2358,23 +2365,26 @@
                 
                 NSLog(@"[Alt-Tab] Found Tab key at keycode %d", keycode);
                 
-                // Grab Alt+Tab (Mod1)
-                xcb_grab_key(conn,
-                           0,  // owner_events
-                           root,
-                           XCB_MOD_MASK_1,  // modifiers (Alt/Mod1)
-                           keycode,
-                           XCB_GRAB_MODE_ASYNC,
-                           XCB_GRAB_MODE_ASYNC);
-                
-                // Grab Shift+Alt+Tab
-                xcb_grab_key(conn,
-                           0,  // owner_events
-                           root,
-                           XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT,  // Alt + Shift
-                           keycode,
-                           XCB_GRAB_MODE_ASYNC,
-                           XCB_GRAB_MODE_ASYNC);
+                // Grab Alt+Tab and Shift+Alt+Tab with all lock modifier combinations
+                // so that NumLock (Mod2) and CapsLock don't block the grab
+                uint16_t lockMasks[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
+                for (int j = 0; j < 4; j++) {
+                    xcb_grab_key(conn,
+                               0,  // owner_events
+                               root,
+                               XCB_MOD_MASK_1 | lockMasks[j],
+                               keycode,
+                               XCB_GRAB_MODE_ASYNC,
+                               XCB_GRAB_MODE_ASYNC);
+
+                    xcb_grab_key(conn,
+                               0,  // owner_events
+                               root,
+                               XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | lockMasks[j],
+                               keycode,
+                               XCB_GRAB_MODE_ASYNC,
+                               XCB_GRAB_MODE_ASYNC);
+                }
                 
                 tabFound = YES;
                 // Don't break, keep scanning for Alt keycodes
@@ -2404,9 +2414,12 @@
         
         if (!tabFound) {
             NSLog(@"[Alt-Tab] Warning: Tab key not found in keyboard mapping, using keycode 23 as fallback");
-            // Fallback to common Tab keycode
-            xcb_grab_key(conn, 0, root, XCB_MOD_MASK_1, 23, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-            xcb_grab_key(conn, 0, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT, 23, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+            // Fallback to common Tab keycode, with all lock modifier combinations
+            uint16_t fbLockMasks[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
+            for (int j = 0; j < 4; j++) {
+                xcb_grab_key(conn, 0, root, XCB_MOD_MASK_1 | fbLockMasks[j], 23, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+                xcb_grab_key(conn, 0, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | fbLockMasks[j], 23, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
+            }
         }
         
         free(reply);
