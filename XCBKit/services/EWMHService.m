@@ -1063,6 +1063,8 @@
             [self updateNetWmState:aWindow];
         }
 
+/* 
+ * This caused the Desktop window to have the "Above" atom set, which is not desired.
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateSticky] ||
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateSticky])
         {
@@ -1076,7 +1078,7 @@
 
             [self updateNetWmState:aWindow];
         }
-
+*/
     }
 
 }
