@@ -6,6 +6,18 @@
 
 #import "XCBCursor.h"
 #import "XCBConnection.h"
+#import <xcb/xcb.h>
+
+// X11 cursor font glyph indices (from X11/cursorfont.h)
+#define XC_left_ptr              68
+#define XC_bottom_side           16
+#define XC_right_side            96
+#define XC_left_side             70
+#define XC_top_side              138
+#define XC_bottom_right_corner   14
+#define XC_top_left_corner       134
+#define XC_top_right_corner      136
+#define XC_bottom_left_corner    12
 
 @implementation XCBCursor
 
@@ -69,24 +81,30 @@
     resizeTopCursorName = @"top_side";
 
 
-    cursor = xcb_cursor_load_cursor(context, [leftPointerName cString]);
-    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:leftPointerName];
-    cursor = xcb_cursor_load_cursor(context, [resizeBottomCursorName cString]);
-    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:resizeBottomCursorName];
-    cursor = xcb_cursor_load_cursor(context, [resizeRightCursorName cString]);
-    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:resizeRightCursorName];
-    cursor = xcb_cursor_load_cursor(context, [resizeLeftCursorName cString]);
-    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:resizeLeftCursorName];
-    cursor = xcb_cursor_load_cursor(context, [resizeBottomRightCornerCursorName cString]);
-    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:resizeBottomRightCornerCursorName];
-    cursor = xcb_cursor_load_cursor(context, [resizeTopLeftCornerCursorName cString]);
-    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:resizeTopLeftCornerCursorName];
-    cursor = xcb_cursor_load_cursor(context, [resizeTopRightCornerCursorName cString]);
-    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:resizeTopRightCornerCursorName];
-    cursor = xcb_cursor_load_cursor(context, [resizeBottomLeftCornerCursorName cString]);
-    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:resizeBottomLeftCornerCursorName];
-    cursor = xcb_cursor_load_cursor(context, [resizeTopCursorName cString]);
-    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:resizeTopCursorName];
+    // Open the legacy X cursor font for fallback
+    xcb_font_t cursorFont = xcb_generate_id([connection connection]);
+    xcb_void_cookie_t fontCookie = xcb_open_font_checked([connection connection], cursorFont, 6, "cursor");
+    xcb_generic_error_t *fontError = xcb_request_check([connection connection], fontCookie);
+    if (fontError)
+    {
+        NSLog(@"Warning: Failed to open X cursor font (error code %d), glyph fallback unavailable", fontError->error_code);
+        free(fontError);
+        cursorFont = 0;
+    }
+
+    // Load each cursor from theme, falling back to X cursor font glyph
+    [self loadCursor:leftPointerName glyphIndex:XC_left_ptr font:cursorFont];
+    [self loadCursor:resizeBottomCursorName glyphIndex:XC_bottom_side font:cursorFont];
+    [self loadCursor:resizeRightCursorName glyphIndex:XC_right_side font:cursorFont];
+    [self loadCursor:resizeLeftCursorName glyphIndex:XC_left_side font:cursorFont];
+    [self loadCursor:resizeBottomRightCornerCursorName glyphIndex:XC_bottom_right_corner font:cursorFont];
+    [self loadCursor:resizeTopLeftCornerCursorName glyphIndex:XC_top_left_corner font:cursorFont];
+    [self loadCursor:resizeTopRightCornerCursorName glyphIndex:XC_top_right_corner font:cursorFont];
+    [self loadCursor:resizeBottomLeftCornerCursorName glyphIndex:XC_bottom_left_corner font:cursorFont];
+    [self loadCursor:resizeTopCursorName glyphIndex:XC_top_side font:cursorFont];
+
+    if (cursorFont != 0)
+        xcb_close_font([connection connection], cursorFont);
 
     return self;
 }
@@ -100,6 +118,9 @@
     resizeLeftSelected = NO;
     resizeTopSelected = NO;
     resizeBottomRightCornerSelected = NO;
+    resizeTopLeftCornerSelected = NO;
+    resizeTopRightCornerSelected = NO;
+    resizeBottomLeftCornerSelected = NO;
     return cursor;
 }
 
@@ -114,6 +135,9 @@
             resizeRightSelected = NO;
             resizeLeftSelected = NO;
             resizeBottomRightCornerSelected = NO;
+            resizeTopLeftCornerSelected = NO;
+            resizeTopRightCornerSelected = NO;
+            resizeBottomLeftCornerSelected = NO;
             resizeTopSelected = NO;
             break;
         case RightBorder:
@@ -123,6 +147,9 @@
             resizeRightSelected = YES;
             resizeLeftSelected = NO;
             resizeBottomRightCornerSelected = NO;
+            resizeTopLeftCornerSelected = NO;
+            resizeTopRightCornerSelected = NO;
+            resizeBottomLeftCornerSelected = NO;
             resizeTopSelected = NO;
             break;
         case LeftBorder:
@@ -132,6 +159,9 @@
             resizeRightSelected = NO;
             resizeLeftSelected = YES;
             resizeBottomRightCornerSelected = NO;
+            resizeTopLeftCornerSelected = NO;
+            resizeTopRightCornerSelected = NO;
+            resizeBottomLeftCornerSelected = NO;
             resizeTopSelected = NO;
             break;
         case BottomRightCorner:
@@ -141,6 +171,9 @@
             resizeRightSelected = NO;
             resizeLeftSelected = NO;
             resizeBottomRightCornerSelected = YES;
+            resizeTopLeftCornerSelected = NO;
+            resizeTopRightCornerSelected = NO;
+            resizeBottomLeftCornerSelected = NO;
             resizeTopSelected = NO;
             break;
         case TopBorder:
@@ -197,6 +230,56 @@
     }
 
     return cursor;
+}
+
+- (void) loadCursor:(NSString *)name glyphIndex:(uint16_t)glyph font:(xcb_font_t)cursorFont
+{
+    cursor = xcb_cursor_load_cursor(context, [name UTF8String]);
+
+    if (cursor == 0)
+    {
+        NSLog(@"Cursor '%@': theme lookup returned 0, using X cursor font fallback (glyph %u)", name, glyph);
+        if (cursorFont != 0)
+        {
+            cursor = xcb_generate_id([connection connection]);
+            xcb_create_glyph_cursor([connection connection],
+                                    cursor,
+                                    cursorFont,         // source font
+                                    cursorFont,         // mask font
+                                    glyph,              // source glyph
+                                    glyph + 1,          // mask glyph (convention: source + 1)
+                                    0, 0, 0,            // foreground RGB (black)
+                                    0xFFFF, 0xFFFF, 0xFFFF);  // background RGB (white)
+        }
+        else
+        {
+            NSLog(@"Warning: No cursor font available, cursor '%@' will be unavailable", name);
+        }
+    }
+    else
+    {
+        NSLog(@"Cursor '%@': loaded from theme (id %u)", name, cursor);
+    }
+
+    [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:name];
+}
+
+- (xcb_cursor_t) cursorIdForPosition:(MousePosition)position
+{
+    NSString *name = nil;
+    switch (position)
+    {
+        case BottomBorder:      name = resizeBottomCursorName; break;
+        case RightBorder:       name = resizeRightCursorName; break;
+        case LeftBorder:        name = resizeLeftCursorName; break;
+        case TopBorder:         name = resizeTopCursorName; break;
+        case BottomRightCorner: name = resizeBottomRightCornerCursorName; break;
+        case TopLeftCorner:     name = resizeTopLeftCornerCursorName; break;
+        case TopRightCorner:    name = resizeTopRightCornerCursorName; break;
+        case BottomLeftCorner:  name = resizeBottomLeftCornerCursorName; break;
+        default:                name = leftPointerName; break;
+    }
+    return [[cursors objectForKey:name] unsignedIntValue];
 }
 
 - (BOOL) createContext

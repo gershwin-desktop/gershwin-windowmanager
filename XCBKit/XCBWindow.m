@@ -76,6 +76,8 @@
 @synthesize gotAttention;
 @synthesize alwaysOnTop;
 @synthesize pid;
+@synthesize use32BitDepth;
+@synthesize argbVisualId;
 
 
 - (id)initWithXCBWindow:(xcb_window_t)aWindow
@@ -355,17 +357,27 @@
         return;
     }
 
+    // ARGB support: Use 32-bit depth when compositor mode requires alpha transparency
+    // The caller must set use32BitDepth=YES and argbVisualId before calling createPixmap
+    xcb_drawable_t drawable = window;
+    if (use32BitDepth && argbVisualId != 0) {
+        depth = 32;
+        // Use the window itself as drawable since it's already 32-bit ARGB
+        // The drawable parameter only determines the screen association
+        NSLog(@"[XCBWindow:createPixmap] Using 32-bit ARGB depth for compositor alpha (visual: 0x%x)", argbVisualId);
+    }
+
     xcb_create_pixmap([connection connection],
                       depth,
                       pixmap,
-                      window,
+                      drawable,
                       windowRect.size.width,
                       windowRect.size.height);
 
     xcb_create_pixmap([connection connection],
                       depth,
                       dPixmap,
-                      window,
+                      drawable,
                       windowRect.size.width,
                       windowRect.size.height);
 
@@ -406,7 +418,11 @@
 
 - (void) drawArea:(XCBRect)aRect
 {
-    [self clearArea:aRect generatesExposure:NO];
+    // Skip clearArea in compositor mode - transparent pixmap content should not be
+    // overwritten by window background. The xcb_copy_area will replace all pixels.
+    if (!use32BitDepth) {
+        [self clearArea:aRect generatesExposure:NO];
+    }
     xcb_copy_area([connection connection],
                   isAbove ? pixmap : dPixmap,
                   window,
@@ -568,29 +584,29 @@
 
 - (BOOL) changeAttributes:(uint32_t[])values withMask:(uint32_t)aMask checked:(BOOL)check
 {
-    xcb_void_cookie_t cookie;
-
     BOOL attributesChanged = NO;
 
     //NSLog(@"Changing attributes for window: %u", window);
 
     if (check)
     {
-        cookie = xcb_change_window_attributes_checked([connection connection], window, aMask, values);
-    } else
-    {
-        cookie = xcb_change_window_attributes([connection connection], window, aMask, values);
+        xcb_void_cookie_t cookie = xcb_change_window_attributes_checked([connection connection], window, aMask, values);
+        xcb_generic_error_t *error = xcb_request_check([connection connection], cookie);
+
+        if (error != NULL)
+        {
+            NSLog(@"Unable to change the attributes for window %u with error code: %d", window,
+                  error->error_code);
+            free(error);
+        }
+        else
+            attributesChanged = YES;
     }
-
-    xcb_generic_error_t *error = xcb_request_check([connection connection], cookie);
-
-    if (error != NULL)
-        NSLog(@"Unable to change the attributes for window %u with error code: %d", window,
-              error->error_code);
     else
+    {
+        xcb_change_window_attributes([connection connection], window, aMask, values);
         attributesChanged = YES;
-
-    free(error);
+    }
 
     return attributesChanged;
 }
@@ -1135,10 +1151,10 @@
             config_frame_mask |= XCB_CONFIG_WINDOW_WIDTH;
             config_win_mask |= XCB_CONFIG_WINDOW_WIDTH;
             config_title_mask |= XCB_CONFIG_WINDOW_WIDTH;
-            config_frame_vals[frame_i++] = anEvent->width;
+            config_frame_vals[frame_i++] = anEvent->width + 2;
             config_win_vals[win_i++] = anEvent->width;
-            config_title_vals[title_i++] = anEvent->width;
-            frameRect.size.width = anEvent->width;
+            config_title_vals[title_i++] = anEvent->width + 2;
+            frameRect.size.width = anEvent->width + 2;
         } else {
             NSDebugLog(@"Ignoring width change request in ConfigureRequest for non-resizable window %u", window);
         }
@@ -1149,9 +1165,9 @@
         if ([self canResize]) {
             config_frame_mask |= XCB_CONFIG_WINDOW_HEIGHT;
             config_win_mask |= XCB_CONFIG_WINDOW_HEIGHT;
-            config_frame_vals[frame_i++] = anEvent->height + titleHeight;
+            config_frame_vals[frame_i++] = anEvent->height + titleHeight + 1;
             config_win_vals[win_i++] = anEvent->height;
-            frameRect.size.height = anEvent->height + titleHeight;
+            frameRect.size.height = anEvent->height + titleHeight + 1;
         } else {
             NSDebugLog(@"Ignoring height change request in ConfigureRequest for non-resizable window %u", window);
         }

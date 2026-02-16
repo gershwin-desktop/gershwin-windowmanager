@@ -7,11 +7,17 @@
 
 #import "URSThemeIntegration.h"
 #import "URSRenderingContext.h"
+#import "URSCompositingManager.h"
 #import <XCBKit/XCBConnection.h>
 #import <XCBKit/XCBFrame.h>
+#import <XCBKit/XCBScreen.h>
 #import <cairo/cairo.h>
 #import <cairo/cairo-xcb.h>
 #import <objc/runtime.h>
+#import <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 #import "GSThemeTitleBar.h"
 #import <XCBKit/services/ICCCMService.h>
 
@@ -24,10 +30,31 @@
                 andTitle:(NSString*)title;
 @end
 
+@interface GSTheme (URSThemeCornerRadius)
+- (CGFloat)titlebarCornerRadius;
+@end
+
 @implementation URSThemeIntegration
 
 static URSThemeIntegration *sharedInstance = nil;
 static NSMutableSet *fixedSizeWindows = nil;
+
+// Hover state tracking for titlebar buttons
+static xcb_window_t hoveredTitlebarWindow = 0;
+static NSInteger hoveredButtonIndex = -1;  // -1=none, 0=close, 1=mini, 2=zoom
+
+// Edge button metrics (matching Eau theme AppearanceMetrics.h)
+// Declared early so they can be used in hover state methods
+static const CGFloat TITLEBAR_HEIGHT = 24.0;
+static const CGFloat EDGE_BUTTON_WIDTH = 28.0;        // Close button width (left edge)
+static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;       // Width for each right-side button (maximize, minimize)
+static const CGFloat ICON_STROKE = 1.5;               // Subtle icon strokes
+static const CGFloat ICON_INSET = 8.0;                // Icon inset from button edges (matches Eau theme)
+
+// Orb button metrics (matching Eau theme AppearanceMetrics.h orb constants)
+static const CGFloat ORB_BUTTON_SIZE = 15.0;
+static const CGFloat ORB_PADDING_LEFT = 10.5;
+static const CGFloat ORB_BUTTON_SPACING = 4.0;
 
 #pragma mark - Fixed-size window tracking
 
@@ -35,6 +62,64 @@ static NSMutableSet *fixedSizeWindows = nil;
     if (self == [URSThemeIntegration class]) {
         fixedSizeWindows = [[NSMutableSet alloc] init];
     }
+}
+
+#pragma mark - ARGB Visual Support for Compositor Alpha
+
+// Find 32-bit ARGB visual for alpha transparency support
+// Returns 0 if no ARGB visual is found
++ (xcb_visualid_t)findARGBVisualForScreen:(XCBScreen *)screen connection:(XCBConnection *)connection {
+    if (!screen || !connection) return 0;
+
+    xcb_screen_t *xcbScreen = [screen screen];
+    if (!xcbScreen) return 0;
+
+    // Iterate through all depths and visuals to find a 32-bit TrueColor visual
+    xcb_depth_iterator_t depth_iter = xcb_screen_allowed_depths_iterator(xcbScreen);
+
+    for (; depth_iter.rem; xcb_depth_next(&depth_iter)) {
+        if (depth_iter.data->depth != 32) continue;
+
+        xcb_visualtype_iterator_t visual_iter = xcb_depth_visuals_iterator(depth_iter.data);
+
+        for (; visual_iter.rem; xcb_visualtype_next(&visual_iter)) {
+            xcb_visualtype_t *visual = visual_iter.data;
+
+            // Look for TrueColor with 8-bit alpha channel
+            // TrueColor class is 4, DirectColor is 5
+            if (visual->_class == XCB_VISUAL_CLASS_TRUE_COLOR) {
+                // Check that it has reasonable bit masks for ARGB
+                // 32-bit visuals typically have 8 bits per channel
+                NSLog(@"[URSThemeIntegration] Found 32-bit TrueColor visual: 0x%x", visual->visual_id);
+                return visual->visual_id;
+            }
+        }
+    }
+
+    NSLog(@"[URSThemeIntegration] No 32-bit ARGB visual found");
+    return 0;
+}
+
+// Get xcb_visualtype_t for a given visual ID
++ (xcb_visualtype_t *)findVisualTypeForId:(xcb_visualid_t)visualId screen:(XCBScreen *)screen {
+    if (!screen || visualId == 0) return NULL;
+
+    xcb_screen_t *xcbScreen = [screen screen];
+    if (!xcbScreen) return NULL;
+
+    xcb_depth_iterator_t depth_iter = xcb_screen_allowed_depths_iterator(xcbScreen);
+
+    for (; depth_iter.rem; xcb_depth_next(&depth_iter)) {
+        xcb_visualtype_iterator_t visual_iter = xcb_depth_visuals_iterator(depth_iter.data);
+
+        for (; visual_iter.rem; xcb_visualtype_next(&visual_iter)) {
+            if (visual_iter.data->visual_id == visualId) {
+                return visual_iter.data;
+            }
+        }
+    }
+
+    return NULL;
 }
 
 + (void)registerFixedSizeWindow:(xcb_window_t)windowId {
@@ -57,87 +142,275 @@ static NSMutableSet *fixedSizeWindows = nil;
     }
 }
 
-// Method to draw authentic Eau button balls using the exact gradient logic from EauWindowButtonCell
-+ (void)drawEauButtonBall:(NSRect)frame withColor:(NSColor*)baseColor {
-    // Replicate EauWindowButtonCell drawBallWithRect logic exactly
-    frame = NSInsetRect(frame, 0.5, 0.5);
-    NSColor *bc = baseColor;
-    float luminosity = 0.5;
+#pragma mark - Hover State Tracking
 
-    NSColor *gradientDownColor1 = [bc highlightWithLevel: luminosity];
-    NSColor *gradientDownColor2 = [bc colorWithAlphaComponent: 0];
-    NSColor *shadowColor1 = [bc shadowWithLevel: 0.4];
-    NSColor *shadowColor2 = [bc shadowWithLevel: 0.6];
-    NSColor *gradientStrokeColor2 = [shadowColor1 highlightWithLevel: luminosity];
-    NSColor *gradientUpColor1 = [bc highlightWithLevel: luminosity+0.2];
-    NSColor *gradientUpColor2 = [gradientUpColor1 colorWithAlphaComponent: 0.5];
-    NSColor *gradientUpColor3 = [gradientUpColor1 colorWithAlphaComponent: 0];
-    NSColor *light1 = [NSColor whiteColor];
-    NSColor *light2 = [light1 colorWithAlphaComponent:0];
++ (xcb_window_t)hoveredTitlebarWindow {
+    return hoveredTitlebarWindow;
+}
 
-    // Gradient Declarations
-    NSGradient *gradientUp = [[NSGradient alloc] initWithColorsAndLocations:
-        gradientUpColor1, 0.1,
-        gradientUpColor2, 0.3,
-        gradientUpColor3, 1.0, nil];
-    NSGradient *gradientDown = [[NSGradient alloc] initWithColorsAndLocations:
-        gradientDownColor1, 0.0,
-        gradientDownColor2, 1.0, nil];
-    NSGradient *baseGradient = [[NSGradient alloc] initWithColorsAndLocations:
-        bc, 0.0,
-        shadowColor1, 0.80, nil];
-    NSGradient *gradientStroke = [[NSGradient alloc] initWithColorsAndLocations:
-        light1, 0.2,
-        light2, 1.0, nil];
-    NSGradient *gradientStroke2 = [[NSGradient alloc] initWithColorsAndLocations:
-        shadowColor2, 0.47,
-        gradientStrokeColor2, 1.0, nil];
++ (NSInteger)hoveredButtonIndex {
+    return hoveredButtonIndex;
+}
 
-    // Drawing code from EauWindowButtonCell
-    NSRect baseCircleGradientStrokeRect = frame;
-    NSRect baseCircleGradientStrokeRect2 = NSInsetRect(baseCircleGradientStrokeRect, 0.5, 0.5);
-    frame = NSInsetRect(frame, 1, 1);
++ (void)setHoveredTitlebar:(xcb_window_t)titlebarId buttonIndex:(NSInteger)buttonIdx {
+    hoveredTitlebarWindow = titlebarId;
+    hoveredButtonIndex = buttonIdx;
+}
 
-    NSRect baseCircleRect = NSMakeRect(NSMinX(frame) + floor(NSWidth(frame) * 0.06667 + 0.5), NSMinY(frame) + floor(NSHeight(frame) * 0.06667 + 0.5), floor(NSWidth(frame) * 0.93333 + 0.5) - floor(NSWidth(frame) * 0.06667 + 0.5), floor(NSHeight(frame) * 0.93333 + 0.5) - floor(NSHeight(frame) * 0.06667 + 0.5));
-    NSRect basecircle2Rect = NSMakeRect(NSMinX(frame) + floor(NSWidth(frame) * 0.06667 + 0.5), NSMinY(frame) + floor(NSHeight(frame) * 0.06667 + 0.5), floor(NSWidth(frame) * 0.93333 + 0.5) - floor(NSWidth(frame) * 0.06667 + 0.5), floor(NSHeight(frame) * 0.93333 + 0.5) - floor(NSHeight(frame) * 0.06667 + 0.5));
++ (void)clearHoverState {
+    hoveredTitlebarWindow = 0;
+    hoveredButtonIndex = -1;
+}
 
-    // BaseCircleGradientStroke Drawing
-    NSBezierPath *baseCircleGradientStrokePath = [NSBezierPath bezierPathWithOvalInRect: baseCircleGradientStrokeRect];
-    [gradientStroke drawInBezierPath: baseCircleGradientStrokePath angle: 90];
-    NSBezierPath *baseCircleGradientStrokePath2 = [NSBezierPath bezierPathWithOvalInRect: baseCircleGradientStrokeRect2];
-    [gradientStroke2 drawInBezierPath: baseCircleGradientStrokePath2 angle: -90];
++ (BOOL)isOrbButtonStyle {
+    static BOOL checked = NO;
+    static BOOL isOrb = NO;
+    if (!checked) {
+        NSString *style = [[NSUserDefaults standardUserDefaults]
+                           stringForKey:@"EauTitleBarButtonStyle"];
+        isOrb = [style isEqualToString:@"orb"];
+        checked = YES;
+    }
+    return isOrb;
+}
 
-    // BaseCircle Drawing
-    NSBezierPath *baseCirclePath = [NSBezierPath bezierPathWithOvalInRect: baseCircleRect];
-    CGFloat baseCircleResizeRatio = MIN(NSWidth(baseCircleRect) / 13, NSHeight(baseCircleRect) / 13);
-    [NSGraphicsContext saveGraphicsState];
-    [baseCirclePath addClip];
-    [baseGradient drawFromCenter: NSMakePoint(NSMidX(baseCircleRect) + 0 * baseCircleResizeRatio, NSMidY(baseCircleRect) + 0 * baseCircleResizeRatio) radius: 2.85 * baseCircleResizeRatio
-        toCenter: NSMakePoint(NSMidX(baseCircleRect) + 0 * baseCircleResizeRatio, NSMidY(baseCircleRect) + 0 * baseCircleResizeRatio) radius: 7.32 * baseCircleResizeRatio
-        options: NSGradientDrawsBeforeStartingLocation | NSGradientDrawsAfterEndingLocation];
-    [NSGraphicsContext restoreGraphicsState];
+// Determine which button (if any) is at a given x coordinate
+// Returns: 0=close, 1=mini, 2=zoom, -1=none
+// Convenience method that delegates to buttonIndexAtX:y:forWidth:height:hasMaximize:
++ (NSInteger)buttonIndexAtX:(CGFloat)x forWidth:(CGFloat)width hasMaximize:(BOOL)hasMax {
+    // Delegate to the full method with y at middle of titlebar
+    return [self buttonIndexAtX:x y:TITLEBAR_HEIGHT / 2.0 forWidth:width height:TITLEBAR_HEIGHT hasMaximize:hasMax];
+}
 
-    // basecircle2 Drawing
-    NSBezierPath *basecircle2Path = [NSBezierPath bezierPathWithOvalInRect: basecircle2Rect];
-    CGFloat basecircle2ResizeRatio = MIN(NSWidth(basecircle2Rect) / 13, NSHeight(basecircle2Rect) / 13);
-    [NSGraphicsContext saveGraphicsState];
-    [basecircle2Path addClip];
-    [gradientDown drawFromCenter: NSMakePoint(NSMidX(basecircle2Rect) + -0.98 * basecircle2ResizeRatio, NSMidY(basecircle2Rect) + -6.5 * basecircle2ResizeRatio) radius: 1.54 * basecircle2ResizeRatio
-        toCenter: NSMakePoint(NSMidX(basecircle2Rect) + -1.86 * basecircle2ResizeRatio, NSMidY(basecircle2Rect) + -8.73 * basecircle2ResizeRatio) radius: 8.65 * basecircle2ResizeRatio
-        options: NSGradientDrawsBeforeStartingLocation | NSGradientDrawsAfterEndingLocation];
-    [NSGraphicsContext restoreGraphicsState];
+// Determine which button (if any) is at a given x,y coordinate
+// Returns: 0=close, 1=mini, 2=zoom, -1=none
++ (NSInteger)buttonIndexAtX:(CGFloat)x y:(CGFloat)y forWidth:(CGFloat)width height:(CGFloat)height hasMaximize:(BOOL)hasMax {
+    if ([self isOrbButtonStyle]) {
+        // Orb layout: all 3 buttons on left, 15x15, vertically centered
+        CGFloat buttonY = (height - ORB_BUTTON_SIZE) / 2.0;
+        CGFloat closeX = ORB_PADDING_LEFT;
+        CGFloat miniX = closeX + ORB_BUTTON_SIZE + ORB_BUTTON_SPACING;
+        CGFloat zoomX = miniX + ORB_BUTTON_SIZE + ORB_BUTTON_SPACING;
 
-    // halfcircle Drawing
-    NSBezierPath *halfcirclePath = [NSBezierPath bezierPath];
-    [halfcirclePath moveToPoint: NSMakePoint(NSMinX(frame) + 0.93316 * NSWidth(frame), NSMinY(frame) + 0.46157 * NSHeight(frame))];
-    [halfcirclePath curveToPoint: NSMakePoint(NSMinX(frame) + 0.78652 * NSWidth(frame), NSMinY(frame) + 0.81548 * NSHeight(frame)) controlPoint1: NSMakePoint(NSMinX(frame) + 0.93316 * NSWidth(frame), NSMinY(frame) + 0.46157 * NSHeight(frame)) controlPoint2: NSMakePoint(NSMinX(frame) + 0.94476 * NSWidth(frame), NSMinY(frame) + 0.66376 * NSHeight(frame))];
-    [halfcirclePath curveToPoint: NSMakePoint(NSMinX(frame) + 0.21348 * NSWidth(frame), NSMinY(frame) + 0.81548 * NSHeight(frame)) controlPoint1: NSMakePoint(NSMinX(frame) + 0.62828 * NSWidth(frame), NSMinY(frame) + 0.96721 * NSHeight(frame)) controlPoint2: NSMakePoint(NSMinX(frame) + 0.37172 * NSWidth(frame), NSMinY(frame) + 0.96721 * NSHeight(frame))];
-    [halfcirclePath curveToPoint: NSMakePoint(NSMinX(frame) + 0.06684 * NSWidth(frame), NSMinY(frame) + 0.46157 * NSHeight(frame)) controlPoint1: NSMakePoint(NSMinX(frame) + 0.05524 * NSWidth(frame), NSMinY(frame) + 0.66376 * NSHeight(frame)) controlPoint2: NSMakePoint(NSMinX(frame) + 0.06684 * NSWidth(frame), NSMinY(frame) + 0.46157 * NSHeight(frame))];
-    [halfcirclePath lineToPoint: NSMakePoint(NSMinX(frame) + 0.93316 * NSWidth(frame), NSMinY(frame) + 0.46157 * NSHeight(frame))];
-    [halfcirclePath closePath];
-    [halfcirclePath setLineCapStyle: NSRoundLineCapStyle];
-    [halfcirclePath setLineJoinStyle: NSRoundLineJoinStyle];
-    [gradientUp drawInBezierPath: halfcirclePath angle: -90];
+        if (x >= closeX && x < closeX + ORB_BUTTON_SIZE &&
+            y >= buttonY && y < buttonY + ORB_BUTTON_SIZE) {
+            return 0;  // Close
+        }
+        if (x >= miniX && x < miniX + ORB_BUTTON_SIZE &&
+            y >= buttonY && y < buttonY + ORB_BUTTON_SIZE) {
+            return 1;  // Minimize
+        }
+        if (hasMax && x >= zoomX && x < zoomX + ORB_BUTTON_SIZE &&
+            y >= buttonY && y < buttonY + ORB_BUTTON_SIZE) {
+            return 2;  // Zoom
+        }
+        return -1;
+    }
+
+    // Edge layout: Close (X) on left | title | Minimize (-) | Maximize (+) on right
+    if (x >= 0 && x < EDGE_BUTTON_WIDTH) {
+        return 0;  // Close button
+    }
+
+    if (hasMax) {
+        CGFloat innerStart = width - 2 * RIGHT_BUTTON_WIDTH;
+        CGFloat outerStart = width - RIGHT_BUTTON_WIDTH;
+        if (x >= innerStart && x < outerStart) {
+            return 1;  // Minimize button (inner right)
+        }
+        if (x >= outerStart && x <= width) {
+            return 2;  // Zoom/maximize button (far right)
+        }
+    } else {
+        CGFloat miniStart = width - RIGHT_BUTTON_WIDTH;
+        if (x >= miniStart && x <= width) {
+            return 1;  // Minimize button
+        }
+    }
+
+    return -1;  // Not over any button
+}
+
+// Button position enum for side-by-side titlebar buttons
+typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
+    TitleBarButtonPositionLeft = 0,       // Close button - left edge, full height, top-left rounded
+    TitleBarButtonPositionRightInner,     // Minimize - inner right, full height, no corners rounded
+    TitleBarButtonPositionRightOuter,     // Zoom/maximize - far right, full height, top-right rounded
+    TitleBarButtonPositionRightFull       // Single button alone - full height, top-right rounded
+};
+
+// Draw rectangular edge button with gradient
+// buttonType: 0=close, 1=minimize, 2=maximize
++ (void)drawEdgeButtonInRect:(NSRect)rect
+                    position:(TitleBarButtonPosition)position
+                  buttonType:(NSInteger)buttonType
+                      active:(BOOL)active
+                     hovered:(BOOL)hovered {
+    // Get button gradient colors
+    NSColor *gradientColor1;
+    NSColor *gradientColor2;
+
+    if (hovered) {
+        // Hover colors - traffic light colors (apply to ALL windows, active and inactive)
+        switch (buttonType) {
+            case 0:  // Close - Red
+                gradientColor1 = [NSColor colorWithCalibratedRed:0.95 green:0.45 blue:0.42 alpha:1];
+                gradientColor2 = [NSColor colorWithCalibratedRed:0.85 green:0.30 blue:0.27 alpha:1];
+                break;
+            case 1:  // Minimize - Yellow
+                gradientColor1 = [NSColor colorWithCalibratedRed:0.95 green:0.75 blue:0.25 alpha:1];
+                gradientColor2 = [NSColor colorWithCalibratedRed:0.85 green:0.65 blue:0.15 alpha:1];
+                break;
+            case 2:  // Maximize - Green
+                gradientColor1 = [NSColor colorWithCalibratedRed:0.35 green:0.78 blue:0.35 alpha:1];
+                gradientColor2 = [NSColor colorWithCalibratedRed:0.25 green:0.68 blue:0.25 alpha:1];
+                break;
+            default:
+                // Fallback to gray
+                gradientColor1 = [NSColor colorWithCalibratedRed:0.65 green:0.65 blue:0.65 alpha:1];
+                gradientColor2 = [NSColor colorWithCalibratedRed:0.45 green:0.45 blue:0.45 alpha:1];
+                break;
+        }
+    } else if (active) {
+        // Active window - #C2C2C2 average (0.76) with subtle gradient
+        gradientColor1 = [NSColor colorWithCalibratedRed:0.82 green:0.82 blue:0.82 alpha:1];  // #D1D1D1
+        gradientColor2 = [NSColor colorWithCalibratedRed:0.70 green:0.70 blue:0.70 alpha:1];  // #B3B3B3
+    } else {
+        // Inactive window - slightly lighter/washed out
+        gradientColor1 = [NSColor colorWithCalibratedRed:0.85 green:0.85 blue:0.85 alpha:1];
+        gradientColor2 = [NSColor colorWithCalibratedRed:0.75 green:0.75 blue:0.75 alpha:1];
+    }
+
+    NSGradient *gradient = [[NSGradient alloc] initWithStartingColor:gradientColor1
+                                                         endingColor:gradientColor2];
+
+    // Create path with appropriate corner rounding
+    NSBezierPath *path = [self buttonPathForRect:rect position:position];
+
+    // Fill with gradient
+    [gradient drawInBezierPath:path angle:-90];
+
+    // Single 1px highlight along top edge — straight line for all positions.
+    // The XCB shape mask handles visible corner rounding; highlight arcs
+    // created a brightness boundary that appeared as a circle artifact.
+    NSColor *highlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
+    [highlightColor setStroke];
+    NSBezierPath *highlight = [NSBezierPath bezierPath];
+    [highlight moveToPoint:NSMakePoint(NSMinX(rect), NSMaxY(rect) - 0.5)];
+    [highlight lineToPoint:NSMakePoint(NSMaxX(rect), NSMaxY(rect) - 0.5)];
+    [highlight setLineWidth:1.0];
+    [highlight stroke];
+}
+
++ (NSBezierPath *)buttonPathForRect:(NSRect)frame position:(TitleBarButtonPosition)position {
+    // Use simple rectangular fills for all positions.
+    // The frame's XCB shape mask handles visible corner rounding, and the
+    // highlight arcs provide the visual corner cue.  Rounded fill paths left
+    // gaps at the corners where the Eau theme's stroked arc (radius 6, grey40)
+    // showed through as a visible circle artifact.
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    [path appendBezierPathWithRect:frame];
+    return path;
+}
+
+// Draw close icon (lowercase x style - square proportions)
++ (void)drawCloseIconInRect:(NSRect)rect withColor:(NSColor *)color {
+    // Make icon rect square by adding extra horizontal inset if needed
+    CGFloat extraHInset = (NSWidth(rect) - NSHeight(rect)) / 2.0;
+    if (extraHInset > 0) {
+        rect = NSInsetRect(rect, extraHInset, 0);
+    }
+
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    [path setLineWidth:ICON_STROKE];
+    [path setLineCapStyle:NSRoundLineCapStyle];
+
+    // Lowercase x style - shorter strokes, more square
+    // Inset slightly from corners for a more compact look
+    CGFloat inset = NSWidth(rect) * 0.15;
+    [path moveToPoint:NSMakePoint(NSMinX(rect) + inset, NSMinY(rect) + inset)];
+    [path lineToPoint:NSMakePoint(NSMaxX(rect) - inset, NSMaxY(rect) - inset)];
+    [path moveToPoint:NSMakePoint(NSMaxX(rect) - inset, NSMinY(rect) + inset)];
+    [path lineToPoint:NSMakePoint(NSMinX(rect) + inset, NSMaxY(rect) - inset)];
+
+    [color setStroke];
+    [path stroke];
+}
+
+// Draw minimize icon (horizontal minus symbol −)
++ (void)drawMinimizeIconInRect:(NSRect)rect withColor:(NSColor *)color {
+    if (!color) return;
+
+    CGFloat strokeWidth = ICON_STROKE;
+    CGFloat insetFactor = 0.15;
+
+    // Make icon rect square by adding extra horizontal inset if needed
+    CGFloat extraHInset = (NSWidth(rect) - NSHeight(rect)) / 2.0;
+    if (extraHInset > 0) {
+        rect = NSInsetRect(rect, extraHInset, 0);
+    }
+
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    [path setLineWidth:strokeWidth];
+    [path setLineCapStyle:NSRoundLineCapStyle];
+
+    // Horizontal line (minus symbol)
+    CGFloat inset = NSWidth(rect) * insetFactor;
+    CGFloat midY = NSMidY(rect);
+    [path moveToPoint:NSMakePoint(NSMinX(rect) + inset, midY)];
+    [path lineToPoint:NSMakePoint(NSMaxX(rect) - inset, midY)];
+
+    [color setStroke];
+    [path stroke];
+}
+
+// Draw maximize/zoom icon (plus symbol)
++ (void)drawMaximizeIconInRect:(NSRect)rect withColor:(NSColor *)color {
+    if (!color) return;
+
+    CGFloat strokeWidth = ICON_STROKE;
+    CGFloat insetFactor = 0.15;
+
+    // Make icon rect square by adding extra horizontal inset if needed
+    CGFloat extraHInset = (NSWidth(rect) - NSHeight(rect)) / 2.0;
+    if (extraHInset > 0) {
+        rect = NSInsetRect(rect, extraHInset, 0);
+    }
+
+    NSBezierPath *path = [NSBezierPath bezierPath];
+    [path setLineWidth:strokeWidth];
+    [path setLineCapStyle:NSRoundLineCapStyle];
+
+    // Plus symbol
+    CGFloat inset = NSWidth(rect) * insetFactor;
+    CGFloat midX = NSMidX(rect);
+    CGFloat midY = NSMidY(rect);
+
+    // Horizontal line
+    [path moveToPoint:NSMakePoint(NSMinX(rect) + inset, midY)];
+    [path lineToPoint:NSMakePoint(NSMaxX(rect) - inset, midY)];
+    // Vertical line
+    [path moveToPoint:NSMakePoint(midX, NSMinY(rect) + inset)];
+    [path lineToPoint:NSMakePoint(midX, NSMaxY(rect) - inset)];
+
+    [color setStroke];
+    [path stroke];
+}
+
+// Get icon color based on active/highlighted state
++ (NSColor *)iconColorForActive:(BOOL)active highlighted:(BOOL)highlighted {
+    NSColor *color;
+    if (!active) {
+        color = [NSColor colorWithCalibratedRed:0.55 green:0.55 blue:0.55 alpha:1.0];
+    } else {
+        color = [NSColor colorWithCalibratedRed:0.20 green:0.20 blue:0.20 alpha:1.0];
+    }
+
+    if (highlighted) {
+        color = [color shadowWithLevel:0.2];
+    }
+
+    return color;
 }
 
 #pragma mark - Singleton Management
@@ -273,10 +546,20 @@ static NSMutableSet *fixedSizeWindows = nil;
 
         [titlebarImage lockFocus];
 
-        // Clear background with titlebar background color (not transparent!)
-        // Using transparent would leave garbage pixels from uninitialized pixmap
-        [[NSColor lightGrayColor] set];
-        NSRectFill(NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height));
+        // Check if compositor is active for alpha transparency support
+        BOOL compositorActive = [[URSCompositingManager sharedManager] compositingActive];
+
+        // Clear background - use transparent for compositor mode to support rounded corner alpha
+        // Non-compositor mode uses opaque color to prevent garbage pixels
+        if (compositorActive) {
+            // Use NSCompositeCopy to truly clear to transparent (NSRectFill composites over existing content)
+            [[NSColor clearColor] set];
+            NSRectFillUsingOperation(NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height), NSCompositeCopy);
+            NSLog(@"[URSThemeIntegration] Using transparent background for compositor alpha support");
+        } else {
+            [[NSColor lightGrayColor] set];
+            NSRectFill(NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height));
+        }
 
         // Define the titlebar rect
         NSRect titlebarRect = NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height);
@@ -326,77 +609,120 @@ static NSMutableSet *fixedSizeWindows = nil;
                           state:state
                        andTitle:title ?: @""];
 
-        // Add properly positioned buttons using Eau theme specifications
-        // Based on Eau theme analysis: 17px spacing, LEFT-aligned (miniaturize first, then close)
-        float buttonSize = 13.0;
-        float buttonSpacing = 17.0;  // Eau theme uses 17px spacing per button
-        float topMargin = 6.0;        // Center vertically in 24px titlebar
-        float leftMargin = 2.0;       // Small margin from left edge
+        // In orb mode, the theme's drawWindowBorder already draws everything
+        // (orb buttons, background, title text). Skip the WM's edge button overlay.
+        if (![self isOrbButtonStyle]) {
+            // Draw buttons: Close (X) on left | title | Minimize (-) | Maximize (+) on right
+            NSColor *iconColor = [URSThemeIntegration iconColorForActive:isActive highlighted:NO];
+            BOOL hasMaximize = (styleMask & NSResizableWindowMask) != 0;
+            BOOL hasMinimize = (styleMask & NSMiniaturizableWindowMask) != 0;
 
-        if (styleMask & NSMiniaturizableWindowMask) {
-            NSButton *miniButton = [theme standardWindowButton:NSWindowMiniaturizeButton forStyleMask:styleMask];
-            if (miniButton) {
-                // Eau positions miniaturize button at LEFT edge (causes title to move right by 17px)
-                NSRect miniFrame = NSMakeRect(
-                    leftMargin,  // At left edge
-                    topMargin,
-                    buttonSize,
-                    buttonSize
-                );
-
-                NSImage *buttonImage = [miniButton image];
-                if (buttonImage) {
-                    [buttonImage drawInRect:miniFrame
-                                   fromRect:NSZeroRect
-                                  operation:NSCompositeSourceOver
-                                   fraction:1.0];
-                    NSLog(@"Drew miniaturize button at Eau LEFT position: %@", NSStringFromRect(miniFrame));
-                }
+            // Close button at left edge (full height)
+            if (styleMask & NSClosableWindowMask) {
+                NSRect closeFrame = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, TITLEBAR_HEIGHT);
+                [URSThemeIntegration drawEdgeButtonInRect:closeFrame
+                                                 position:TitleBarButtonPositionLeft
+                                               buttonType:0
+                                                   active:isActive
+                                                  hovered:NO];
+                NSRect iconRect = NSInsetRect(closeFrame, ICON_INSET, ICON_INSET);
+                [URSThemeIntegration drawCloseIconInRect:iconRect withColor:iconColor];
+                NSLog(@"Drew close button at: %@", NSStringFromRect(closeFrame));
             }
-        }
 
-        if (styleMask & NSClosableWindowMask) {
-            NSButton *closeButton = [theme standardWindowButton:NSWindowCloseButton forStyleMask:styleMask];
-            if (closeButton) {
-                // Position close button next to miniaturize button (causes title width to reduce by 17px)
-                NSRect closeFrame = NSMakeRect(
-                    leftMargin + buttonSpacing,  // 17px from left edge (after miniaturize)
-                    topMargin,
-                    buttonSize,
-                    buttonSize
-                );
-
-                NSImage *buttonImage = [closeButton image];
-                if (buttonImage) {
-                    [buttonImage drawInRect:closeFrame
-                                   fromRect:NSZeroRect
-                                  operation:NSCompositeSourceOver
-                                   fraction:1.0];
-                    NSLog(@"Drew close button at Eau LEFT position: %@", NSStringFromRect(closeFrame));
+            // Side-by-side buttons on right: Minimize (-) inner, Maximize (+) outer
+            if (hasMinimize) {
+                NSRect miniFrame;
+                TitleBarButtonPosition miniPosition;
+                if (hasMaximize) {
+                    miniFrame = NSMakeRect(titlebarSize.width - 2 * RIGHT_BUTTON_WIDTH,
+                                           0,
+                                           RIGHT_BUTTON_WIDTH,
+                                           TITLEBAR_HEIGHT);
+                    miniPosition = TitleBarButtonPositionRightInner;
+                } else {
+                    miniFrame = NSMakeRect(titlebarSize.width - RIGHT_BUTTON_WIDTH,
+                                           0,
+                                           RIGHT_BUTTON_WIDTH,
+                                           TITLEBAR_HEIGHT);
+                    miniPosition = TitleBarButtonPositionRightFull;
                 }
+                [URSThemeIntegration drawEdgeButtonInRect:miniFrame
+                                                 position:miniPosition
+                                               buttonType:1
+                                                   active:isActive
+                                                  hovered:NO];
+                NSRect miniIconRect = NSInsetRect(miniFrame, ICON_INSET, ICON_INSET);
+                [URSThemeIntegration drawMinimizeIconInRect:miniIconRect withColor:iconColor];
+                NSLog(@"Drew miniaturize button at: %@", NSStringFromRect(miniFrame));
             }
-        }
 
-        if (styleMask & NSResizableWindowMask) {
-            NSButton *zoomButton = [theme standardWindowButton:NSWindowZoomButton forStyleMask:styleMask];
-            if (zoomButton) {
-                // Position zoom button after close button
-                NSRect zoomFrame = NSMakeRect(
-                    leftMargin + (2 * buttonSpacing),  // 34px from left edge
-                    topMargin,
-                    buttonSize,
-                    buttonSize
-                );
-
-                NSImage *buttonImage = [zoomButton image];
-                if (buttonImage) {
-                    [buttonImage drawInRect:zoomFrame
-                                   fromRect:NSZeroRect
-                                  operation:NSCompositeSourceOver
-                                   fraction:1.0];
-                    NSLog(@"Drew zoom button at Eau LEFT position: %@", NSStringFromRect(zoomFrame));
-                }
+            if (hasMaximize) {
+                TitleBarButtonPosition zoomPosition = hasMinimize ? TitleBarButtonPositionRightOuter : TitleBarButtonPositionRightFull;
+                NSRect zoomFrame = NSMakeRect(titlebarSize.width - RIGHT_BUTTON_WIDTH,
+                                              0,
+                                              RIGHT_BUTTON_WIDTH,
+                                              TITLEBAR_HEIGHT);
+                [URSThemeIntegration drawEdgeButtonInRect:zoomFrame
+                                                 position:zoomPosition
+                                               buttonType:2
+                                                   active:isActive
+                                                  hovered:NO];
+                NSRect zoomIconRect = NSInsetRect(zoomFrame, ICON_INSET, ICON_INSET);
+                [URSThemeIntegration drawMaximizeIconInRect:zoomIconRect withColor:iconColor];
+                NSLog(@"Drew zoom button at: %@", NSStringFromRect(zoomFrame));
             }
+
+            // Top highlight across title area (connecting button highlights)
+            CGFloat highlightLeft = EDGE_BUTTON_WIDTH;
+            CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarSize.width - 2 * RIGHT_BUTTON_WIDTH) :
+                                     (hasMaximize || hasMinimize) ? (titlebarSize.width - RIGHT_BUTTON_WIDTH) : titlebarSize.width;
+            NSColor *titleBaseColor = isActive
+                ? [NSColor colorWithCalibratedWhite:0.82 alpha:1.0]
+                : [NSColor colorWithCalibratedWhite:0.85 alpha:1.0];
+            [titleBaseColor setStroke];
+            NSBezierPath *titleBase = [NSBezierPath bezierPath];
+            [titleBase moveToPoint:NSMakePoint(highlightLeft, TITLEBAR_HEIGHT - 0.5)];
+            [titleBase lineToPoint:NSMakePoint(highlightRight, TITLEBAR_HEIGHT - 0.5)];
+            [titleBase setLineWidth:1.0];
+            [titleBase stroke];
+
+            NSColor *titleHighlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
+            [titleHighlightColor setStroke];
+            NSBezierPath *titleHighlight = [NSBezierPath bezierPath];
+            [titleHighlight moveToPoint:NSMakePoint(highlightLeft, TITLEBAR_HEIGHT - 0.5)];
+            [titleHighlight lineToPoint:NSMakePoint(highlightRight, TITLEBAR_HEIGHT - 0.5)];
+            [titleHighlight setLineWidth:1.0];
+            [titleHighlight stroke];
+
+            // Bottom edge and button dividers (#979797)
+            NSColor *separatorColor = [NSColor colorWithCalibratedWhite:0.592 alpha:1.0];
+            [separatorColor setStroke];
+
+            // Full-width bottom edge
+            NSBezierPath *bottomEdge = [NSBezierPath bezierPath];
+            [bottomEdge moveToPoint:NSMakePoint(0, 0.5)];
+            [bottomEdge lineToPoint:NSMakePoint(titlebarSize.width, 0.5)];
+            [bottomEdge setLineWidth:1.0];
+            [bottomEdge stroke];
+
+            // Vertical dividers at button boundaries
+            NSBezierPath *dividers = [NSBezierPath bezierPath];
+            if (styleMask & NSClosableWindowMask) {
+                [dividers moveToPoint:NSMakePoint(EDGE_BUTTON_WIDTH, 0)];
+                [dividers lineToPoint:NSMakePoint(EDGE_BUTTON_WIDTH, TITLEBAR_HEIGHT)];
+            }
+            if (hasMaximize) {
+                [dividers moveToPoint:NSMakePoint(titlebarSize.width - 2 * RIGHT_BUTTON_WIDTH, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarSize.width - 2 * RIGHT_BUTTON_WIDTH, TITLEBAR_HEIGHT)];
+                [dividers moveToPoint:NSMakePoint(titlebarSize.width - RIGHT_BUTTON_WIDTH, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarSize.width - RIGHT_BUTTON_WIDTH, TITLEBAR_HEIGHT)];
+            } else if (hasMinimize) {
+                [dividers moveToPoint:NSMakePoint(titlebarSize.width - RIGHT_BUTTON_WIDTH, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarSize.width - RIGHT_BUTTON_WIDTH, TITLEBAR_HEIGHT)];
+            }
+            [dividers setLineWidth:1.0];
+            [dividers stroke];
         }
 
         [titlebarImage unlockFocus];
@@ -466,8 +792,49 @@ static NSMutableSet *fixedSizeWindows = nil;
         return NO;
     }
 
-    NSLog(@"Creating Cairo surface for titlebar pixmap: %u, size: %dx%d",
-          titlebar.pixmap, (int)image.size.width, (int)image.size.height);
+    // Check if compositor is active for ARGB visual support
+    BOOL compositorActive = [[URSCompositingManager sharedManager] compositingActive];
+    xcb_visualtype_t *visualType = titlebar.visual.visualType;
+
+    // Set up ARGB visual for Cairo if compositor is active
+    // Note: The titlebar window and pixmap are now created with 32-bit depth in XCBFrame.m
+    // We just need to get the correct visual type for Cairo surface creation
+    if (compositorActive) {
+        XCBScreen *screen = [titlebar onScreen];
+        if (!screen) screen = [titlebar screen];
+
+        if (screen) {
+            // Check if titlebar already has ARGB visual configured (set by XCBFrame)
+            xcb_visualid_t argbVisualId = [titlebar argbVisualId];
+
+            // If not already configured, set it up (fallback for windows created before this change)
+            if (argbVisualId == 0) {
+                argbVisualId = [self findARGBVisualForScreen:screen connection:titlebar.connection];
+
+                if (argbVisualId != 0) {
+                    // Set ARGB visual on titlebar for 32-bit pixmap support
+                    [titlebar setUse32BitDepth:YES];
+                    [titlebar setArgbVisualId:argbVisualId];
+
+                    // Recreate pixmap with 32-bit depth
+                    [titlebar createPixmap];
+                    NSLog(@"[URSThemeIntegration] Created 32-bit pixmap for titlebar (fallback path)");
+                }
+            }
+
+            // Get the ARGB visual type for Cairo surface
+            if (argbVisualId != 0) {
+                xcb_visualtype_t *argbVisualType = [self findVisualTypeForId:argbVisualId screen:screen];
+                if (argbVisualType) {
+                    visualType = argbVisualType;
+                    NSLog(@"[URSThemeIntegration] Using 32-bit ARGB visual for Cairo surface (id: 0x%x)", argbVisualId);
+                }
+            }
+        }
+    }
+
+    NSLog(@"Creating Cairo surface for titlebar pixmap: %u, size: %dx%d, compositor: %d",
+          titlebar.pixmap, (int)image.size.width, (int)image.size.height, compositorActive);
 
     // DEBUG: Check bitmap format and sample pixel data
     NSLog(@"Bitmap format: %ldx%ld, bitsPerPixel=%ld, bytesPerRow=%ld, colorSpace=%@, format=%u",
@@ -506,10 +873,11 @@ static NSMutableSet *fixedSizeWindows = nil;
     }
 
     // Create Cairo surface from XCB titlebar pixmap
+    // Use ARGB visual when compositor is active for alpha transparency
     cairo_surface_t *x11Surface = cairo_xcb_surface_create(
         [titlebar.connection connection],
         titlebar.pixmap,
-        titlebar.visual.visualType,
+        visualType,
         (int)image.size.width,
         (int)image.size.height
     );
@@ -526,27 +894,55 @@ static NSMutableSet *fixedSizeWindows = nil;
     cairo_t *ctx = cairo_create(x11Surface);
 
     // Create Cairo image surface from bitmap data
-    // NOTE: NSBitmapImageRep uses RGBA but Cairo ARGB32 expects BGRA, so we need to convert
+    // Cairo ARGB32 expects pre-multiplied BGRA in memory (B, G, R, A bytes on little-endian)
     unsigned char *bitmapPixels = [bitmap bitmapData];
     int width = [bitmap pixelsWide];
     int height = [bitmap pixelsHigh];
     int bytesPerRow = [bitmap bytesPerRow];
 
-    // OPTIMIZATION: Convert RGBA to BGRA using 32-bit word operations (4x faster)
-    // Process entire rows at once, handling stride properly
+    // Check bitmap format to determine correct conversion
+    // NSAlphaFirstBitmapFormat (1): Alpha is first byte (ARGB in memory)
+    // Otherwise: Alpha is last byte (RGBA in memory)
+    NSBitmapFormat bitmapFormat = [bitmap bitmapFormat];
+    BOOL alphaFirst = (bitmapFormat & NSAlphaFirstBitmapFormat) != 0;
+
+    NSLog(@"[URSThemeIntegration] Bitmap format: 0x%x, alphaFirst: %d", (unsigned)bitmapFormat, alphaFirst);
+
+    // Convert to Cairo ARGB32 format (BGRA in memory on little-endian)
     int rowPixels = width;
     for (int y = 0; y < height; y++) {
         uint32_t *rowPtr = (uint32_t *)(bitmapPixels + (y * bytesPerRow));
         for (int x = 0; x < rowPixels; x++) {
             uint32_t pixel = rowPtr[x];
-            // RGBA (little-endian memory: A B G R) -> BGRA (little-endian: A R G B)
-            // Extract channels and reassemble
-            uint32_t r = (pixel >> 0) & 0xFF;
-            uint32_t g = (pixel >> 8) & 0xFF;
-            uint32_t b = (pixel >> 16) & 0xFF;
-            uint32_t a = (pixel >> 24) & 0xFF;
-            // BGRA format: B in lowest byte, then G, R, A
-            rowPtr[x] = (a << 24) | (r << 16) | (g << 8) | b;
+            uint32_t r, g, b, a;
+
+            if (alphaFirst) {
+                // ARGB in memory: A, R, G, B bytes
+                // On little-endian read as uint32_t: B<<24 | G<<16 | R<<8 | A
+                a = (pixel >> 0) & 0xFF;
+                r = (pixel >> 8) & 0xFF;
+                g = (pixel >> 16) & 0xFF;
+                b = (pixel >> 24) & 0xFF;
+            } else {
+                // RGBA in memory: R, G, B, A bytes
+                // On little-endian read as uint32_t: A<<24 | B<<16 | G<<8 | R
+                r = (pixel >> 0) & 0xFF;
+                g = (pixel >> 8) & 0xFF;
+                b = (pixel >> 16) & 0xFF;
+                a = (pixel >> 24) & 0xFF;
+            }
+
+            // Pre-multiply RGB by alpha for Cairo ARGB32 format
+            // Cairo expects pre-multiplied alpha: R_out = R * (A / 255)
+            // This fixes transparent areas like clearColor (255,255,255,0) -> (0,0,0,0)
+            if (a < 255) {
+                r = (r * a) / 255;
+                g = (g * a) / 255;
+                b = (b * a) / 255;
+            }
+
+            // Cairo ARGB32 on little-endian: B, G, R, A bytes = B | G<<8 | R<<16 | A<<24
+            rowPtr[x] = b | (g << 8) | (r << 16) | (a << 24);
         }
     }
 
@@ -569,8 +965,9 @@ static NSMutableSet *fixedSizeWindows = nil;
     NSLog(@"Painting GSTheme image to X11 surface...");
 
     // Paint GSTheme image to X11 surface using SOURCE operator
-    // SOURCE completely replaces destination pixels (no compositing)
-    // This prevents old pixmap garbage from showing through
+    // SOURCE completely replaces destination pixels with source (including alpha values)
+    // The X11 compositor then uses those alpha values when compositing windows
+    // This works for both compositor and non-compositor modes
     cairo_set_operator(ctx, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_surface(ctx, imageSurface, 0, 0);
     cairo_paint(ctx);
@@ -615,23 +1012,48 @@ static NSMutableSet *fixedSizeWindows = nil;
                 int dimmedHeight = [dimmedBitmap pixelsHigh];
                 int dimmedBytesPerRow = [dimmedBitmap bytesPerRow];
 
-                // OPTIMIZATION: Convert RGBA to BGRA using 32-bit word operations
+                // Check bitmap format for dimmed image
+                NSBitmapFormat dimmedFormat = [dimmedBitmap bitmapFormat];
+                BOOL dimmedAlphaFirst = (dimmedFormat & NSAlphaFirstBitmapFormat) != 0;
+
+                // Convert to Cairo ARGB32 format (BGRA in memory on little-endian)
                 for (int y = 0; y < dimmedHeight; y++) {
                     uint32_t *rowPtr = (uint32_t *)(dimmedPixels + (y * dimmedBytesPerRow));
                     for (int x = 0; x < dimmedWidth; x++) {
                         uint32_t pixel = rowPtr[x];
-                        uint32_t r = (pixel >> 0) & 0xFF;
-                        uint32_t g = (pixel >> 8) & 0xFF;
-                        uint32_t b = (pixel >> 16) & 0xFF;
-                        uint32_t a = (pixel >> 24) & 0xFF;
-                        rowPtr[x] = (a << 24) | (r << 16) | (g << 8) | b;
+                        uint32_t r, g, b, a;
+
+                        if (dimmedAlphaFirst) {
+                            // ARGB in memory
+                            a = (pixel >> 0) & 0xFF;
+                            r = (pixel >> 8) & 0xFF;
+                            g = (pixel >> 16) & 0xFF;
+                            b = (pixel >> 24) & 0xFF;
+                        } else {
+                            // RGBA in memory
+                            r = (pixel >> 0) & 0xFF;
+                            g = (pixel >> 8) & 0xFF;
+                            b = (pixel >> 16) & 0xFF;
+                            a = (pixel >> 24) & 0xFF;
+                        }
+
+                        // Pre-multiply RGB by alpha for Cairo ARGB32 format
+                        if (a < 255) {
+                            r = (r * a) / 255;
+                            g = (g * a) / 255;
+                            b = (b * a) / 255;
+                        }
+
+                        // Cairo ARGB32 on little-endian: B, G, R, A bytes
+                        rowPtr[x] = b | (g << 8) | (r << 16) | (a << 24);
                     }
                 }
 
+                // Use ARGB visual for dPixmap when compositor is active
                 cairo_surface_t *dSurface = cairo_xcb_surface_create(
                     [titlebar.connection connection],
                     dPixmap,
-                    titlebar.visual.visualType,
+                    visualType,  // Uses ARGB visual when compositor active
                     dimmedWidth,
                     dimmedHeight
                 );
@@ -648,6 +1070,7 @@ static NSMutableSet *fixedSizeWindows = nil;
                     );
 
                     if (cairo_surface_status(dImageSurface) == CAIRO_STATUS_SUCCESS) {
+                        // Use SOURCE to replace destination with source (including alpha)
                         cairo_set_operator(dCtx, CAIRO_OPERATOR_SOURCE);
                         cairo_set_source_surface(dCtx, dImageSurface, 0, 0);
                         cairo_paint(dCtx);
@@ -737,9 +1160,17 @@ static NSMutableSet *fixedSizeWindows = nil;
         XCBRect titlebarRect = [titlebar windowRect];
         XCBRect frameRect = [frame windowRect];
 
-        // DEBUG: Add 2 pixels to width and shift 1 pixel left to cover both edges
-        uint16_t targetWidth = frameRect.size.width + 2;
-        int16_t targetX = -1;  // Shift titlebar 1 pixel left
+        uint16_t targetWidth;
+        int16_t targetX;
+        if ([URSThemeIntegration isOrbButtonStyle]) {
+            // Orb buttons don't extend to edges; use exact frame width
+            targetWidth = frameRect.size.width;
+            targetX = 0;
+        } else {
+            // Edge buttons need +2 to cover border edges
+            targetWidth = frameRect.size.width + 2;
+            targetX = -1;
+        }
         NSDebugLog(@"DEBUG: Resizing titlebar X11 window to %d at x=%d (frame=%d, current titlebar=%d)",
               targetWidth, targetX, frameRect.size.width, titlebarRect.size.width);
 
@@ -758,9 +1189,7 @@ static NSMutableSet *fixedSizeWindows = nil;
 
         [[frame connection] flush];
 
-        // Use frame width to ensure titlebar matches window width exactly
-        // DEBUG: Add 2 pixels (1 on each side) to cover both edges
-        NSSize titlebarSize = NSMakeSize(frameRect.size.width + 2, titlebarRect.size.height);
+        NSSize titlebarSize = NSMakeSize(targetWidth, titlebarRect.size.height);
         NSDebugLog(@"DEBUG: Using titlebarSize.width = %d (frame was %d)", (int)titlebarSize.width, (int)frameRect.size.width);
 
         // DEBUG: Also get client window dimensions for comparison
@@ -785,7 +1214,6 @@ static NSMutableSet *fixedSizeWindows = nil;
         [gctx saveGraphicsState];
 
         // Use GSTheme to draw titlebar decoration
-        NSRect drawRect = NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height);
 
         // Check if this is a fixed-size window (hide resize but show minimize when supported)
         XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
@@ -879,13 +1307,24 @@ static NSMutableSet *fixedSizeWindows = nil;
         // We check for theme-specific methods first, then fall back to base.
         
         NSRect titleBarRect = NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height);
-        
-        // Pre-fill the entire rect with the theme's border/control stroke color
-        // This ensures no black pixels remain at edges where the theme may not draw
-        // (e.g., Eau's drawTitleBarBackground insets by 1 pixel)
-        NSColor *prefillColor = [NSColor colorWithCalibratedWhite:0.4 alpha:1.0]; // Grey40 #666666 - matches Eau border
-        [prefillColor set];
-        NSRectFill(titleBarRect);
+
+        // Check if compositor is active for alpha transparency support
+        BOOL compositorActive = [[URSCompositingManager sharedManager] compositingActive];
+
+        // Pre-fill the entire rect
+        // In compositor mode, use clearColor for transparent rounded corners
+        // Otherwise, use grey to ensure no garbage pixels at theme edges
+        if (compositorActive) {
+            // Use NSCompositeCopy to truly clear to transparent
+            [[NSColor clearColor] set];
+            NSRectFillUsingOperation(titleBarRect, NSCompositeCopy);
+            NSLog(@"[URSThemeIntegration] Using transparent prefill for compositor alpha support");
+        } else {
+            // Grey40 #666666 - matches Eau border, prevents garbage at edges
+            NSColor *prefillColor = [NSColor colorWithCalibratedWhite:0.4 alpha:1.0];
+            [prefillColor set];
+            NSRectFill(titleBarRect);
+        }
         
         NSDebugLog(@"DEBUG: Calling theme titlebar drawing with rect=%@", NSStringFromRect(titleBarRect));
         
@@ -935,108 +1374,193 @@ static NSMutableSet *fixedSizeWindows = nil;
         [gctx restoreGraphicsState];
 
         // *** BUTTON DRAWING ***
-        // Get button positions using theme's methods, then draw using theme-appropriate style
-        // Eau theme positions buttons on LEFT: Close, Mini, Zoom
-        // Base GSTheme positions Close on RIGHT
-        
-        BOOL isEauTheme = [[theme name] isEqualToString:@"Eau"];
-        NSLog(@"Drawing buttons for theme: %@ (isEau=%d)", [theme name], isEauTheme);
-        
-        // Button size and spacing for Eau
-        CGFloat buttonSize = 15.0;
-        CGFloat buttonSpacing = 4.0;
-        CGFloat leftPadding = 10.5;
-        CGFloat topPadding = 5.5;
-        
-        // Eau button colors
-        NSColor *closeColor = [NSColor colorWithCalibratedRed:0.97 green:0.26 blue:0.23 alpha:1.0];
-        NSColor *miniColor = [NSColor colorWithCalibratedRed:0.9 green:0.7 blue:0.3 alpha:1.0];
-        NSColor *zoomColor = [NSColor colorWithCalibratedRed:0.322 green:0.778 blue:0.244 alpha:1.0];
+        CGFloat titlebarWidth = titlebarSize.width;
+        CGFloat buttonHeight = titlebarSize.height;
+        BOOL hasMaximize = (styleMask & NSResizableWindowMask) != 0;
+        BOOL hasMinimize = (styleMask & NSMiniaturizableWindowMask) != 0;
 
-        if (styleMask & NSClosableWindowMask) {
-            NSRect closeFrame;
-            if (isEauTheme) {
-                // Eau: Close button is first on LEFT
-                closeFrame = NSMakeRect(leftPadding, 
-                                        titleBarRect.size.height - buttonSize - topPadding,
-                                        buttonSize, buttonSize);
-            } else {
-                closeFrame = [theme closeButtonFrameForBounds:drawRect];
-            }
-            
-            // Draw button ball (Eau-style) or just the image (other themes)
-            if (isEauTheme) {
-                [URSThemeIntegration drawEauButtonBall:closeFrame withColor:closeColor];
-            }
-            
-            // Draw button icon
-            NSImage *closeImage = [NSImage imageNamed:@"common_Close"];
-            if (closeImage) {
-                NSRect imageRect = NSMakeRect(
-                    closeFrame.origin.x + (closeFrame.size.width - closeImage.size.width) / 2,
-                    closeFrame.origin.y + (closeFrame.size.height - closeImage.size.height) / 2,
-                    closeImage.size.width, closeImage.size.height);
-                [closeImage drawInRect:imageRect fromRect:NSZeroRect 
-                             operation:NSCompositeSourceOver fraction:1.0];
-            }
-            NSLog(@"Drew close button at: %@", NSStringFromRect(closeFrame));
-        }
+        // Check if this titlebar is being hovered
+        xcb_window_t titlebarId = [titlebar window];
+        BOOL isTitlebarHovered = (titlebarId == hoveredTitlebarWindow);
+        NSInteger hoverIdx = isTitlebarHovered ? hoveredButtonIndex : -1;
 
-        if (styleMask & NSMiniaturizableWindowMask) {
-            NSRect miniFrame;
-            if (isEauTheme) {
-                // Eau: Mini button is second on LEFT
-                miniFrame = NSMakeRect(leftPadding + buttonSize + buttonSpacing,
-                                       titleBarRect.size.height - buttonSize - topPadding,
-                                       buttonSize, buttonSize);
-            } else {
-                miniFrame = [theme miniaturizeButtonFrameForBounds:drawRect];
-            }
-            
-            if (isEauTheme) {
-                [URSThemeIntegration drawEauButtonBall:miniFrame withColor:miniColor];
-            }
-            
-            NSImage *miniImage = [NSImage imageNamed:@"common_Miniaturize"];
-            if (miniImage) {
-                NSRect imageRect = NSMakeRect(
-                    miniFrame.origin.x + (miniFrame.size.width - miniImage.size.width) / 2,
-                    miniFrame.origin.y + (miniFrame.size.height - miniImage.size.height) / 2,
-                    miniImage.size.width, miniImage.size.height);
-                [miniImage drawInRect:imageRect fromRect:NSZeroRect
-                            operation:NSCompositeSourceOver fraction:1.0];
-            }
-            NSLog(@"Drew miniaturize button at: %@", NSStringFromRect(miniFrame));
-        }
+        if ([self isOrbButtonStyle]) {
+            // Orb mode: theme's drawtitleRect already drew base orbs.
+            // Redraw individual hovered buttons with highlighted state via theme.
+            if (hoverIdx >= 0) {
+                SEL closeSel = @selector(drawCloseButtonInRect:state:active:);
+                SEL miniSel = @selector(drawMinimizeButtonInRect:state:active:);
+                SEL zoomSel = @selector(drawMaximizeButtonInRect:state:active:);
 
-        if (styleMask & NSResizableWindowMask) {
-            NSRect zoomFrame;
-            if (isEauTheme) {
-                // Eau: Zoom button is third on LEFT
-                zoomFrame = NSMakeRect(leftPadding + (buttonSize + buttonSpacing) * 2,
-                                       titleBarRect.size.height - buttonSize - topPadding,
-                                       buttonSize, buttonSize);
-            } else {
-                // Calculate based on miniaturize button
-                NSRect miniFrame = [theme miniaturizeButtonFrameForBounds:drawRect];
-                zoomFrame = NSMakeRect(miniFrame.origin.x + miniFrame.size.width + 4,
-                                       miniFrame.origin.y, miniFrame.size.width, miniFrame.size.height);
+                CGFloat orbY = (buttonHeight - ORB_BUTTON_SIZE) / 2.0;
+                CGFloat closeX = ORB_PADDING_LEFT;
+                CGFloat miniX = closeX + ORB_BUTTON_SIZE + ORB_BUTTON_SPACING;
+                CGFloat zoomX = miniX + ORB_BUTTON_SIZE + ORB_BUTTON_SPACING;
+
+                GSThemeControlState hState = GSThemeHighlightedState;
+
+                if (hoverIdx == 0 && (styleMask & NSClosableWindowMask) && [theme respondsToSelector:closeSel]) {
+                    NSRect r = NSMakeRect(closeX, orbY, ORB_BUTTON_SIZE, ORB_BUTTON_SIZE);
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[theme methodSignatureForSelector:closeSel]];
+                    [inv setSelector:closeSel];
+                    [inv setTarget:theme];
+                    [inv setArgument:&r atIndex:2];
+                    [inv setArgument:&hState atIndex:3];
+                    [inv setArgument:&isActive atIndex:4];
+                    [inv invoke];
+                }
+                if (hoverIdx == 1 && hasMinimize && [theme respondsToSelector:miniSel]) {
+                    NSRect r = NSMakeRect(miniX, orbY, ORB_BUTTON_SIZE, ORB_BUTTON_SIZE);
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[theme methodSignatureForSelector:miniSel]];
+                    [inv setSelector:miniSel];
+                    [inv setTarget:theme];
+                    [inv setArgument:&r atIndex:2];
+                    [inv setArgument:&hState atIndex:3];
+                    [inv setArgument:&isActive atIndex:4];
+                    [inv invoke];
+                }
+                if (hoverIdx == 2 && hasMaximize && [theme respondsToSelector:zoomSel]) {
+                    NSRect r = NSMakeRect(zoomX, orbY, ORB_BUTTON_SIZE, ORB_BUTTON_SIZE);
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[theme methodSignatureForSelector:zoomSel]];
+                    [inv setSelector:zoomSel];
+                    [inv setTarget:theme];
+                    [inv setArgument:&r atIndex:2];
+                    [inv setArgument:&hState atIndex:3];
+                    [inv setArgument:&isActive atIndex:4];
+                    [inv invoke];
+                }
             }
-            
-            if (isEauTheme) {
-                [URSThemeIntegration drawEauButtonBall:zoomFrame withColor:zoomColor];
+        } else {
+            // Edge mode: draw buttons, highlights, dividers
+            NSLog(@"Drawing side-by-side edge buttons for theme: %@", [theme name]);
+
+            NSColor *iconColor = [self iconColorForActive:isActive highlighted:NO];
+
+            // Close button at left edge (full height)
+            if (styleMask & NSClosableWindowMask) {
+                NSRect closeFrame = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, buttonHeight);
+                BOOL closeHovered = (hoverIdx == 0);
+
+                [self drawEdgeButtonInRect:closeFrame
+                                  position:TitleBarButtonPositionLeft
+                                buttonType:0
+                                    active:isActive
+                                   hovered:closeHovered];
+
+                if (iconColor) {
+                    NSRect iconRect = NSInsetRect(closeFrame, ICON_INSET, ICON_INSET);
+                    [self drawCloseIconInRect:iconRect withColor:iconColor];
+                }
+
+                NSLog(@"Drew close button at: %@ hovered:%d", NSStringFromRect(closeFrame), closeHovered);
             }
-            
-            NSImage *zoomImage = [NSImage imageNamed:@"common_Zoom"];
-            if (zoomImage) {
-                NSRect imageRect = NSMakeRect(
-                    zoomFrame.origin.x + (zoomFrame.size.width - zoomImage.size.width) / 2,
-                    zoomFrame.origin.y + (zoomFrame.size.height - zoomImage.size.height) / 2,
-                    zoomImage.size.width, zoomImage.size.height);
-                [zoomImage drawInRect:imageRect fromRect:NSZeroRect
-                            operation:NSCompositeSourceOver fraction:1.0];
+
+            // Side-by-side buttons on right: Minimize (-) inner, Maximize (+) outer
+            if (hasMinimize) {
+                NSRect miniFrame;
+                TitleBarButtonPosition miniPosition;
+                BOOL miniHovered = (hoverIdx == 1);
+
+                if (hasMaximize) {
+                    miniFrame = NSMakeRect(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH,
+                                           0,
+                                           RIGHT_BUTTON_WIDTH,
+                                           buttonHeight);
+                    miniPosition = TitleBarButtonPositionRightInner;
+                } else {
+                    miniFrame = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH,
+                                           0,
+                                           RIGHT_BUTTON_WIDTH,
+                                           buttonHeight);
+                    miniPosition = TitleBarButtonPositionRightFull;
+                }
+
+                [self drawEdgeButtonInRect:miniFrame
+                                  position:miniPosition
+                                buttonType:1
+                                    active:isActive
+                                   hovered:miniHovered];
+
+                if (iconColor) {
+                    NSRect iconRect = NSInsetRect(miniFrame, ICON_INSET, ICON_INSET);
+                    [self drawMinimizeIconInRect:iconRect withColor:iconColor];
+                }
+
+                NSLog(@"Drew miniaturize button at: %@ hovered:%d", NSStringFromRect(miniFrame), miniHovered);
             }
-            NSLog(@"Drew zoom button at: %@", NSStringFromRect(zoomFrame));
+
+            if (hasMaximize) {
+                TitleBarButtonPosition zoomPosition = hasMinimize ? TitleBarButtonPositionRightOuter : TitleBarButtonPositionRightFull;
+                NSRect zoomFrame = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH,
+                                              0,
+                                              RIGHT_BUTTON_WIDTH,
+                                              buttonHeight);
+                BOOL zoomHovered = (hoverIdx == 2);
+
+                [self drawEdgeButtonInRect:zoomFrame
+                                  position:zoomPosition
+                                buttonType:2
+                                    active:isActive
+                                   hovered:zoomHovered];
+
+                if (iconColor) {
+                    NSRect iconRect = NSInsetRect(zoomFrame, ICON_INSET, ICON_INSET);
+                    [self drawMaximizeIconInRect:iconRect withColor:iconColor];
+                }
+
+                NSLog(@"Drew zoom button at: %@ hovered:%d", NSStringFromRect(zoomFrame), zoomHovered);
+            }
+
+            // Top highlight across title area (connecting button highlights)
+            CGFloat highlightLeft = EDGE_BUTTON_WIDTH;
+            CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarWidth - 2 * RIGHT_BUTTON_WIDTH) :
+                                     (hasMaximize || hasMinimize) ? (titlebarWidth - RIGHT_BUTTON_WIDTH) : titlebarWidth;
+            NSColor *titleBaseColor = isActive
+                ? [NSColor colorWithCalibratedWhite:0.82 alpha:1.0]
+                : [NSColor colorWithCalibratedWhite:0.85 alpha:1.0];
+            [titleBaseColor setStroke];
+            NSBezierPath *titleBase = [NSBezierPath bezierPath];
+            [titleBase moveToPoint:NSMakePoint(highlightLeft, buttonHeight - 0.5)];
+            [titleBase lineToPoint:NSMakePoint(highlightRight, buttonHeight - 0.5)];
+            [titleBase setLineWidth:1.0];
+            [titleBase stroke];
+
+            NSColor *titleHighlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
+            [titleHighlightColor setStroke];
+            NSBezierPath *titleHighlight = [NSBezierPath bezierPath];
+            [titleHighlight moveToPoint:NSMakePoint(highlightLeft, buttonHeight - 0.5)];
+            [titleHighlight lineToPoint:NSMakePoint(highlightRight, buttonHeight - 0.5)];
+            [titleHighlight setLineWidth:1.0];
+            [titleHighlight stroke];
+
+            // Bottom edge and button dividers (#979797)
+            NSColor *separatorColor = [NSColor colorWithCalibratedWhite:0.592 alpha:1.0];
+            [separatorColor setStroke];
+
+            // Full-width bottom edge
+            NSBezierPath *bottomEdge = [NSBezierPath bezierPath];
+            [bottomEdge moveToPoint:NSMakePoint(0, 0.5)];
+            [bottomEdge lineToPoint:NSMakePoint(titlebarWidth, 0.5)];
+            [bottomEdge setLineWidth:1.0];
+            [bottomEdge stroke];
+
+            // Vertical dividers at button boundaries
+            NSBezierPath *dividers = [NSBezierPath bezierPath];
+            if (styleMask & NSClosableWindowMask) {
+                [dividers moveToPoint:NSMakePoint(EDGE_BUTTON_WIDTH, 0)];
+                [dividers lineToPoint:NSMakePoint(EDGE_BUTTON_WIDTH, buttonHeight)];
+            }
+            if (hasMaximize) {
+                [dividers moveToPoint:NSMakePoint(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH, buttonHeight)];
+                [dividers moveToPoint:NSMakePoint(titlebarWidth - RIGHT_BUTTON_WIDTH, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarWidth - RIGHT_BUTTON_WIDTH, buttonHeight)];
+            } else if (hasMinimize) {
+                [dividers moveToPoint:NSMakePoint(titlebarWidth - RIGHT_BUTTON_WIDTH, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarWidth - RIGHT_BUTTON_WIDTH, buttonHeight)];
+            }
+            [dividers setLineWidth:1.0];
+            [dividers stroke];
         }
 
         [titlebarImage unlockFocus];

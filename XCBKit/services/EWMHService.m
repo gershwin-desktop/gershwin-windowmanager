@@ -580,10 +580,13 @@
     NSLog(@"Border: %d", border);
 
 
-    extents[0] = border;
-    extents[1] = border;
-    extents[2] = 21;
-    extents[3] = border;
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+
+    extents[0] = 1;              // left border
+    extents[1] = 1;              // right border
+    extents[2] = titleHeight;    // top (titlebar)
+    extents[3] = 1;              // bottom border
 
     [self changePropertiesForWindow:aWindow
                            withMode:XCB_PROP_MODE_REPLACE
@@ -642,7 +645,9 @@
 {
     if ([anAtomMessageName isEqualToString:EWMHRequestFrameExtents])
     {
-        uint32_t extents[] = {3,3,21,3};
+        TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+        uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+        uint32_t extents[] = {1, 1, titleHeight, 1};
         [self updateNetFrameExtentsForWindow:aWindow andExtents:extents];
 
         return;

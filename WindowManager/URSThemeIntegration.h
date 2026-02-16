@@ -55,4 +55,19 @@
 + (void)unregisterFixedSizeWindow:(xcb_window_t)windowId;
 + (BOOL)isFixedSizeWindow:(xcb_window_t)windowId;
 
+// Hover state tracking for titlebar buttons
++ (xcb_window_t)hoveredTitlebarWindow;
++ (NSInteger)hoveredButtonIndex;
++ (void)setHoveredTitlebar:(xcb_window_t)titlebarId buttonIndex:(NSInteger)buttonIdx;
++ (void)clearHoverState;
+
+// Determine which button (if any) is at a given coordinate
+// Returns: 0=close, 1=mini, 2=zoom, -1=none
+// Side-by-side layout: Close (X) on left | title | Minimize (-) | Maximize (+) on right
++ (NSInteger)buttonIndexAtX:(CGFloat)x forWidth:(CGFloat)width hasMaximize:(BOOL)hasMax;
++ (NSInteger)buttonIndexAtX:(CGFloat)x y:(CGFloat)y forWidth:(CGFloat)width height:(CGFloat)height hasMaximize:(BOOL)hasMax;
+
+// Orb button style detection (reads EauTitleBarButtonStyle preference)
++ (BOOL)isOrbButtonStyle;
+
 @end
