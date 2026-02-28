@@ -1019,6 +1019,7 @@
         [connection sendEvent:(const char*) &event toClient:self propagate:NO];
     } else {
         NSLog(@"[FOCUS] Window %u does not support WM_TAKE_FOCUS", window);
+	return;
     }
 
     NSLog(@"[FOCUS] Updating _NET_ACTIVE_WINDOW for window %u", window);
