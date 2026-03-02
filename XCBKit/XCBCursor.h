@@ -48,5 +48,6 @@
 
 - (xcb_cursor_t) selectLeftPointerCursor;
 - (xcb_cursor_t) selectResizeCursorForPosition:(MousePosition)position;
+- (xcb_cursor_t) cursorIdForPosition:(MousePosition)position;
 
 @end

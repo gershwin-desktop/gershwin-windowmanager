@@ -306,23 +306,39 @@
 - (void)handleButtonPress:(xcb_button_press_event_t*)event {
     NSLog(@"UROSTitleBar: Button press at %d,%d", event->event_x, event->event_y);
 
-    // Define button areas (using standard macOS positions)
-    NSRect closeButtonRect = NSMakeRect(6, 6, 13, 13);
-    NSRect minimizeButtonRect = NSMakeRect(26, 6, 13, 13);
-    NSRect maximizeButtonRect = NSMakeRect(46, 6, 13, 13);
+    // Side-by-side button metrics (must match URSThemeIntegration.m)
+    static const CGFloat EDGE_BUTTON_WIDTH = 28.0;       // Close button width
+    static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;      // Width for each right-side button
+    static const CGFloat TITLEBAR_HEIGHT = 24.0;         // Total titlebar height
 
+    CGFloat titlebarWidth = self.frame.size.width;
+    CGFloat titlebarHeight = TITLEBAR_HEIGHT;
     NSPoint clickPoint = NSMakePoint(event->event_x, event->event_y);
+
+    // Close button at left edge (full height)
+    NSRect closeButtonRect = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, titlebarHeight);
 
     if (NSPointInRect(clickPoint, closeButtonRect)) {
         [self handleCloseButton];
-    } else if (NSPointInRect(clickPoint, minimizeButtonRect)) {
-        [self handleMinimizeButton];
-    } else if (NSPointInRect(clickPoint, maximizeButtonRect)) {
-        [self handleMaximizeButton];
-    } else {
-        // Handle titlebar dragging
-        [self beginWindowDrag:event];
+        return;
     }
+
+    // Side-by-side buttons on right edge
+    // Minimize (inner right)
+    if (clickPoint.x >= titlebarWidth - 2 * RIGHT_BUTTON_WIDTH &&
+        clickPoint.x < titlebarWidth - RIGHT_BUTTON_WIDTH) {
+        [self handleMinimizeButton];
+        return;
+    }
+
+    // Zoom/maximize (far right)
+    if (clickPoint.x >= titlebarWidth - RIGHT_BUTTON_WIDTH) {
+        [self handleMaximizeButton];
+        return;
+    }
+
+    // Handle titlebar dragging
+    [self beginWindowDrag:event];
 }
 
 - (void)handleCloseButton {
