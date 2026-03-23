@@ -21,6 +21,9 @@
 #import "services/TitleBarSettingsService.h"
 #import "utils/XCBShape.h"
 #import <dispatch/dispatch.h>
+#import <GNUstepGUI/GSTheme.h>
+#import <AppKit/NSColor.h>
+#import <AppKit/NSGraphics.h>
 
 #import <objc/message.h> // for dynamic messaging to compositor helper
 
@@ -44,6 +47,32 @@
                           screen:(xcb_screen_t *)screen
                         duration:(NSTimeInterval)duration;
 @end
+
+// Find 32-bit ARGB visual for alpha transparency support
+// Returns visual ID and fills in visualType if found
+static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **outVisualType) {
+    if (!screen) return 0;
+
+    xcb_depth_iterator_t depth_iter = xcb_screen_allowed_depths_iterator(screen);
+
+    for (; depth_iter.rem; xcb_depth_next(&depth_iter)) {
+        if (depth_iter.data->depth != 32) continue;
+
+        xcb_visualtype_iterator_t visual_iter = xcb_depth_visuals_iterator(depth_iter.data);
+
+        for (; visual_iter.rem; xcb_visualtype_next(&visual_iter)) {
+            xcb_visualtype_t *visual = visual_iter.data;
+
+            // Look for TrueColor with 8-bit alpha channel
+            if (visual->_class == XCB_VISUAL_CLASS_TRUE_COLOR) {
+                if (outVisualType) *outVisualType = visual;
+                return visual->visual_id;
+            }
+        }
+    }
+
+    return 0;
+}
 
 @implementation XCBConnection
 
@@ -464,6 +493,16 @@ static XCBConnection *sharedInstance;
 
 - (void)handleUnMapNotify:(xcb_unmap_notify_event_t *)anEvent
 {
+    // If we were dragging when this window unmapped, cancel the drag.
+    // A missed button release (e.g., window unmapped during drag) leaves dragState stuck.
+    if (dragState) {
+        NSLog(@"DRAG SAFETY: Window %u unmapped while dragState=YES — clearing drag state", anEvent->window);
+        dragState = NO;
+        resizeState = NO;
+        xcb_ungrab_pointer(connection, XCB_CURRENT_TIME);
+        [self flush];
+    }
+
     XCBWindow *window = [self windowForXCBId:anEvent->window];
     [window setIsMapped:NO];
     NSLog(@"[%@] The window %u is unmapped!", NSStringFromClass([self class]), [window window]);
@@ -1135,13 +1174,84 @@ static XCBConnection *sharedInstance;
         screen = [screens objectAtIndex:0];
     }
     
+    // Check if compositor is active for ARGB alpha transparency support
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    BOOL compositorActive = NO;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        id manager = [compositorClass sharedManager];
+        if ([manager respondsToSelector:@selector(compositingActive)]) {
+            compositorActive = [manager compositingActive];
+        }
+    }
+
+    // Query border color from theme (e.g. Eau's controlStrokeColor), with fallback
+    uint32_t borderPixel = 0xC0C0C0;
+    GSTheme *theme = [GSTheme theme];
+    if ([theme respondsToSelector:@selector(windowFrameBorderColor)]) {
+        NSColor *borderColor = [(id)theme performSelector:@selector(windowFrameBorderColor)];
+        if (borderColor) {
+            borderColor = [borderColor colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
+            CGFloat r, g, b, a;
+            [borderColor getRed:&r green:&g blue:&b alpha:&a];
+            borderPixel = ((uint8_t)(r * 255) << 16) | ((uint8_t)(g * 255) << 8) | (uint8_t)(b * 255);
+        }
+    }
+
     XCBVisual *visual = nil;
+    uint32_t values[4];  // May need up to 4 values for ARGB (back_pixel, border_pixel, colormap, event_mask)
+    uint32_t valueMask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
+    uint8_t depth = 0;  // 0 = use root_depth
+    xcb_colormap_t argbColormap = XCB_NONE;
+    xcb_visualid_t argbVisualId = 0;
+
     if (screen) {
         visual = [[XCBVisual alloc] initWithVisualId:[screen screen]->root_visual];
         [visual setVisualTypeForScreen:screen];
+        depth = [screen screen]->root_depth;
+
+        // If compositor is active, try to use 32-bit ARGB visual for alpha transparency
+        if (compositorActive) {
+            xcb_visualtype_t *argbVisualType = NULL;
+            argbVisualId = findARGBVisual([screen screen], &argbVisualType);
+
+            if (argbVisualId != 0 && argbVisualType != NULL) {
+                NSLog(@"[XCBConnection] Creating frame with 32-bit ARGB visual (0x%x) for compositor alpha", argbVisualId);
+
+                // Create colormap for ARGB visual (required for 32-bit windows)
+                argbColormap = xcb_generate_id(connection);
+                xcb_create_colormap(connection,
+                                   XCB_COLORMAP_ALLOC_NONE,
+                                   argbColormap,
+                                   [screen screen]->root,
+                                   argbVisualId);
+
+                // Set up ARGB visual
+                visual = [[XCBVisual alloc] initWithVisualId:argbVisualId];
+                [visual setVisualType:argbVisualType];
+                depth = 32;
+
+                // For 32-bit windows: back_pixel, border_pixel, event_mask, colormap
+                // XCB_CW values must be in ascending bit order: 2, 8, 2048, 8192
+                valueMask = XCB_CW_BACK_PIXEL | XCB_CW_BORDER_PIXEL | XCB_CW_EVENT_MASK | XCB_CW_COLORMAP;
+                values[0] = (0xFF << 24) | borderPixel;  // back_pixel = border color (opaque)
+                values[1] = 0;  // border_pixel = transparent
+                values[2] = FRAMEMASK;  // event_mask
+                values[3] = argbColormap;  // colormap
+            } else {
+                NSLog(@"[XCBConnection] No ARGB visual found, using standard 24-bit frame");
+                values[0] = borderPixel;  // border color
+                values[1] = FRAMEMASK;
+            }
+        } else {
+            // Non-compositor mode: use border color background
+            values[0] = borderPixel;  // border color
+            values[1] = FRAMEMASK;
+        }
+    } else {
+        values[0] = borderPixel;  // border color
+        values[1] = FRAMEMASK;
     }
 
-    uint32_t values[] = { (screen ? [screen screen]->white_pixel : 0), /*XCB_BACKING_STORE_WHEN_MAPPED,*/ FRAMEMASK};
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
@@ -1194,8 +1304,8 @@ static XCBConnection *sharedInstance;
 
     int16_t xPos = reqX;
     int16_t yPos = reqY;
-    uint16_t winWidth = reqW;
-    uint16_t winHeight = reqH + titleHeight;
+    uint16_t winWidth = reqW + 2;         // 1px border on left + right
+    uint16_t winHeight = reqH + titleHeight + 1;  // 1px border on bottom
 
     NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
@@ -1216,7 +1326,7 @@ static XCBConnection *sharedInstance;
     }
 
     XCBCreateWindowTypeRequest *request = [[XCBCreateWindowTypeRequest alloc] initForWindowType:XCBFrameRequest];
-    [request setDepth:(screen ? [screen screen]->root_depth : 24)];
+    [request setDepth:(depth > 0 ? depth : 24)];
     [request setParentWindow:(screen ? [screen rootWindow] : 0)];
     [request setXPosition:xPos];
     [request setYPosition:yPos];
@@ -1225,14 +1335,27 @@ static XCBConnection *sharedInstance;
     [request setBorderWidth:0];
     [request setXcbClass:XCB_WINDOW_CLASS_INPUT_OUTPUT];
     [request setVisual:visual];
-    [request setValueMask:XCB_CW_BACK_PIXEL /*| XCB_CW_BACKING_STORE*/ | XCB_CW_EVENT_MASK];
+    [request setValueMask:valueMask];
     [request setValueList:values];
     [request setClientWindow:window];
 
     XCBWindowTypeResponse *response = [self createWindowForRequest:request registerWindow:YES];
-    
+
     XCBFrame *frame = [response frame];
-    
+
+    // Prevent X server from clearing the frame to background_pixel (white) on
+    // every resize.  Default ForgetGravity discards all pixels; NorthWestGravity
+    // preserves existing content and only exposes truly new areas.
+    uint32_t gravity = XCB_GRAVITY_NORTH_WEST;
+    xcb_change_window_attributes(connection, [frame window], XCB_CW_BIT_GRAVITY, &gravity);
+
+    // If using ARGB visual, configure frame for 32-bit rendering
+    if (depth == 32 && argbColormap != XCB_NONE) {
+        [frame setUse32BitDepth:YES];
+        [frame setArgbVisualId:argbVisualId];
+        NSLog(@"[XCBConnection] Configured frame for 32-bit ARGB rendering");
+    }
+
     // Ensure icccmService is valid
     if (icccmService == nil) {
         icccmService = [ICCCMService sharedInstanceWithConnection:self];
@@ -1257,6 +1380,7 @@ static XCBConnection *sharedInstance;
     [frame decorateClientWindow];
     [self mapWindow:frame];
     [self registerWindow:window];
+    [window setParentWindow:frame];
     [window updateAttributes];
     [frame setScreen:[window screen]];
     [window setNormalState];
@@ -1401,8 +1525,20 @@ static XCBConnection *sharedInstance;
         /*([window window] != [rootWindow window]) &&
         ([[window parentWindow] window] != [rootWindow window])*/)
     {
+        // Safety: verify mouse button 1 is actually pressed.
+        // If dragState leaked from a prior interaction, cancel the drag.
+        if (!(anEvent->state & XCB_KEY_BUT_MASK_BUTTON_1)) {
+            NSLog(@"DRAG SAFETY: dragState was YES but button 1 not pressed — cancelling phantom drag");
+            dragState = NO;
+            [window ungrabPointer];
+            return;
+        }
+
         frame = (XCBFrame *) [window parentWindow];
-        [window grabPointer];
+        // Only grab if not already grabbed (avoid redundant grabs every motion event)
+        if (!window.pointerGrabbed) {
+            [window grabPointer];
+        }
 
         // Get the destination point from mouse position
         int16_t mouseX = anEvent->root_x;
@@ -1567,6 +1703,24 @@ static XCBConnection *sharedInstance;
                     [frame showResizeCursorForPosition:position];
                 }
                 break;
+            case TopLeftCorner:
+                if (![[frame cursor] resizeTopLeftCornerSelected])
+                {
+                    [frame showResizeCursorForPosition:position];
+                }
+                break;
+            case TopRightCorner:
+                if (![[frame cursor] resizeTopRightCornerSelected])
+                {
+                    [frame showResizeCursorForPosition:position];
+                }
+                break;
+            case BottomLeftCorner:
+                if (![[frame cursor] resizeBottomLeftCornerSelected])
+                {
+                    [frame showResizeCursorForPosition:position];
+                }
+                break;
             default:
                 if (![[frame cursor] leftPointerSelected])
                 {
@@ -1576,13 +1730,40 @@ static XCBConnection *sharedInstance;
         }
 
     }
-    else
+    else if (!dragState)
     {
-        if (![[frame cursor] leftPointerSelected])
+        // Find the frame from window's parent chain
+        XCBWindow *parent = [window parentWindow];
+        if ([parent isKindOfClass:[XCBFrame class]])
         {
-            [frame showLeftPointerCursor];
-            [window showLeftPointerCursor];
+            frame = (XCBFrame *)parent;
+        }
 
+        if (frame)
+        {
+            // Don't reset cursor for resize zone children - they have
+            // their own static cursors set at creation time
+            BOOL isResizeChild = NO;
+            childrenMask zoneKeys[] = {
+                ResizeHandle, ResizeZoneNW, ResizeZoneN, ResizeZoneNE,
+                ResizeZoneE, ResizeZoneSE, ResizeZoneS, ResizeZoneSW,
+                ResizeZoneW, ResizeZoneGrowBox
+            };
+            xcb_window_t eventWindow = [window window];
+            for (int i = 0; i < 10; i++)
+            {
+                XCBWindow *zone = [frame childWindowForKey:zoneKeys[i]];
+                if (zone && [zone window] == eventWindow)
+                {
+                    isResizeChild = YES;
+                    break;
+                }
+            }
+
+            if (!isResizeChild && ![[frame cursor] leftPointerSelected])
+            {
+                [frame showLeftPointerCursor];
+            }
         }
     }
 
@@ -2059,7 +2240,11 @@ static XCBConnection *sharedInstance;
     self.pendingSnapZone = SnapZoneNone;
     self.snapPreviewShown = NO;
 
-    [window ungrabPointer];
+    // Always ungrab pointer directly — the release may arrive on a different window
+    // than the one that was grabbed (e.g., frame vs titlebar), so we can't rely on
+    // the per-window pointerGrabbed flag.
+    xcb_ungrab_pointer(connection, XCB_CURRENT_TIME);
+    [self flush];
     dragState = NO;
     self.workareaValid = NO;  // Clear cached workarea
     resizeState = NO;
@@ -2542,15 +2727,27 @@ static XCBConnection *sharedInstance;
     }
     
     // Handle undecorated windows (no frame parent) - these still need button grabs
-    // so we can track focus changes for _NET_ACTIVE_WINDOW
+    // so we can track focus changes for _NET_ACTIVE_WINDOW.
+    // Skip menu-type windows: GNUstep handles its own menu mouse tracking,
+    // and a synchronous button grab would freeze the pointer, preventing
+    // the menu from receiving button-release events.
     if (window && [window isKindOfClass:[XCBWindow class]] && ![window decorated])
     {
-        // Check if parent is not a frame (undecorated window)
-        XCBWindow *parent = [window parentWindow];
-        if (!parent || ![parent isKindOfClass:[XCBFrame class]])
+        NSString *wType = [window windowType];
+        EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self];
+        BOOL isMenu = [wType isEqualToString:[ewmh EWMHWMWindowTypePopupMenu]] ||
+                      [wType isEqualToString:[ewmh EWMHWMWindowTypeDropdownMenu]] ||
+                      [wType isEqualToString:[ewmh EWMHWMWindowTypeMenu]];
+        ewmh = nil;
+
+        if (!isMenu)
         {
-            [window grabButton];
-            NSLog(@"[EnterNotify] Grabbed button on undecorated window %u", [window window]);
+            XCBWindow *parent = [window parentWindow];
+            if (!parent || ![parent isKindOfClass:[XCBFrame class]])
+            {
+                [window grabButton];
+                NSLog(@"[EnterNotify] Grabbed button on undecorated window %u", [window window]);
+            }
         }
     }
 
@@ -3585,6 +3782,39 @@ static XCBConnection *sharedInstance;
     NSLog(@"[Center] Centering window to (%d, %d)", centerX, centerY);
 
     // Save current rect for restore
+    [frame setOldRect:currentRect];
+
+    [frame programmaticResizeToRect:targetRect];
+    [frame updateAllResizeZonePositions];
+    [frame applyRoundedCornersShapeMask];
+
+    [self flush];
+}
+
+- (void)centerFrame:(XCBFrame *)frame {
+    if (!frame) {
+        NSLog(@"[Center] No frame to center");
+        return;
+    }
+
+    [self ensureWorkareaCache:frame];
+
+    XCBRect currentRect = [frame windowRect];
+    uint32_t windowWidth = currentRect.size.width;
+    uint32_t windowHeight = currentRect.size.height;
+
+    int32_t centerX = _cachedWorkareaX + (_cachedWorkareaWidth - windowWidth) / 2;
+    int32_t centerY = _cachedWorkareaY + (_cachedWorkareaHeight - windowHeight) / 2;
+
+    if (centerX < _cachedWorkareaX) centerX = _cachedWorkareaX;
+    if (centerY < _cachedWorkareaY) centerY = _cachedWorkareaY;
+
+    XCBRect targetRect = XCBMakeRect(
+        XCBMakePoint(centerX, centerY),
+        XCBMakeSize(windowWidth, windowHeight));
+
+    NSLog(@"[Center] Centering frame to (%d, %d)", centerX, centerY);
+
     [frame setOldRect:currentRect];
 
     [frame programmaticResizeToRect:targetRect];
