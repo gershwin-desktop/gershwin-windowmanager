@@ -44,6 +44,40 @@ $(APP_NAME)_GUI_LIBS = -lXCBKit -lxcb -lxcb-icccm -lxcb-util $(shell pkg-config 
 
 ADDITIONAL_OBJCFLAGS = -std=c99 -g -O0 -fobjc-arc -Wall -Wno-typedef-redefinition #-Wno-unused -Werror -Wall
 
+# Wayland/River support: pass WAYLAND=1 to enable
+# Usage: make WAYLAND=1
+ifeq ($(WAYLAND),1)
+$(APP_NAME)_OBJC_FILES += \
+		GWLRiverWindowManager.m \
+		GWLWindowState.m \
+		GWLOutputState.m \
+		GWLSeatState.m \
+		GWLDecorationRenderer.m
+
+$(APP_NAME)_C_FILES = \
+		wayland/generated/river-window-management-v1-client.c \
+		wayland/generated/river-xkb-bindings-v1-client.c \
+		wayland/generated/river-layer-shell-v1-client.c \
+		wayland/generated/river-input-management-v1-client.c
+
+$(APP_NAME)_HEADER_FILES += \
+		GWLRiverWindowManager.h \
+		GWLWindowState.h \
+		GWLOutputState.h \
+		GWLSeatState.h \
+		GWLDecorationRenderer.h
+
+$(APP_NAME)_GUI_LIBS += $(shell pkg-config --libs wayland-client xkbcommon)
+
+ADDITIONAL_OBJCFLAGS += -DWAYLAND_SUPPORT \
+	$(shell pkg-config --cflags wayland-client xkbcommon) \
+	-Iwayland/generated
+
+ADDITIONAL_CFLAGS = \
+	$(shell pkg-config --cflags wayland-client) \
+	-Iwayland/generated
+endif
+
 #LIBRARIES_DEPEND_UPON += $(shell pkg-config --libs xcb) $(FND_LIBS) $(OBJC_LIBS) $(SYSTEM_LIBS)
 
 include $(GNUSTEP_MAKEFILES)/aggregate.make
