@@ -410,15 +410,13 @@
                 continue; // Process the next event instead
             } else {
                 // No more events, process the motion
-                // STEP 1: Clear background pixmap BEFORE resize to prevent X11 tiling
-                [self clearTitlebarBackgroundBeforeResize:lastMotionEvent];
-                // STEP 2: Let xcbkit resize the windows
+                // STEP 1: Let xcbkit resize the windows
                 [connection handleMotionNotify:lastMotionEvent];
-                // STEP 3: Render new content and set as background
+                // STEP 2: Render new content and set as background
                 [self handleResizeDuringMotion:lastMotionEvent];
-                // STEP 4: Update compositor for drag or resize (immediate update for responsiveness)
+                // STEP 3: Update compositor for drag or resize (immediate update for responsiveness)
                 [self handleCompositingDuringMotion:lastMotionEvent];
-                // STEP 5: Check for titlebar button hover state changes
+                // STEP 4: Check for titlebar button hover state changes
                 [self handleTitlebarHoverDuringMotion:lastMotionEvent];
                 needFlush = YES;
                 free(lastMotionEvent);
@@ -1543,35 +1541,6 @@
 
 #pragma mark - Resize Handling
 
-- (void)clearTitlebarBackgroundBeforeResize:(xcb_motion_notify_event_t*)motionEvent {
-    @try {
-        XCBWindow *window = [connection windowForXCBId:motionEvent->event];
-        if (!window || ![window isKindOfClass:[XCBFrame class]]) {
-            return;
-        }
-        XCBFrame *frame = (XCBFrame*)window;
-
-        // Only clear background when width may change (horizontal or diagonal resize).
-        // During vertical-only resize the pixmap width still matches the window —
-        // clearing would cause the X server to fall back to white_pixel for exposed areas.
-        if (![frame leftBorderClicked] && ![frame rightBorderClicked]) {
-            return;
-        }
-
-        XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
-        if (!titlebarWindow || ![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
-            return;
-        }
-
-        uint32_t value = 0; // XCB_BACK_PIXMAP_NONE
-        xcb_change_window_attributes([connection connection],
-                                     [titlebarWindow window],
-                                     XCB_CW_BACK_PIXMAP,
-                                     &value);
-    } @catch (NSException *exception) {
-    }
-}
-
 - (void)handleResizeDuringMotion:(xcb_motion_notify_event_t*)motionEvent {
     @try {
         // Find the window involved in the motion
@@ -1603,8 +1572,13 @@
 
         // Only update if the size has changed
         if (pixmapSize.width != titlebarRect.size.width) {
-            // Recreate the titlebar pixmap at the new size
-            [titlebar destroyPixmap];
+            // Save old pixmap IDs so we can free them AFTER setting the new background.
+            // This avoids a transient state where the X server has no background pixmap
+            // to paint from, eliminating flicker during resize.
+            xcb_pixmap_t oldPixmap = [titlebar pixmap];
+            xcb_pixmap_t oldDPixmap = [titlebar dPixmap];
+
+            // Create new pixmap at the new size (overwrites instance vars)
             [titlebar createPixmap];
 
             // Redraw with GSTheme
@@ -1613,10 +1587,16 @@
                                                  title:[titlebar windowTitle]
                                                 active:YES];
 
-            // Update the window background pixmap to prevent X11 tiling
-            // This is the key fix - xcbkit sets a background pixmap which X11 tiles
-            // when the window is larger than the pixmap
+            // Set new pixmap as background BEFORE freeing old one
             [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+
+            // Now free the old pixmaps
+            if (oldPixmap != 0) {
+                xcb_free_pixmap([connection connection], oldPixmap);
+            }
+            if (oldDPixmap != 0) {
+                xcb_free_pixmap([connection connection], oldDPixmap);
+            }
 
             // Copy the pixmap to the window immediately
             [titlebar drawArea:titlebarRect];

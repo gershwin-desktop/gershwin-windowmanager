@@ -1203,9 +1203,25 @@
     cw.width = width;
     cw.height = height;
     
-    // Damage the new area
+    // Damage the new area.
+    // The shadow was freed above, so windowExtents won't include shadow padding.
+    // We must damage an area large enough to cover where the new shadow WILL be
+    // painted (shadow is recreated lazily in paintWindow).
     if (cw.viewable) {
-        [self damageWindowArea:cw];
+        xcb_connection_t *c = [self.connection connection];
+        int16_t pad = self.gaussianSize + abs(SHADOW_OFFSET_X);
+        int16_t padY = self.gaussianSize + abs(SHADOW_OFFSET_Y);
+        if (padY > pad) pad = padY;
+
+        xcb_rectangle_t r;
+        r.x = cw.x - pad;
+        r.y = cw.y - pad;
+        r.width = cw.width + 2 * cw.borderWidth + 2 * pad;
+        r.height = cw.height + 2 * cw.borderWidth + 2 * pad;
+
+        xcb_xfixes_region_t region = xcb_generate_id(c);
+        xcb_xfixes_create_region(c, region, 1, &r);
+        [self addDamage:region];
     }
 }
 
