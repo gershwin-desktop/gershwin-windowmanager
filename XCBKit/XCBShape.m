@@ -142,8 +142,8 @@
 
     // Only top corners get arcs, bottom stays rectangular
     xcb_arc_t bArcs[] = {
-        { 0, 0, diameter, diameter, 0, 360 << 6 },                    // top-left
-        { orWidth - diameter - 1, 0, diameter, diameter, 0, 360 << 6 }, // top-right
+        { 0, 0, diameter, diameter, 0, 360 << 6 },                // top-left
+        { orWidth - diameter, 0, diameter, diameter, 0, 360 << 6 }, // top-right
     };
 
     xcb_rectangle_t brects[] = {
@@ -211,15 +211,15 @@
     // Draw corner arcs
     if (topRadius > 0) {
         xcb_arc_t topArcs[] = {
-            { 0, 0, topDiameter, topDiameter, 0, 360 << 6 },                        // top-left
-            { orWidth - topDiameter - 1, 0, topDiameter, topDiameter, 0, 360 << 6 }, // top-right
+            { 0, 0, topDiameter, topDiameter, 0, 360 << 6 },                    // top-left
+            { orWidth - topDiameter, 0, topDiameter, topDiameter, 0, 360 << 6 }, // top-right
         };
         xcb_poly_fill_arc(conn, borderPixmap, white, 2, topArcs);
     }
 
     if (bottomRadius > 0) {
         xcb_arc_t bottomArcs[] = {
-            { -1, orHeight - bottomDiameter, bottomDiameter, bottomDiameter, 0, 360 << 6 },                    // bottom-left
+            { 0, orHeight - bottomDiameter, bottomDiameter, bottomDiameter, 0, 360 << 6 },                    // bottom-left
             { orWidth - bottomDiameter, orHeight - bottomDiameter, bottomDiameter, bottomDiameter, 0, 360 << 6 }, // bottom-right
         };
         xcb_poly_fill_arc(conn, borderPixmap, white, 2, bottomArcs);

@@ -796,6 +796,18 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     BOOL compositorActive = [[URSCompositingManager sharedManager] compositingActive];
     xcb_visualtype_t *visualType = titlebar.visual.visualType;
 
+    // In compositor mode, query the corner radius so we can apply a Cairo rounded-top
+    // clip path. This gives the ARGB channel smooth anti-aliased corner pixels, letting
+    // the compositor blend the transparent areas naturally instead of relying on XShape's
+    // binary 1-pixel staircase mask.
+    CGFloat topCornerRadius = 0;
+    if (compositorActive) {
+        GSTheme *theme = [GSTheme theme];
+        if ([theme respondsToSelector:@selector(titlebarCornerRadius)]) {
+            topCornerRadius = [theme titlebarCornerRadius];
+        }
+    }
+
     // Set up ARGB visual for Cairo if compositor is active
     // Note: The titlebar window and pixmap are now created with 32-bit depth in XCBFrame.m
     // We just need to get the correct visual type for Cairo surface creation
@@ -964,10 +976,28 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
     NSLog(@"Painting GSTheme image to X11 surface...");
 
-    // Paint GSTheme image to X11 surface using SOURCE operator
-    // SOURCE completely replaces destination pixels with source (including alpha values)
-    // The X11 compositor then uses those alpha values when compositing windows
-    // This works for both compositor and non-compositor modes
+    // In compositor mode, clip the Cairo rendering to a rounded-top rectangle.
+    // This makes the ARGB alpha channel provide smooth anti-aliased top corners
+    // so the compositor can blend them naturally (no XShape staircase artifacts).
+    // In non-compositor mode the clip is skipped; XShape handles corner clipping.
+    if (compositorActive && topCornerRadius > 0.0) {
+        double cr = (double)topCornerRadius;
+        double cw = (double)width, ch = (double)height;
+        // Clear the entire surface to transparent first (ensures corners get alpha=0)
+        cairo_set_operator(ctx, CAIRO_OPERATOR_SOURCE);
+        cairo_set_source_rgba(ctx, 0.0, 0.0, 0.0, 0.0);
+        cairo_paint(ctx);
+        // Build a clip path: rounded top corners, square bottom corners
+        // (the frame border draws the bottom half, so only the titlebar top is rounded)
+        cairo_new_path(ctx);
+        cairo_move_to(ctx, 0.0, ch);
+        cairo_line_to(ctx, 0.0, cr);
+        cairo_arc(ctx, cr, cr, cr, M_PI, 3.0 * M_PI / 2.0);
+        cairo_arc(ctx, cw - cr, cr, cr, 3.0 * M_PI / 2.0, 2.0 * M_PI);
+        cairo_line_to(ctx, cw, ch);
+        cairo_close_path(ctx);
+        cairo_clip(ctx);
+    }
     cairo_set_operator(ctx, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_surface(ctx, imageSurface, 0, 0);
     cairo_paint(ctx);
@@ -1070,6 +1100,22 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                     );
 
                     if (cairo_surface_status(dImageSurface) == CAIRO_STATUS_SUCCESS) {
+                        // Apply the same rounded-top clip for the inactive (dimmed) pixmap
+                        if (compositorActive && topCornerRadius > 0.0) {
+                            double cr = (double)topCornerRadius;
+                            double cw = (double)dimmedWidth, ch = (double)dimmedHeight;
+                            cairo_set_operator(dCtx, CAIRO_OPERATOR_SOURCE);
+                            cairo_set_source_rgba(dCtx, 0.0, 0.0, 0.0, 0.0);
+                            cairo_paint(dCtx);
+                            cairo_new_path(dCtx);
+                            cairo_move_to(dCtx, 0.0, ch);
+                            cairo_line_to(dCtx, 0.0, cr);
+                            cairo_arc(dCtx, cr, cr, cr, M_PI, 3.0 * M_PI / 2.0);
+                            cairo_arc(dCtx, cw - cr, cr, cr, 3.0 * M_PI / 2.0, 2.0 * M_PI);
+                            cairo_line_to(dCtx, cw, ch);
+                            cairo_close_path(dCtx);
+                            cairo_clip(dCtx);
+                        }
                         // Use SOURCE to replace destination with source (including alpha)
                         cairo_set_operator(dCtx, CAIRO_OPERATOR_SOURCE);
                         cairo_set_source_surface(dCtx, dImageSurface, 0, 0);
