@@ -962,14 +962,36 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         return NO;
     }
 
-    NSLog(@"Painting GSTheme image to X11 surface...");
+    // Get corner radius from theme — mirrors the alt-tab NSBezierPath approach:
+    // clear corners to alpha=0 via Cairo rather than relying on XShape.
+    CGFloat topR = 0;
+    if (compositorActive) {
+        GSTheme *theme = [GSTheme theme];
+        if ([theme respondsToSelector:@selector(titlebarCornerRadius)])
+            topR = [theme titlebarCornerRadius];
+    }
 
-    // Paint the theme bitmap straight to the X11 surface.
-    // In compositor mode the ARGB visual provides per-pixel alpha blending;
-    // the frame's XShape mask clips the entire window (including this titlebar)
-    // to the rounded shape.  We must NOT add a Cairo clip path here because
-    // transparent pixels inside the ARGB titlebar would composite against the
-    // non-ARGB frame background rather than the screen, showing the wrong color.
+    // Step 1: Clear entire surface to transparent (alpha=0 everywhere).
+    cairo_set_operator(ctx, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(ctx);
+
+    // Step 2: Clip to rounded-top-corners path so corner pixels remain transparent.
+    if (topR > 0) {
+        double r = (double)topR * 2.0;
+        double w = (double)width;
+        double h = (double)height;
+        cairo_new_path(ctx);
+        cairo_move_to(ctx, 0, h);
+        cairo_line_to(ctx, 0, r);
+        cairo_arc(ctx, r, r, r, M_PI, -M_PI / 2.0);
+        cairo_line_to(ctx, w - r, 0);
+        cairo_arc(ctx, w - r, r, r, -M_PI / 2.0, 0.0);
+        cairo_line_to(ctx, w, h);
+        cairo_close_path(ctx);
+        cairo_clip(ctx);
+    }
+
+    // Step 3: Paint the theme bitmap within the clip.
     cairo_set_operator(ctx, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_surface(ctx, imageSurface, 0, 0);
     cairo_paint(ctx);
@@ -978,8 +1000,6 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     // Force immediate X11 update to ensure GSTheme is visible
     [titlebar.connection flush];
     xcb_flush([titlebar.connection connection]);
-
-    NSLog(@"GSTheme image painted and surface flushed");
 
     // Cleanup first surface
     cairo_surface_destroy(imageSurface);
@@ -990,8 +1010,6 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     // XCBWindow.drawArea uses isAbove ? pixmap : dPixmap
     xcb_pixmap_t dPixmap = [titlebar dPixmap];
     if (dPixmap != 0) {
-        NSLog(@"Painting dimmed GSTheme to dPixmap (inactive pixmap): %u", dPixmap);
-
         // Create a dimmed version of the titlebar image for inactive state
         NSImage *dimmedImage = [self createDimmedImage:image];
         if (dimmedImage) {
@@ -1072,12 +1090,27 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                     );
 
                     if (cairo_surface_status(dImageSurface) == CAIRO_STATUS_SUCCESS) {
-                        // Use SOURCE to replace destination with source (including alpha)
+                        // Clear to transparent, then apply matching rounded-top clip.
+                        cairo_set_operator(dCtx, CAIRO_OPERATOR_CLEAR);
+                        cairo_paint(dCtx);
+                        if (topR > 0) {
+                            double r = (double)topR * 2.0;
+                            double dw = (double)dimmedWidth;
+                            double dh = (double)dimmedHeight;
+                            cairo_new_path(dCtx);
+                            cairo_move_to(dCtx, 0, dh);
+                            cairo_line_to(dCtx, 0, r);
+                            cairo_arc(dCtx, r, r, r, M_PI, -M_PI / 2.0);
+                            cairo_line_to(dCtx, dw - r, 0);
+                            cairo_arc(dCtx, dw - r, r, r, -M_PI / 2.0, 0.0);
+                            cairo_line_to(dCtx, dw, dh);
+                            cairo_close_path(dCtx);
+                            cairo_clip(dCtx);
+                        }
                         cairo_set_operator(dCtx, CAIRO_OPERATOR_SOURCE);
                         cairo_set_source_surface(dCtx, dImageSurface, 0, 0);
                         cairo_paint(dCtx);
                         cairo_surface_flush(dSurface);
-                        NSLog(@"Dimmed GSTheme painted to dPixmap successfully");
                     }
 
                     cairo_surface_destroy(dImageSurface);

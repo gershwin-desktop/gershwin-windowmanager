@@ -847,8 +847,18 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     if (fw <= 0 || fh <= 0)
         return;
 
-    // Apply bounding-shape to the FRAME window
-    {
+    // Check if compositor is active
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    BOOL compositorActive = NO;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        id manager = [compositorClass sharedManager];
+        if ([manager respondsToSelector:@selector(compositingActive)]) {
+            compositorActive = [manager compositingActive];
+        }
+    }
+
+    // Apply bounding-shape to the FRAME window (always needed in non-compositor mode)
+    if (!compositorActive) {
         XCBShape *shape = [[XCBShape alloc] initWithConnection:connection withWinId:window];
         if ([shape checkSupported]) {
             shape.width = fw;
@@ -862,10 +872,10 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         shape = nil;
     }
 
-    // In compositor mode the compositor renders the titlebar window independently,
-    // so the frame's shape does NOT clip the titlebar.  Apply a matching top-rounded
-    // shape to the titlebar window so the compositor correctly clips its corners too.
-    if (topRadius > 0) {
+    // In NON-compositor mode only: apply XShape to titlebar.
+    // In compositor mode, URSThemeIntegration.m handles rounded corners entirely via Cairo ARGB alpha.
+    // XShape in compositor mode causes the initial-map sharp-corners issue and is not needed.
+    if (topRadius > 0 && !compositorActive) {
         XCBTitleBar *titleBar = (XCBTitleBar *)[self childWindowForKey:TitleBar];
         if (titleBar) {
             int th = (int)titleHeight;  // titlebar height = the band above client
