@@ -392,37 +392,32 @@
            eventsProcessed < maxEventsPerCall) {
         eventsProcessed++;
 
-        // Handle motion event compression (same as original)
+        // Motion event compression: accumulate the latest motion event
+        // but don't process it until we see a non-motion event or the queue empties.
         if ((e->response_type & ~0x80) == XCB_MOTION_NOTIFY) {
-            // Motion event compression: save the latest motion event
             if (lastMotionEvent) {
                 free(lastMotionEvent);
             }
             lastMotionEvent = malloc(sizeof(xcb_motion_notify_event_t));
             memcpy(lastMotionEvent, e, sizeof(xcb_motion_notify_event_t));
+            free(e);
+            continue;
+        }
 
-            // Check if more events are queued - if so, skip processing this one
-            xcb_generic_event_t *nextEvent = xcb_poll_for_event([connection connection]);
-            if (nextEvent) {
-                // There's another event queued, defer motion processing
-                free(e);
-                e = nextEvent;
-                continue; // Process the next event instead
-            } else {
-                // No more events, process the motion
-                // STEP 1: Let xcbkit resize the windows
+        // Flush pending compressed motion only before events that depend
+        // on an up-to-date window position (button press/release).
+        // Flushing before every non-motion event (e.g. DAMAGE) would
+        // defeat compression and make resize unbearably slow.
+        if (lastMotionEvent) {
+            uint8_t nextType = e->response_type & ~0x80;
+            if (nextType == XCB_BUTTON_RELEASE || nextType == XCB_BUTTON_PRESS) {
                 [connection handleMotionNotify:lastMotionEvent];
-                // STEP 2: Render new content and set as background
                 [self handleResizeDuringMotion:lastMotionEvent];
-                // STEP 3: Update compositor for drag or resize (immediate update for responsiveness)
                 [self handleCompositingDuringMotion:lastMotionEvent];
-                // STEP 4: Check for titlebar button hover state changes
                 [self handleTitlebarHoverDuringMotion:lastMotionEvent];
                 needFlush = YES;
                 free(lastMotionEvent);
                 lastMotionEvent = NULL;
-                free(e);
-                continue;
             }
         }
 
@@ -436,9 +431,15 @@
         free(e);
     }
 
-    // Clean up any remaining motion event
+    // Process any remaining compressed motion event (e.g. motion was last in queue)
     if (lastMotionEvent) {
+        [connection handleMotionNotify:lastMotionEvent];
+        [self handleResizeDuringMotion:lastMotionEvent];
+        [self handleCompositingDuringMotion:lastMotionEvent];
+        [self handleTitlebarHoverDuringMotion:lastMotionEvent];
+        needFlush = YES;
         free(lastMotionEvent);
+        lastMotionEvent = NULL;
     }
 
     // Batched flush: only flush when needed

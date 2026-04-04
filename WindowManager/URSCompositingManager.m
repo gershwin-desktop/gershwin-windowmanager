@@ -1122,6 +1122,15 @@
     cw.pictureValid = NO;
     cw.needsPictureCreation = YES;
 
+    // Drain any accumulated X damage so the damage object is empty.
+    // With REPORT_LEVEL_NON_EMPTY the X server only sends DamageNotify on the
+    // empty→non-empty transition; if prior damage was never subtracted (e.g. a
+    // DamageNotify event was lost during fast motion compression), the object
+    // stays permanently non-empty and no further notifications arrive.
+    if (cw.damage != XCB_NONE) {
+        xcb_damage_subtract(conn, cw.damage, XCB_NONE, XCB_NONE);
+    }
+
     // Ensure updated content is repainted
     [self damageWindowArea:cw];
     [self scheduleRepair];

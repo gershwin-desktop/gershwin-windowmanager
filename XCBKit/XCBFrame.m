@@ -1252,7 +1252,10 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     // Minimal implementation for maximum performance
     XCBPoint pos = XCBMakePoint(coordinates.x - offset.x, coordinates.y - offset.y);
 
-    uint32_t values[] = {(uint32_t)pos.x, (uint32_t)pos.y};
+    // Cast through int32_t first: (uint32_t)(negative double) is undefined
+    // behavior in C, causing window jumps when the position goes negative
+    // (e.g. left edge crossing the left screen border).
+    uint32_t values[] = {(uint32_t)(int32_t)pos.x, (uint32_t)(int32_t)pos.y};
     xcb_configure_window([connection connection], window, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
     // PERFORMANCE FIX: Don't flush on every motion event - let the event loop batch flushes
     // xcb_flush([connection connection]);
