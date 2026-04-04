@@ -2176,6 +2176,8 @@ static XCBConnection *sharedInstance;
             if ([frame grabPointer]) {
                 resizeState = YES;
                 dragState = NO;
+                // Clear stale shape mask so the window paints new area as it grows.
+                [frame clearShapeMasks];
             }
         } else {
             // Check border clicks (fallback for clicking on frame borders directly)
@@ -3015,6 +3017,9 @@ static XCBConnection *sharedInstance;
 
 - (void)borderClickedForFrameWindow:(XCBFrame *)aFrame withEvent:(xcb_button_press_event_t *)anEvent
 {
+    // Clear stale shape mask at resize start so growing windows paint new area.
+    [aFrame clearShapeMasks];
+
     int rightBorder = [aFrame windowRect].size.width;
     int bottomBorder = [aFrame windowRect].size.height;
     int leftBorder = [aFrame windowRect].position.x;

@@ -41,19 +41,15 @@
 
 - (BOOL) checkSupported
 {
-    const xcb_query_extension_reply_t *shape_query;
-    xcb_shape_query_extents_cookie_t extents_cookie;
     xcb_connection_t *conn = [connection connection];
 
-    shape_query = xcb_get_extension_data(conn, &xcb_shape_id);
-
-    if (!shape_query)
-        return NO;
-
-    extents_cookie = xcb_shape_query_extents(conn, winId);
-    shapeExtensionReply = xcb_shape_query_extents_reply(conn, extents_cookie, NULL);
-
-    return YES;
+    // xcb_get_extension_data is non-blocking after the first call (result is cached
+    // per connection).  We only need to know whether the extension is present —
+    // the per-window xcb_shape_query_extents round-trip that was here previously
+    // is a blocking call that was firing on every resize motion event, causing
+    // multi-ms stalls that made the window appear to jump wildly.
+    const xcb_query_extension_reply_t *ext = xcb_get_extension_data(conn, &xcb_shape_id);
+    return (ext != NULL && ext->present);
 }
 
 - (void) calculateDimensionsFromGeometries:(XCBGeometryReply*)aGeometryReply
@@ -165,10 +161,6 @@
 {
     xcb_connection_t *conn = [connection connection];
 
-    NSLog(@"XCBShape: Creating rounded corners with topRadius=%d, bottomRadius=%d", topRadius, bottomRadius);
-    NSLog(@"XCBShape: Window dimensions: width=%d, height=%d, orWidth=%d, orHeight=%d, borderWidth=%d",
-          width, height, orWidth, orHeight, borderWidth);
-
     // Clear pixmap to black (transparent)
     xcb_rectangle_t bounding = {0, 0, orWidth, orHeight};
     xcb_poly_fill_rectangle(conn, borderPixmap, black, 1, &bounding);
@@ -177,8 +169,6 @@
     // Note: diameter is (radius * 2) to match createTopArcsWithRadius
     int topDiameter = (topRadius > 0) ? (topRadius * 2) : 0;
     int bottomDiameter = (bottomRadius > 0) ? (bottomRadius * 2) : 0;
-
-    NSLog(@"XCBShape: Calculated diameters: topDiameter=%d, bottomDiameter=%d", topDiameter, bottomDiameter);
 
     // Center strip (between left and right corners)
     int leftEdge = (topRadius > bottomRadius) ? topRadius : bottomRadius;

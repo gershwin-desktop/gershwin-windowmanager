@@ -537,13 +537,9 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
-    // Update resize zone positions so hover cursors and hit areas stay correct.
-    [self updateAllResizeZonePositions];
-    // Update the bounding shape mask to match the current (possibly larger) window geometry.
-    // Without this, when the window grows the old mask clips rendering to the previous smaller
-    // size and the new area never paints.  The new implementation uses windowRect (no blocking
-    // xcb_get_geometry round-trip) so calling it here is safe for the motion hot path.
-    [self applyRoundedCornersShapeMask];
+    // Resize zones and shape mask are updated at button release (handleButtonRelease),
+    // not on every motion event.  This keeps the hot path to the minimum 2-3 async
+    // xcb_configure_window calls needed to move/resize the actual windows.
 
 }
 
@@ -804,6 +800,26 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 }
 
+- (void)clearShapeMasks
+{
+    // Remove any XShape bounding mask from the frame and titlebar windows so that
+    // the entire rectangle is visible during live resize.  This removes the stale
+    // pre-resize clip that would otherwise blank newly-painted pixels when the
+    // window grows.  Rounded corners are re-applied in full at button release.
+    const xcb_query_extension_reply_t *ext =
+        xcb_get_extension_data([connection connection], &xcb_shape_id);
+    if (!ext || !ext->present) return;
+
+    xcb_connection_t *conn = [connection connection];
+    xcb_shape_mask(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING, window, 0, 0, XCB_NONE);
+
+    XCBTitleBar *titleBar = (XCBTitleBar *)[self childWindowForKey:TitleBar];
+    if (titleBar) {
+        xcb_shape_mask(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                       [titleBar window], 0, 0, XCB_NONE);
+    }
+}
+
 - (void)applyRoundedCornersShapeMask
 {
     // Query theme for corner radii - default to 0 (square corners) if not provided
@@ -813,9 +829,6 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     if ([theme respondsToSelector:@selector(titlebarCornerRadius)]) {
         topRadius = [theme titlebarCornerRadius];
-        NSLog(@"XCBFrame: Theme titlebarCornerRadius = %.1f", topRadius);
-    } else {
-        NSLog(@"XCBFrame: Theme does NOT respond to titlebarCornerRadius selector");
     }
 
     if ([theme respondsToSelector:@selector(windowBottomCornerRadius)]) {
@@ -925,9 +938,6 @@ void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
     values[0] = (uint32_t)newClientWidth;
     xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_WIDTH, values);
 
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
-
     frameRect.size.width = (uint16_t)newWidth;
     [frame setWindowRect:frameRect];
     [frame setOriginalRect:frameRect];
@@ -1031,9 +1041,6 @@ void resizeFromLeftForEvent(xcb_motion_notify_event_t *anEvent,
     clientRect.position.x = cb;
     clientRect.size.width = (uint16_t)newClientWidth;
 
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
-
     [frame setWindowRect:rect];
     [frame setOriginalRect:rect];
 
@@ -1108,9 +1115,6 @@ void resizeFromBottomForEvent(xcb_motion_notify_event_t *anEvent,
 
     values[0] = (uint32_t)newFrameHeight;
     xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_HEIGHT, values);
-
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
 
     rect.size.height = (uint16_t)newFrameHeight;
     [frame setWindowRect:rect];
@@ -1207,9 +1211,6 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
     clientRect.size.height = (uint16_t)newClientHeight;
     clientRect.position.y = titleBarHeight;
 
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
-
     [frame setWindowRect:rect];
     [frame setOriginalRect:rect];
 
@@ -1281,9 +1282,6 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     values[1] = (uint32_t)newClientHeight;
     xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values);
 
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
-
     rect.size.width = (uint16_t)newFrameWidth;
     rect.size.height = (uint16_t)newFrameHeight;
     [frame setWindowRect:rect];
@@ -1333,8 +1331,9 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 {
     xcb_configure_notify_event_t event;
     XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
-    XCBRect rect = [[self geometries] rect];
-    XCBRect clientRect = [clientWindow rectFromGeometries];
+    // Use cached in-memory rects — no blocking xcb_get_geometry round-trip.
+    XCBRect rect = [self windowRect];
+    XCBRect clientRect = [clientWindow windowRect];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 

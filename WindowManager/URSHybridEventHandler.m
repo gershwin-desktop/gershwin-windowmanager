@@ -1607,8 +1607,6 @@
             // Copy the pixmap to the window immediately
             [titlebar drawArea:titlebarRect];
 
-            [connection flush];
-
             // Notify compositor about the window content change
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager updateWindow:[frame window]];
@@ -1619,7 +1617,6 @@
             // and horizontal resize that hit min-width (background was cleared, need repaint).
             [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
             [titlebar drawArea:titlebarRect];
-            [connection flush];
         }
     } @catch (NSException *exception) {
         // Silently ignore exceptions during resize motion to avoid spam
@@ -1672,9 +1669,8 @@
                                                     y:frameRect.position.y
                                                 width:frameRect.size.width
                                                height:frameRect.size.height];
-                
-                // Perform immediate repair during resize for responsive visual feedback
-                [self.compositingManager performRepairNow];
+                // Compositor repaints at its own cadence; no need to force full repair
+                // on every motion pixel (that would stall the resize pipeline).
             }
         }
     } @catch (NSException *exception) {

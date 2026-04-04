@@ -73,6 +73,7 @@ typedef NS_ENUM(NSInteger, childrenMask)
 - (void) updateResizeHandlePosition;
 - (void) raiseResizeHandle;
 - (void) applyRoundedCornersShapeMask;
+- (void) clearShapeMasks;
 - (void) programmaticResizeToRect:(XCBRect)targetRect;
 
 // Theme-driven resize zones
