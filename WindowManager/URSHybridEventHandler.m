@@ -1881,6 +1881,12 @@
             // Notify compositor about the window content change
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager updateWindow:[frame window]];
+                
+                // After resize, damage the entire screen to clean up artifacts from window shrinking.
+                // When a window shrinks, the old window extent is left visible until the compositor repaints.
+                // This forces a full-screen composite to clean it up.
+                [self.compositingManager damageScreen];
+                [self.compositingManager performRepairNow];
             }
             NSLog(@"GSTheme: Titlebar redrawn after resize");
         }

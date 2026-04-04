@@ -77,6 +77,9 @@
 // Perform repair immediately without deferring (for critical updates like cursor blinking)
 - (void)performRepairNow;
 
+// Damage the entire screen region (used after resize/expose to force full redraw)
+- (void)damageScreen;
+
 // Handle damage events
 - (void)handleDamageNotify:(xcb_window_t)window;
 
