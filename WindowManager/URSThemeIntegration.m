@@ -43,11 +43,8 @@ static NSMutableSet *fixedSizeWindows = nil;
 static xcb_window_t hoveredTitlebarWindow = 0;
 static NSInteger hoveredButtonIndex = -1;  // -1=none, 0=close, 1=mini, 2=zoom
 
-// Edge button metrics (matching Eau theme AppearanceMetrics.h)
+// Edge button metrics: buttons are square, width equals titlebar height (queried at render time)
 // Declared early so they can be used in hover state methods
-static const CGFloat TITLEBAR_HEIGHT = 24.0;
-static const CGFloat EDGE_BUTTON_WIDTH = 28.0;        // Close button width (left edge)
-static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;       // Width for each right-side button (maximize, minimize)
 static const CGFloat ICON_STROKE = 1.5;               // Subtle icon strokes
 static const CGFloat ICON_INSET = 8.0;                // Icon inset from button edges (matches Eau theme)
 
@@ -179,7 +176,9 @@ static const CGFloat ORB_BUTTON_SPACING = 4.0;
 // Convenience method that delegates to buttonIndexAtX:y:forWidth:height:hasMaximize:
 + (NSInteger)buttonIndexAtX:(CGFloat)x forWidth:(CGFloat)width hasMaximize:(BOOL)hasMax {
     // Delegate to the full method with y at middle of titlebar
-    return [self buttonIndexAtX:x y:TITLEBAR_HEIGHT / 2.0 forWidth:width height:TITLEBAR_HEIGHT hasMaximize:hasMax];
+    GSTheme *t = [GSTheme theme];
+    CGFloat tbH = [t respondsToSelector:@selector(titlebarHeight)] ? [t titlebarHeight] : 22.0;
+    return [self buttonIndexAtX:x y:tbH / 2.0 forWidth:width height:tbH hasMaximize:hasMax];
 }
 
 // Determine which button (if any) is at a given x,y coordinate
@@ -208,13 +207,14 @@ static const CGFloat ORB_BUTTON_SPACING = 4.0;
     }
 
     // Edge layout: Close (X) on left | title | Minimize (-) | Maximize (+) on right
-    if (x >= 0 && x < EDGE_BUTTON_WIDTH) {
+    // Buttons are square: width == height
+    if (x >= 0 && x < height) {
         return 0;  // Close button
     }
 
     if (hasMax) {
-        CGFloat innerStart = width - 2 * RIGHT_BUTTON_WIDTH;
-        CGFloat outerStart = width - RIGHT_BUTTON_WIDTH;
+        CGFloat innerStart = width - 2 * height;
+        CGFloat outerStart = width - height;
         if (x >= innerStart && x < outerStart) {
             return 1;  // Minimize button (inner right)
         }
@@ -222,7 +222,7 @@ static const CGFloat ORB_BUTTON_SPACING = 4.0;
             return 2;  // Zoom/maximize button (far right)
         }
     } else {
-        CGFloat miniStart = width - RIGHT_BUTTON_WIDTH;
+        CGFloat miniStart = width - height;
         if (x >= miniStart && x <= width) {
             return 1;  // Minimize button
         }
@@ -617,9 +617,9 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             BOOL hasMaximize = (styleMask & NSResizableWindowMask) != 0;
             BOOL hasMinimize = (styleMask & NSMiniaturizableWindowMask) != 0;
 
-            // Close button at left edge (full height)
+            // Close button at left edge, square (width == height)
             if (styleMask & NSClosableWindowMask) {
-                NSRect closeFrame = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, TITLEBAR_HEIGHT);
+                NSRect closeFrame = NSMakeRect(0, 0, titlebarSize.height, titlebarSize.height);
                 [URSThemeIntegration drawEdgeButtonInRect:closeFrame
                                                  position:TitleBarButtonPositionLeft
                                                buttonType:0
@@ -635,16 +635,16 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 NSRect miniFrame;
                 TitleBarButtonPosition miniPosition;
                 if (hasMaximize) {
-                    miniFrame = NSMakeRect(titlebarSize.width - 2 * RIGHT_BUTTON_WIDTH,
+                    miniFrame = NSMakeRect(titlebarSize.width - 2 * titlebarSize.height,
                                            0,
-                                           RIGHT_BUTTON_WIDTH,
-                                           TITLEBAR_HEIGHT);
+                                           titlebarSize.height,
+                                           titlebarSize.height);
                     miniPosition = TitleBarButtonPositionRightInner;
                 } else {
-                    miniFrame = NSMakeRect(titlebarSize.width - RIGHT_BUTTON_WIDTH,
+                    miniFrame = NSMakeRect(titlebarSize.width - titlebarSize.height,
                                            0,
-                                           RIGHT_BUTTON_WIDTH,
-                                           TITLEBAR_HEIGHT);
+                                           titlebarSize.height,
+                                           titlebarSize.height);
                     miniPosition = TitleBarButtonPositionRightFull;
                 }
                 [URSThemeIntegration drawEdgeButtonInRect:miniFrame
@@ -659,10 +659,10 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
             if (hasMaximize) {
                 TitleBarButtonPosition zoomPosition = hasMinimize ? TitleBarButtonPositionRightOuter : TitleBarButtonPositionRightFull;
-                NSRect zoomFrame = NSMakeRect(titlebarSize.width - RIGHT_BUTTON_WIDTH,
+                NSRect zoomFrame = NSMakeRect(titlebarSize.width - titlebarSize.height,
                                               0,
-                                              RIGHT_BUTTON_WIDTH,
-                                              TITLEBAR_HEIGHT);
+                                              titlebarSize.height,
+                                              titlebarSize.height);
                 [URSThemeIntegration drawEdgeButtonInRect:zoomFrame
                                                  position:zoomPosition
                                                buttonType:2
@@ -674,24 +674,24 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             }
 
             // Top highlight across title area (connecting button highlights)
-            CGFloat highlightLeft = EDGE_BUTTON_WIDTH;
-            CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarSize.width - 2 * RIGHT_BUTTON_WIDTH) :
-                                     (hasMaximize || hasMinimize) ? (titlebarSize.width - RIGHT_BUTTON_WIDTH) : titlebarSize.width;
+            CGFloat highlightLeft = titlebarSize.height;
+            CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarSize.width - 2 * titlebarSize.height) :
+                                     (hasMaximize || hasMinimize) ? (titlebarSize.width - titlebarSize.height) : titlebarSize.width;
             NSColor *titleBaseColor = isActive
                 ? [NSColor colorWithCalibratedWhite:0.82 alpha:1.0]
                 : [NSColor colorWithCalibratedWhite:0.85 alpha:1.0];
             [titleBaseColor setStroke];
             NSBezierPath *titleBase = [NSBezierPath bezierPath];
-            [titleBase moveToPoint:NSMakePoint(highlightLeft, TITLEBAR_HEIGHT - 0.5)];
-            [titleBase lineToPoint:NSMakePoint(highlightRight, TITLEBAR_HEIGHT - 0.5)];
+            [titleBase moveToPoint:NSMakePoint(highlightLeft, titlebarSize.height - 0.5)];
+            [titleBase lineToPoint:NSMakePoint(highlightRight, titlebarSize.height - 0.5)];
             [titleBase setLineWidth:1.0];
             [titleBase stroke];
 
             NSColor *titleHighlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
             [titleHighlightColor setStroke];
             NSBezierPath *titleHighlight = [NSBezierPath bezierPath];
-            [titleHighlight moveToPoint:NSMakePoint(highlightLeft, TITLEBAR_HEIGHT - 0.5)];
-            [titleHighlight lineToPoint:NSMakePoint(highlightRight, TITLEBAR_HEIGHT - 0.5)];
+            [titleHighlight moveToPoint:NSMakePoint(highlightLeft, titlebarSize.height - 0.5)];
+            [titleHighlight lineToPoint:NSMakePoint(highlightRight, titlebarSize.height - 0.5)];
             [titleHighlight setLineWidth:1.0];
             [titleHighlight stroke];
 
@@ -709,17 +709,17 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             // Vertical dividers at button boundaries
             NSBezierPath *dividers = [NSBezierPath bezierPath];
             if (styleMask & NSClosableWindowMask) {
-                [dividers moveToPoint:NSMakePoint(EDGE_BUTTON_WIDTH, 0)];
-                [dividers lineToPoint:NSMakePoint(EDGE_BUTTON_WIDTH, TITLEBAR_HEIGHT)];
+                [dividers moveToPoint:NSMakePoint(titlebarSize.height, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarSize.height, titlebarSize.height)];
             }
             if (hasMaximize) {
-                [dividers moveToPoint:NSMakePoint(titlebarSize.width - 2 * RIGHT_BUTTON_WIDTH, 0)];
-                [dividers lineToPoint:NSMakePoint(titlebarSize.width - 2 * RIGHT_BUTTON_WIDTH, TITLEBAR_HEIGHT)];
-                [dividers moveToPoint:NSMakePoint(titlebarSize.width - RIGHT_BUTTON_WIDTH, 0)];
-                [dividers lineToPoint:NSMakePoint(titlebarSize.width - RIGHT_BUTTON_WIDTH, TITLEBAR_HEIGHT)];
+                [dividers moveToPoint:NSMakePoint(titlebarSize.width - 2 * titlebarSize.height, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarSize.width - 2 * titlebarSize.height, titlebarSize.height)];
+                [dividers moveToPoint:NSMakePoint(titlebarSize.width - titlebarSize.height, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarSize.width - titlebarSize.height, titlebarSize.height)];
             } else if (hasMinimize) {
-                [dividers moveToPoint:NSMakePoint(titlebarSize.width - RIGHT_BUTTON_WIDTH, 0)];
-                [dividers lineToPoint:NSMakePoint(titlebarSize.width - RIGHT_BUTTON_WIDTH, TITLEBAR_HEIGHT)];
+                [dividers moveToPoint:NSMakePoint(titlebarSize.width - titlebarSize.height, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarSize.width - titlebarSize.height, titlebarSize.height)];
             }
             [dividers setLineWidth:1.0];
             [dividers stroke];
@@ -1471,9 +1471,9 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
             NSColor *iconColor = [self iconColorForActive:isActive highlighted:NO];
 
-            // Close button at left edge (full height)
+            // Close button at left edge, square (width == height)
             if (styleMask & NSClosableWindowMask) {
-                NSRect closeFrame = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, buttonHeight);
+                NSRect closeFrame = NSMakeRect(0, 0, buttonHeight, buttonHeight);
                 BOOL closeHovered = (hoverIdx == 0);
 
                 [self drawEdgeButtonInRect:closeFrame
@@ -1497,15 +1497,15 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 BOOL miniHovered = (hoverIdx == 1);
 
                 if (hasMaximize) {
-                    miniFrame = NSMakeRect(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH,
+                    miniFrame = NSMakeRect(titlebarWidth - 2 * buttonHeight,
                                            0,
-                                           RIGHT_BUTTON_WIDTH,
+                                           buttonHeight,
                                            buttonHeight);
                     miniPosition = TitleBarButtonPositionRightInner;
                 } else {
-                    miniFrame = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH,
+                    miniFrame = NSMakeRect(titlebarWidth - buttonHeight,
                                            0,
-                                           RIGHT_BUTTON_WIDTH,
+                                           buttonHeight,
                                            buttonHeight);
                     miniPosition = TitleBarButtonPositionRightFull;
                 }
@@ -1526,9 +1526,9 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
             if (hasMaximize) {
                 TitleBarButtonPosition zoomPosition = hasMinimize ? TitleBarButtonPositionRightOuter : TitleBarButtonPositionRightFull;
-                NSRect zoomFrame = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH,
+                NSRect zoomFrame = NSMakeRect(titlebarWidth - buttonHeight,
                                               0,
-                                              RIGHT_BUTTON_WIDTH,
+                                              buttonHeight,
                                               buttonHeight);
                 BOOL zoomHovered = (hoverIdx == 2);
 
@@ -1547,9 +1547,9 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             }
 
             // Top highlight across title area (connecting button highlights)
-            CGFloat highlightLeft = EDGE_BUTTON_WIDTH;
-            CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarWidth - 2 * RIGHT_BUTTON_WIDTH) :
-                                     (hasMaximize || hasMinimize) ? (titlebarWidth - RIGHT_BUTTON_WIDTH) : titlebarWidth;
+            CGFloat highlightLeft = buttonHeight;
+            CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarWidth - 2 * buttonHeight) :
+                                     (hasMaximize || hasMinimize) ? (titlebarWidth - buttonHeight) : titlebarWidth;
             NSColor *titleBaseColor = isActive
                 ? [NSColor colorWithCalibratedWhite:0.82 alpha:1.0]
                 : [NSColor colorWithCalibratedWhite:0.85 alpha:1.0];
@@ -1582,17 +1582,17 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             // Vertical dividers at button boundaries
             NSBezierPath *dividers = [NSBezierPath bezierPath];
             if (styleMask & NSClosableWindowMask) {
-                [dividers moveToPoint:NSMakePoint(EDGE_BUTTON_WIDTH, 0)];
-                [dividers lineToPoint:NSMakePoint(EDGE_BUTTON_WIDTH, buttonHeight)];
+                [dividers moveToPoint:NSMakePoint(buttonHeight, 0)];
+                [dividers lineToPoint:NSMakePoint(buttonHeight, buttonHeight)];
             }
             if (hasMaximize) {
-                [dividers moveToPoint:NSMakePoint(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH, 0)];
-                [dividers lineToPoint:NSMakePoint(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH, buttonHeight)];
-                [dividers moveToPoint:NSMakePoint(titlebarWidth - RIGHT_BUTTON_WIDTH, 0)];
-                [dividers lineToPoint:NSMakePoint(titlebarWidth - RIGHT_BUTTON_WIDTH, buttonHeight)];
+                [dividers moveToPoint:NSMakePoint(titlebarWidth - 2 * buttonHeight, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarWidth - 2 * buttonHeight, buttonHeight)];
+                [dividers moveToPoint:NSMakePoint(titlebarWidth - buttonHeight, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarWidth - buttonHeight, buttonHeight)];
             } else if (hasMinimize) {
-                [dividers moveToPoint:NSMakePoint(titlebarWidth - RIGHT_BUTTON_WIDTH, 0)];
-                [dividers lineToPoint:NSMakePoint(titlebarWidth - RIGHT_BUTTON_WIDTH, buttonHeight)];
+                [dividers moveToPoint:NSMakePoint(titlebarWidth - buttonHeight, 0)];
+                [dividers lineToPoint:NSMakePoint(titlebarWidth - buttonHeight, buttonHeight)];
             }
             [dividers setLineWidth:1.0];
             [dividers stroke];

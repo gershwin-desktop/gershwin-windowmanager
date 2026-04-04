@@ -1893,9 +1893,7 @@
 
 // Button hit detection for titlebar buttons
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point forTitlebar:(XCBTitleBar*)titlebar {
-    // Button metrics (must match URSThemeIntegration.m)
-    static const CGFloat EDGE_BUTTON_WIDTH = 28.0;
-    static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;
+    // Button metrics (must match URSThemeIntegration.m) - buttons are square: width == height
     static const CGFloat ORB_SIZE = 15.0;
     static const CGFloat ORB_PAD_LEFT = 10.5;
     static const CGFloat ORB_SPACING = 4.0;
@@ -1948,30 +1946,30 @@
         return GSThemeTitleBarButtonNone;
     }
 
-    // Edge layout: Close at left | title | Minimize | Maximize at right
-    NSRect closeRect = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, titlebarHeight);
+    // Edge layout: Close at left | title | Minimize | Maximize at right (all buttons square)
+    NSRect closeRect = NSMakeRect(0, 0, titlebarHeight, titlebarHeight);
     if (NSPointInRect(point, closeRect)) {
         NSLog(@"GSTheme: Hit close button");
         return GSThemeTitleBarButtonClose;
     }
 
     if (hasMaximize) {
-        NSRect miniRect = NSMakeRect(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH, 0,
-                                     RIGHT_BUTTON_WIDTH, titlebarHeight);
+        NSRect miniRect = NSMakeRect(titlebarWidth - 2 * titlebarHeight, 0,
+                                     titlebarHeight, titlebarHeight);
         if (NSPointInRect(point, miniRect)) {
             NSLog(@"GSTheme: Hit miniaturize button (inner right)");
             return GSThemeTitleBarButtonMiniaturize;
         }
 
-        NSRect zoomRect = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH, 0,
-                                     RIGHT_BUTTON_WIDTH, titlebarHeight);
+        NSRect zoomRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
+                                     titlebarHeight, titlebarHeight);
         if (NSPointInRect(point, zoomRect)) {
             NSLog(@"GSTheme: Hit zoom button (far right)");
             return GSThemeTitleBarButtonZoom;
         }
     } else {
-        NSRect miniRect = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH, 0,
-                                     RIGHT_BUTTON_WIDTH, titlebarHeight);
+        NSRect miniRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
+                                     titlebarHeight, titlebarHeight);
         if (NSPointInRect(point, miniRect)) {
             NSLog(@"GSTheme: Hit miniaturize button (far right, no zoom)");
             return GSThemeTitleBarButtonMiniaturize;

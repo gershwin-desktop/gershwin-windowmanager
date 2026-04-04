@@ -7,6 +7,7 @@
 //
 
 #import "UROSWindowDecorator.h"
+#import <XCBKit/services/TitleBarSettingsService.h>
 
 static NSMutableDictionary *windowTitlebars = nil;
 
@@ -75,8 +76,10 @@ static NSMutableDictionary *windowTitlebars = nil;
     XCBScreen *screen = [[connection screens] objectAtIndex:0];
 
     // Frame is larger than client to accommodate titlebar
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    uint16_t titlebarH = [settings heightDefined] ? [settings height] : [settings defaultHeight];
     uint16_t frameWidth = geom->width;
-    uint16_t frameHeight = geom->height + 25; // +25 for titlebar
+    uint16_t frameHeight = geom->height + titlebarH;
 
     xcb_window_t frameWindow = xcb_generate_id([connection connection]);
 
@@ -90,7 +93,7 @@ static NSMutableDictionary *windowTitlebars = nil;
                       XCB_COPY_FROM_PARENT,
                       frameWindow,
                       [screen screen]->root,
-                      geom->x, geom->y - 25, // Position frame to show titlebar above client
+                      geom->x, geom->y - (int16_t)titlebarH, // Position frame to show titlebar above client
                       frameWidth, frameHeight,
                       0, // border width
                       XCB_WINDOW_CLASS_INPUT_OUTPUT,
