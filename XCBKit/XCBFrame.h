@@ -46,6 +46,8 @@ typedef NS_ENUM(NSInteger, childrenMask)
 @property (nonatomic, assign) int minWidthHint;
 @property (nonatomic, assign) uint16_t titleHeight;
 @property (strong, nonatomic) XCBConnection *connection;
+// clientBorder: pixels inset around the client area (1 = thin border, 0 = flush in compositor mode)
+@property (nonatomic, assign) int clientBorder;
 @property (nonatomic, assign) BOOL rightBorderClicked;
 @property (nonatomic, assign) BOOL bottomBorderClicked;
 @property (nonatomic, assign) BOOL leftBorderClicked;

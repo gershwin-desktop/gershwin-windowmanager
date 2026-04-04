@@ -3655,7 +3655,12 @@ static XCBConnection *sharedInstance;
               previewRect.size.width, previewRect.size.height);
 
         if ([overlay respondsToSelector:@selector(showPreviewForRect:)]) {
-            [overlay performSelector:@selector(showPreviewForRect:) withObject:[NSValue valueWithRect:previewRect]];
+            // Defer out of the XCB event processing loop so that orderFront:nil
+            // inside showPreviewForRect: does not interfere with the active pointer
+            // grab, which would prevent further motion events from reaching the drag.
+            [overlay performSelector:@selector(showPreviewForRect:)
+                          withObject:[NSValue valueWithRect:previewRect]
+                          afterDelay:0.0];
         }
     }
 }
