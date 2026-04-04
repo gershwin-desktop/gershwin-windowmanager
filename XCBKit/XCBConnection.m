@@ -1304,8 +1304,11 @@ static XCBConnection *sharedInstance;
 
     int16_t xPos = reqX;
     int16_t yPos = reqY;
-    uint16_t winWidth = reqW + 2;         // 1px border on left + right
-    uint16_t winHeight = reqH + titleHeight + 1;  // 1px border on bottom
+    // In compositor mode (drop shadows), the client sits flush inside the frame
+    // with no pixel-wide border strips, so cb=0.  Non-compositor uses cb=1.
+    int cb = compositorActive ? 0 : 1;
+    uint16_t winWidth = reqW + 2 * (uint16_t)cb;
+    uint16_t winHeight = reqH + titleHeight + (uint16_t)cb;
 
     NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
@@ -2205,6 +2208,11 @@ static XCBConnection *sharedInstance;
         {
             [frame refreshBorder];
             [frame configureClient];
+            // Re-apply rounded corner shape masks now that resize is final.
+            // Doing this during the resize motion would block on xcb_get_geometry
+            // on every pixel of movement, causing wild size jumps.
+            [frame applyRoundedCornersShapeMask];
+            [frame updateAllResizeZonePositions];
         }
     }
 

@@ -311,6 +311,11 @@
             mapEvent.window = winId;
 
             [connection handleMapRequest:&mapEvent];
+
+            // Apply GSTheme rendering to the titlebar immediately after decoration.
+            // The normal XCB_MAP_REQUEST path calls this; we must replicate it for
+            // startup-adopted windows or they keep the unstyled placeholder titlebar.
+            [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:winId]];
         }
 
         [connection flush];

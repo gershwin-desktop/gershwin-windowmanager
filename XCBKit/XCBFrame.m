@@ -537,10 +537,12 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
-    // Update resize zone positions if they exist
+    // Update resize zone positions so hover cursors and hit areas stay correct.
     [self updateAllResizeZonePositions];
-
-    // Update shape mask for rounded corners (must match new window dimensions)
+    // Update the bounding shape mask to match the current (possibly larger) window geometry.
+    // Without this, when the window grows the old mask clips rendering to the previous smaller
+    // size and the new area never paints.  The new implementation uses windowRect (no blocking
+    // xcb_get_geometry round-trip) so calling it here is safe for the motion hot path.
     [self applyRoundedCornersShapeMask];
 
 }
@@ -820,18 +822,53 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         bottomRadius = [theme windowBottomCornerRadius];
     }
 
-    NSLog(@"XCBFrame: Applying rounded corners - top=%.1f, bottom=%.1f for window %u",
-          topRadius, bottomRadius, window);
+    if (topRadius <= 0 && bottomRadius <= 0)
+        return;
 
-    if (topRadius > 0 || bottomRadius > 0) {
+    // Use internal windowRect rather than a blocking xcb_get_geometry round-trip.
+    // The C resize functions always update windowRect via setWindowRect: before
+    // returning, so this is always current.
+    XCBRect frameRect = [self windowRect];
+    int fw = (int)frameRect.size.width;
+    int fh = (int)frameRect.size.height;
+    if (fw <= 0 || fh <= 0)
+        return;
+
+    // Apply bounding-shape to the FRAME window
+    {
         XCBShape *shape = [[XCBShape alloc] initWithConnection:connection withWinId:window];
         if ([shape checkSupported]) {
-            XCBGeometryReply *geometry = [self geometries];
-            if (!geometry) return;  // Window destroyed — nothing to shape
-            [shape calculateDimensionsFromGeometries:geometry];
+            shape.width = fw;
+            shape.height = fh;
+            shape.borderWidth = 0;
+            shape.orWidth = fw;
+            shape.orHeight = fh;
             [shape createPixmapsAndGCs];
             [shape createRoundedCornersWithTopRadius:(int)topRadius bottomRadius:(int)bottomRadius];
-            NSLog(@"XCBFrame: Shape mask applied with topRadius=%d", (int)topRadius);
+        }
+        shape = nil;
+    }
+
+    // In compositor mode the compositor renders the titlebar window independently,
+    // so the frame's shape does NOT clip the titlebar.  Apply a matching top-rounded
+    // shape to the titlebar window so the compositor correctly clips its corners too.
+    if (topRadius > 0) {
+        XCBTitleBar *titleBar = (XCBTitleBar *)[self childWindowForKey:TitleBar];
+        if (titleBar) {
+            int th = (int)titleHeight;  // titlebar height = the band above client
+            XCBShape *tbShape = [[XCBShape alloc] initWithConnection:connection
+                                                             withWinId:[titleBar window]];
+            if ([tbShape checkSupported]) {
+                tbShape.width = fw;
+                tbShape.height = th;
+                tbShape.borderWidth = 0;
+                tbShape.orWidth = fw;
+                tbShape.orHeight = th;
+                [tbShape createPixmapsAndGCs];
+                [tbShape createTopArcsWithRadius:(int)topRadius];
+            }
+            tbShape = nil;
+            titleBar = nil;
         }
     }
 }
