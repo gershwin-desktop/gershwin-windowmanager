@@ -1461,21 +1461,33 @@
 
 - (xcb_xfixes_region_t)windowExtents:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];
-    
-    xcb_rectangle_t r;
-    r.x = cw.x;
-    r.y = cw.y;
-    r.width = cw.width + 2 * cw.borderWidth;
-    r.height = cw.height + 2 * cw.borderWidth;
-    
-    // Expand to include shadow if present
+
+    int16_t wx = cw.x;
+    int16_t wy = cw.y;
+    int16_t ww = cw.width + 2 * cw.borderWidth;
+    int16_t wh = cw.height + 2 * cw.borderWidth;
+
+    // Compute bounding union of window + shadow so no pixel is missed.
     if (cw.shadowPicture != XCB_NONE) {
-        r.x += cw.shadowOffsetX;
-        r.y += cw.shadowOffsetY;
-        r.width = cw.shadowWidth;
-        r.height = cw.shadowHeight;
+        int16_t sx = cw.x + cw.shadowOffsetX;
+        int16_t sy = cw.y + cw.shadowOffsetY;
+        int16_t sx2 = sx + (int16_t)cw.shadowWidth;
+        int16_t sy2 = sy + (int16_t)cw.shadowHeight;
+        int16_t wx2 = wx + ww;
+        int16_t wy2 = wy + wh;
+
+        int16_t bx = (sx < wx) ? sx : wx;
+        int16_t by = (sy < wy) ? sy : wy;
+        int16_t bx2 = (sx2 > wx2) ? sx2 : wx2;
+        int16_t by2 = (sy2 > wy2) ? sy2 : wy2;
+
+        xcb_rectangle_t r = { bx, by, (uint16_t)(bx2 - bx), (uint16_t)(by2 - by) };
+        xcb_xfixes_region_t region = xcb_generate_id(conn);
+        xcb_xfixes_create_region(conn, region, 1, &r);
+        return region;
     }
-    
+
+    xcb_rectangle_t r = { wx, wy, (uint16_t)ww, (uint16_t)wh };
     xcb_xfixes_region_t region = xcb_generate_id(conn);
     xcb_xfixes_create_region(conn, region, 1, &r);
     return region;
@@ -1538,10 +1550,10 @@
         return;
     }
 
-    // PERFORMANCE FIX: Time-based throttling during drag (target ~60fps = 16.67ms)
-    // Unlike frame-skipping, this ensures we always paint when enough time has passed,
-    // preventing ghost artifacts while still maintaining good performance.
-    if ([self.connection dragState]) {
+    // PERFORMANCE FIX: Time-based throttling during drag or resize (target ~60fps = 16.67ms)
+    // During drag this prevents ghost artifacts while maintaining good performance.
+    // During resize this avoids hammering the compositor on every motion pixel.
+    if ([self.connection dragState] || [self.connection resizeState]) {
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         NSTimeInterval elapsed = now - self.lastRepairTime;
 
@@ -1974,7 +1986,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
                         self.gaussianSize * 2, self.gaussianSize * 2);
         
         if (x == 0 || x == center || x == self.gaussianSize) {
-            NSLog(@"[presumGaussian] shadowTop[%d] = %d", x, self.shadowTop[25 * (self.gaussianSize + 1) + x]);
+            // (debug logging removed - was spammy)
         }
         
         // Scale for other opacity levels
@@ -2028,9 +2040,6 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     uint8_t base_val = (self.gaussianSize > 0 && self.shadowTop != NULL) ? 
         self.shadowTop[opacity_int * (self.gaussianSize + 1) + self.gaussianSize] : 
         sum_gaussian(self.gaussianMap, self.gaussianSize, SHADOW_OPACITY, center, center, width, height);
-    
-    NSLog(@"[Shadow] makeShadowImage: center=%d, opacity_int=%d, base_val=%d, gaussianSize=%d, shadowTop=%p, shadowCorner=%p",
-          center, opacity_int, base_val, self.gaussianSize, self.shadowTop, self.shadowCorner);
     
     memset(data, base_val, *swidth * *sheight);
     
@@ -2101,16 +2110,10 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     }
     
     // Validate shadow data - sample from different regions
-    int corner_val = shadow_data[0];  // top-left corner
-    int center_val = shadow_data[(sheight/2) * swidth + (swidth/2)];  // center
-    int edge_val = shadow_data[10 * swidth + swidth/2];  // top edge
-    int nonzero = 0, maxval = 0;
-    for (int i = 0; i < swidth * sheight && i < 1000; i++) {
-        if (shadow_data[i] > 0) nonzero++;
-        if (shadow_data[i] > maxval) maxval = shadow_data[i];
-    }
-    NSLog(@"[Shadow] Shadow data: size=%dx%d, samples: corner=%d center=%d edge=%d, first1000: nonzero=%d max=%d", 
-          swidth, sheight, corner_val, center_val, edge_val, nonzero, maxval);
+    int corner_val = shadow_data[0];
+    int center_val = shadow_data[(sheight/2) * swidth + (swidth/2)];
+    int edge_val = shadow_data[10 * swidth + swidth/2];
+    (void)corner_val; (void)center_val; (void)edge_val;
     
     cw.shadowWidth = swidth;
     cw.shadowHeight = sheight;
@@ -2147,7 +2150,9 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.shadowPixmap, gc,
                  swidth, sheight, 0, 0, 0, 32,
                  swidth * sheight * 4, (uint8_t *)argb_data);
-    xcb_flush(conn);  // Ensure image data is uploaded before proceeding
+    // No blocking flush here — the batch flush in the event loop sends it.
+    // The next xcb_render_create_picture is queued after put_image in order,
+    // so the server will process them in sequence without an explicit sync.
     
     xcb_free_gc(conn, gc);
     free(argb_data);
@@ -2155,9 +2160,6 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     // Create Picture with ARGB format
     cw.shadowPicture = xcb_generate_id(conn);
     xcb_render_create_picture(conn, cw.shadowPicture, cw.shadowPixmap, self.argbFormat, 0, NULL);
-    
-    NSLog(@"[Shadow] ARGB32 shadow picture: 0x%x for window 0x%x (size %dx%d), pixmap: 0x%x", 
-          cw.shadowPicture, cw.windowId, swidth, sheight, cw.shadowPixmap);
     
     // DO NOT free the pixmap - the Picture needs it to stay alive
     // It will be freed when the window is destroyed
@@ -2231,13 +2233,17 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
     }
     
-    // Create shadow if needed (after resize)
-    if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE) {
+    // Create shadow if needed — but not during resize.
+    // Shadow creation calls xcb_put_image (~1 MB upload) + xcb_flush on every motion event,
+    // causing multi-ms blocking stalls that make the compositor lag and leave ghost shadows.
+    // The shadow is recreated once on the first repair after resize ends.
+    if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE
+        && ![self.connection resizeState]) {
         [self createShadowForWindow:cw];
     }
-    
-    // Draw shadow using Gaussian ARGB32 picture (smooth gradient)
-    if (cw.shadowPicture != XCB_NONE && !animating) {
+
+    // Draw shadow — suppressed during resize to prevent stale shadow ghosts.
+    if (cw.shadowPicture != XCB_NONE && !animating && ![self.connection resizeState]) {
         int16_t shadowX = screenX + cw.shadowOffsetX;
         int16_t shadowY = screenY + cw.shadowOffsetY;
         
@@ -2333,10 +2339,13 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     // Use NameWindowPixmap (the redirected offscreen storage) for proper content capture
     // Try to get the name_window_pixmap first
     if (cw.nameWindowPixmap == XCB_NONE) {
-        // BUGFIX: Flush before creating NameWindowPixmap to ensure X server has
-        // finished any pending drawing operations on the window. This prevents
-        // capturing stale or partially-drawn content that causes ghost artifacts.
-        xcb_flush(conn);
+        // During resize, skip the flush — the event-loop batch flush has already
+        // sent all pending configure commands in order.  Outside resize, flush
+        // to ensure the X server has processed any outstanding drawing before we
+        // snapshot the window.
+        if (![self.connection resizeState]) {
+            xcb_flush(conn);
+        }
 
         cw.nameWindowPixmap = xcb_generate_id(conn);
         xcb_void_cookie_t cookie = xcb_composite_name_window_pixmap_checked(conn, cw.windowId, cw.nameWindowPixmap);
