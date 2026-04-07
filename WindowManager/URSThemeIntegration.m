@@ -977,7 +977,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
     // Step 2: Clip to rounded-top-corners path so corner pixels remain transparent.
     if (topR > 0) {
-        double r = (double)topR * 2.0;
+        double r = (double)topR;
         double w = (double)width;
         double h = (double)height;
         cairo_new_path(ctx);
@@ -1094,7 +1094,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                         cairo_set_operator(dCtx, CAIRO_OPERATOR_CLEAR);
                         cairo_paint(dCtx);
                         if (topR > 0) {
-                            double r = (double)topR * 2.0;
+                            double r = (double)topR;
                             double dw = (double)dimmedWidth;
                             double dh = (double)dimmedHeight;
                             cairo_new_path(dCtx);

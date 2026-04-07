@@ -930,15 +930,17 @@ void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
         }
     }
 
+    // minW is a minimum *client* width; translate to minimum frame width
+    int32_t minimumClientWidth = (minW < 1) ? 1 : minW;
+    int32_t minimumFrameWidth = minimumClientWidth + 2 * cb;
+
     // Clamp to minimum width using signed arithmetic to prevent underflow
-    if (newWidth < minW)
-        newWidth = minW;
+    if (newWidth < minimumFrameWidth)
+        newWidth = minimumFrameWidth;
 
     int32_t newClientWidth = newWidth - 2 * cb;
-    if (newClientWidth < minW - 2 * cb)
-        newClientWidth = minW - 2 * cb;
-    if (newClientWidth < 1)
-        newClientWidth = 1;
+    if (newClientWidth < minimumClientWidth)
+        newClientWidth = minimumClientWidth;
 
     uint32_t values[1];
 
@@ -1016,17 +1018,20 @@ void resizeFromLeftForEvent(xcb_motion_notify_event_t *anEvent,
     int xDelta = rect.position.x - newX;
     int32_t newFrameWidth = xDelta + (int32_t)rect.size.width;
 
-    // Clamp to minimum width using signed arithmetic to prevent underflow
-    if (newFrameWidth < minW) {
+    int32_t minimumClientWidth = (minW < 1) ? 1 : minW;
+    int32_t minimumFrameWidth = minimumClientWidth + 2 * cb;
+
+    // Clamp to minimum width using client-size hints translated to frame pixels
+    if (newFrameWidth < minimumFrameWidth) {
         // Keep the right edge fixed; set left to preserve minimum size
         int32_t rightEdge = rect.position.x + rect.size.width;
-        newX = rightEdge - minW;
-        newFrameWidth = minW;
+        newX = rightEdge - minimumFrameWidth;
+        newFrameWidth = minimumFrameWidth;
     }
 
     int32_t newClientWidth = newFrameWidth - 2 * cb;
-    if (newClientWidth < 1)
-        newClientWidth = 1;
+    if (newClientWidth < minimumClientWidth)
+        newClientWidth = minimumClientWidth;
 
     uint32_t values[2];
 
@@ -1062,7 +1067,7 @@ void resizeFromLeftForEvent(xcb_motion_notify_event_t *anEvent,
 
     // Send synthetic ConfigureNotify to client
     sendSyntheticConfigureNotify(connection, clientWindow,
-                                  rect.position.x + 1,
+                                  rect.position.x + cb,
                                   rect.position.y + [frame titleHeight],
                                   clientRect.size.width,
                                   clientRect.size.height);
@@ -1107,7 +1112,7 @@ void resizeFromBottomForEvent(xcb_motion_notify_event_t *anEvent,
 
     // Use signed arithmetic to prevent underflow when event_y is smaller than titlebar
     int32_t newFrameHeight = (int32_t)anEvent->event_y;
-    int32_t minFrameHeight = minH + titleBarHeight;
+    int32_t minFrameHeight = minH + titleBarHeight + cb;
 
     // Clamp to minimum
     if (newFrameHeight < minFrameHeight)
@@ -1185,7 +1190,7 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
 
     int32_t yDelta = (int32_t)rect.position.y - (int32_t)newY;
     int32_t newFrameHeight = (int32_t)rect.size.height + yDelta;
-    int32_t minFrameHeight = minH + titleBarHeight;
+    int32_t minFrameHeight = minH + titleBarHeight + cb;
 
     // Clamp: if the new height is below minimum, fix the top position
     if (newFrameHeight < minFrameHeight) {
@@ -1268,15 +1273,17 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     int32_t newFrameHeight = (int32_t)anEvent->event_y;
 
     // Clamp to minimum dimensions
-    int32_t minFrameHeight = minH + titleBarHeight;
-    if (newFrameWidth < minW)
-        newFrameWidth = minW;
+    int32_t minimumClientWidth = (minW < 1) ? 1 : minW;
+    int32_t minimumFrameWidth = minimumClientWidth + 2 * cb;
+    int32_t minFrameHeight = minH + titleBarHeight + cb;
+    if (newFrameWidth < minimumFrameWidth)
+        newFrameWidth = minimumFrameWidth;
     if (newFrameHeight < minFrameHeight)
         newFrameHeight = minFrameHeight;
 
     int32_t newClientWidth = newFrameWidth - 2 * cb;
     int32_t newClientHeight = newFrameHeight - titleBarHeight - cb;
-    if (newClientWidth < 1) newClientWidth = 1;
+    if (newClientWidth < minimumClientWidth) newClientWidth = minimumClientWidth;
     if (newClientHeight < 1) newClientHeight = 1;
 
     uint32_t values[2];
