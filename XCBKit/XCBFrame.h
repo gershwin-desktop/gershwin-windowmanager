@@ -16,6 +16,11 @@
 #define WM_MIN_WINDOW_HEIGHT 431
 #define WM_MIN_WINDOW_WIDTH 496
 
+// Absolute minimum client area — prevents windows from collapsing to just the titlebar.
+// These are enforced even when the client doesn't set WM_NORMAL_HINTS.
+#define WM_MIN_CLIENT_HEIGHT 100
+#define WM_MIN_CLIENT_WIDTH  100
+
 typedef NS_ENUM(NSInteger, childrenMask)
 {
     TitleBar = 0,
@@ -41,6 +46,8 @@ typedef NS_ENUM(NSInteger, childrenMask)
 @property (nonatomic, assign) int minWidthHint;
 @property (nonatomic, assign) uint16_t titleHeight;
 @property (strong, nonatomic) XCBConnection *connection;
+// clientBorder: pixels inset around the client area (1 = thin border, 0 = flush in compositor mode)
+@property (nonatomic, assign) int clientBorder;
 @property (nonatomic, assign) BOOL rightBorderClicked;
 @property (nonatomic, assign) BOOL bottomBorderClicked;
 @property (nonatomic, assign) BOOL leftBorderClicked;
@@ -66,6 +73,7 @@ typedef NS_ENUM(NSInteger, childrenMask)
 - (void) updateResizeHandlePosition;
 - (void) raiseResizeHandle;
 - (void) applyRoundedCornersShapeMask;
+- (void) clearShapeMasks;
 - (void) programmaticResizeToRect:(XCBRect)targetRect;
 
 // Theme-driven resize zones

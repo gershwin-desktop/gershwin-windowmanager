@@ -306,17 +306,13 @@
 - (void)handleButtonPress:(xcb_button_press_event_t*)event {
     NSLog(@"UROSTitleBar: Button press at %d,%d", event->event_x, event->event_y);
 
-    // Side-by-side button metrics (must match URSThemeIntegration.m)
-    static const CGFloat EDGE_BUTTON_WIDTH = 28.0;       // Close button width
-    static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;      // Width for each right-side button
-    static const CGFloat TITLEBAR_HEIGHT = 24.0;         // Total titlebar height
-
+    // Buttons are square: width == titlebarHeight
     CGFloat titlebarWidth = self.frame.size.width;
-    CGFloat titlebarHeight = TITLEBAR_HEIGHT;
+    CGFloat titlebarHeight = self.windowRect.size.height;
     NSPoint clickPoint = NSMakePoint(event->event_x, event->event_y);
 
-    // Close button at left edge (full height)
-    NSRect closeButtonRect = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, titlebarHeight);
+    // Close button at left edge (square)
+    NSRect closeButtonRect = NSMakeRect(0, 0, titlebarHeight, titlebarHeight);
 
     if (NSPointInRect(clickPoint, closeButtonRect)) {
         [self handleCloseButton];
@@ -325,14 +321,14 @@
 
     // Side-by-side buttons on right edge
     // Minimize (inner right)
-    if (clickPoint.x >= titlebarWidth - 2 * RIGHT_BUTTON_WIDTH &&
-        clickPoint.x < titlebarWidth - RIGHT_BUTTON_WIDTH) {
+    if (clickPoint.x >= titlebarWidth - 2 * titlebarHeight &&
+        clickPoint.x < titlebarWidth - titlebarHeight) {
         [self handleMinimizeButton];
         return;
     }
 
     // Zoom/maximize (far right)
-    if (clickPoint.x >= titlebarWidth - RIGHT_BUTTON_WIDTH) {
+    if (clickPoint.x >= titlebarWidth - titlebarHeight) {
         [self handleMaximizeButton];
         return;
     }

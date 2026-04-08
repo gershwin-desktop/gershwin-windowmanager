@@ -240,10 +240,7 @@
 
 #pragma mark - Button Hit Detection
 
-// Edge button metrics (matching Eau theme)
-static const CGFloat TB_HEIGHT = 24.0;
-static const CGFloat TB_EDGE_BUTTON_WIDTH = 28.0;
-static const CGFloat TB_RIGHT_BUTTON_WIDTH = 28.0;
+// Edge buttons are square: width == titlebarRect.size.height (queried at hit-test time)
 
 // Orb button metrics
 static const CGFloat TB_ORB_SIZE = 15.0;
@@ -253,11 +250,12 @@ static const CGFloat TB_ORB_SPACING = 4.0;
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point {
     XCBRect titlebarRect = [self windowRect];
     CGFloat titlebarWidth = titlebarRect.size.width;
+    CGFloat titlebarHeight = titlebarRect.size.height;
     NSUInteger styleMask = [self windowStyleMask];
 
     if ([URSThemeIntegration isOrbButtonStyle]) {
         // Orb layout: all buttons on left, 15x15, vertically centered
-        CGFloat buttonY = (TB_HEIGHT - TB_ORB_SIZE) / 2.0;
+        CGFloat buttonY = (titlebarHeight - TB_ORB_SIZE) / 2.0;
         CGFloat closeX = TB_ORB_PAD_LEFT;
         CGFloat miniX = closeX + TB_ORB_SIZE + TB_ORB_SPACING;
         CGFloat zoomX = miniX + TB_ORB_SIZE + TB_ORB_SPACING;
@@ -278,12 +276,12 @@ static const CGFloat TB_ORB_SPACING = 4.0;
         return GSThemeTitleBarButtonNone;
     }
 
-    // Edge layout
-    NSRect closeRect = NSMakeRect(0, 0, TB_EDGE_BUTTON_WIDTH, TB_HEIGHT);
-    NSRect miniaturizeRect = NSMakeRect(titlebarWidth - 2 * TB_RIGHT_BUTTON_WIDTH, 0,
-                                         TB_RIGHT_BUTTON_WIDTH, TB_HEIGHT);
-    NSRect zoomRect = NSMakeRect(titlebarWidth - TB_RIGHT_BUTTON_WIDTH, 0,
-                                  TB_RIGHT_BUTTON_WIDTH, TB_HEIGHT);
+    // Edge layout - buttons are square
+    NSRect closeRect = NSMakeRect(0, 0, titlebarHeight, titlebarHeight);
+    NSRect miniaturizeRect = NSMakeRect(titlebarWidth - 2 * titlebarHeight, 0,
+                                         titlebarHeight, titlebarHeight);
+    NSRect zoomRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
+                                  titlebarHeight, titlebarHeight);
 
     if ((styleMask & NSClosableWindowMask) && NSPointInRect(point, closeRect)) {
         return GSThemeTitleBarButtonClose;

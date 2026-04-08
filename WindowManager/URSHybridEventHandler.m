@@ -311,6 +311,11 @@
             mapEvent.window = winId;
 
             [connection handleMapRequest:&mapEvent];
+
+            // Apply GSTheme rendering to the titlebar immediately after decoration.
+            // The normal XCB_MAP_REQUEST path calls this; we must replicate it for
+            // startup-adopted windows or they keep the unstyled placeholder titlebar.
+            [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:winId]];
         }
 
         [connection flush];
@@ -392,39 +397,32 @@
            eventsProcessed < maxEventsPerCall) {
         eventsProcessed++;
 
-        // Handle motion event compression (same as original)
+        // Motion event compression: accumulate the latest motion event
+        // but don't process it until we see a non-motion event or the queue empties.
         if ((e->response_type & ~0x80) == XCB_MOTION_NOTIFY) {
-            // Motion event compression: save the latest motion event
             if (lastMotionEvent) {
                 free(lastMotionEvent);
             }
             lastMotionEvent = malloc(sizeof(xcb_motion_notify_event_t));
             memcpy(lastMotionEvent, e, sizeof(xcb_motion_notify_event_t));
+            free(e);
+            continue;
+        }
 
-            // Check if more events are queued - if so, skip processing this one
-            xcb_generic_event_t *nextEvent = xcb_poll_for_event([connection connection]);
-            if (nextEvent) {
-                // There's another event queued, defer motion processing
-                free(e);
-                e = nextEvent;
-                continue; // Process the next event instead
-            } else {
-                // No more events, process the motion
-                // STEP 1: Clear background pixmap BEFORE resize to prevent X11 tiling
-                [self clearTitlebarBackgroundBeforeResize:lastMotionEvent];
-                // STEP 2: Let xcbkit resize the windows
+        // Flush pending compressed motion only before events that depend
+        // on an up-to-date window position (button press/release).
+        // Flushing before every non-motion event (e.g. DAMAGE) would
+        // defeat compression and make resize unbearably slow.
+        if (lastMotionEvent) {
+            uint8_t nextType = e->response_type & ~0x80;
+            if (nextType == XCB_BUTTON_RELEASE || nextType == XCB_BUTTON_PRESS) {
                 [connection handleMotionNotify:lastMotionEvent];
-                // STEP 3: Render new content and set as background
                 [self handleResizeDuringMotion:lastMotionEvent];
-                // STEP 4: Update compositor for drag or resize (immediate update for responsiveness)
                 [self handleCompositingDuringMotion:lastMotionEvent];
-                // STEP 5: Check for titlebar button hover state changes
                 [self handleTitlebarHoverDuringMotion:lastMotionEvent];
                 needFlush = YES;
                 free(lastMotionEvent);
                 lastMotionEvent = NULL;
-                free(e);
-                continue;
             }
         }
 
@@ -438,9 +436,15 @@
         free(e);
     }
 
-    // Clean up any remaining motion event
+    // Process any remaining compressed motion event (e.g. motion was last in queue)
     if (lastMotionEvent) {
+        [connection handleMotionNotify:lastMotionEvent];
+        [self handleResizeDuringMotion:lastMotionEvent];
+        [self handleCompositingDuringMotion:lastMotionEvent];
+        [self handleTitlebarHoverDuringMotion:lastMotionEvent];
+        needFlush = YES;
         free(lastMotionEvent);
+        lastMotionEvent = NULL;
     }
 
     // Batched flush: only flush when needed
@@ -1543,35 +1547,6 @@
 
 #pragma mark - Resize Handling
 
-- (void)clearTitlebarBackgroundBeforeResize:(xcb_motion_notify_event_t*)motionEvent {
-    @try {
-        XCBWindow *window = [connection windowForXCBId:motionEvent->event];
-        if (!window || ![window isKindOfClass:[XCBFrame class]]) {
-            return;
-        }
-        XCBFrame *frame = (XCBFrame*)window;
-
-        // Only clear background when width may change (horizontal or diagonal resize).
-        // During vertical-only resize the pixmap width still matches the window —
-        // clearing would cause the X server to fall back to white_pixel for exposed areas.
-        if (![frame leftBorderClicked] && ![frame rightBorderClicked]) {
-            return;
-        }
-
-        XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
-        if (!titlebarWindow || ![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
-            return;
-        }
-
-        uint32_t value = 0; // XCB_BACK_PIXMAP_NONE
-        xcb_change_window_attributes([connection connection],
-                                     [titlebarWindow window],
-                                     XCB_CW_BACK_PIXMAP,
-                                     &value);
-    } @catch (NSException *exception) {
-    }
-}
-
 - (void)handleResizeDuringMotion:(xcb_motion_notify_event_t*)motionEvent {
     @try {
         // Find the window involved in the motion
@@ -1603,8 +1578,13 @@
 
         // Only update if the size has changed
         if (pixmapSize.width != titlebarRect.size.width) {
-            // Recreate the titlebar pixmap at the new size
-            [titlebar destroyPixmap];
+            // Save old pixmap IDs so we can free them AFTER setting the new background.
+            // This avoids a transient state where the X server has no background pixmap
+            // to paint from, eliminating flicker during resize.
+            xcb_pixmap_t oldPixmap = [titlebar pixmap];
+            xcb_pixmap_t oldDPixmap = [titlebar dPixmap];
+
+            // Create new pixmap at the new size (overwrites instance vars)
             [titlebar createPixmap];
 
             // Redraw with GSTheme
@@ -1613,15 +1593,19 @@
                                                  title:[titlebar windowTitle]
                                                 active:YES];
 
-            // Update the window background pixmap to prevent X11 tiling
-            // This is the key fix - xcbkit sets a background pixmap which X11 tiles
-            // when the window is larger than the pixmap
+            // Set new pixmap as background BEFORE freeing old one
             [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+
+            // Now free the old pixmaps
+            if (oldPixmap != 0) {
+                xcb_free_pixmap([connection connection], oldPixmap);
+            }
+            if (oldDPixmap != 0) {
+                xcb_free_pixmap([connection connection], oldDPixmap);
+            }
 
             // Copy the pixmap to the window immediately
             [titlebar drawArea:titlebarRect];
-
-            [connection flush];
 
             // Notify compositor about the window content change
             if (self.compositingManager && [self.compositingManager compositingActive]) {
@@ -1633,7 +1617,6 @@
             // and horizontal resize that hit min-width (background was cleared, need repaint).
             [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
             [titlebar drawArea:titlebarRect];
-            [connection flush];
         }
     } @catch (NSException *exception) {
         // Silently ignore exceptions during resize motion to avoid spam
@@ -1686,9 +1669,8 @@
                                                     y:frameRect.position.y
                                                 width:frameRect.size.width
                                                height:frameRect.size.height];
-                
-                // Perform immediate repair during resize for responsive visual feedback
-                [self.compositingManager performRepairNow];
+                // Compositor repaints at its own cadence; no need to force full repair
+                // on every motion pixel (that would stall the resize pipeline).
             }
         }
     } @catch (NSException *exception) {
@@ -1899,6 +1881,12 @@
             // Notify compositor about the window content change
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager updateWindow:[frame window]];
+                
+                // After resize, damage the entire screen to clean up artifacts from window shrinking.
+                // When a window shrinks, the old window extent is left visible until the compositor repaints.
+                // This forces a full-screen composite to clean it up.
+                [self.compositingManager damageScreen];
+                [self.compositingManager performRepairNow];
             }
             NSLog(@"GSTheme: Titlebar redrawn after resize");
         }
@@ -1911,9 +1899,7 @@
 
 // Button hit detection for titlebar buttons
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point forTitlebar:(XCBTitleBar*)titlebar {
-    // Button metrics (must match URSThemeIntegration.m)
-    static const CGFloat EDGE_BUTTON_WIDTH = 28.0;
-    static const CGFloat RIGHT_BUTTON_WIDTH = 28.0;
+    // Button metrics (must match URSThemeIntegration.m) - buttons are square: width == height
     static const CGFloat ORB_SIZE = 15.0;
     static const CGFloat ORB_PAD_LEFT = 10.5;
     static const CGFloat ORB_SPACING = 4.0;
@@ -1966,30 +1952,30 @@
         return GSThemeTitleBarButtonNone;
     }
 
-    // Edge layout: Close at left | title | Minimize | Maximize at right
-    NSRect closeRect = NSMakeRect(0, 0, EDGE_BUTTON_WIDTH, titlebarHeight);
+    // Edge layout: Close at left | title | Minimize | Maximize at right (all buttons square)
+    NSRect closeRect = NSMakeRect(0, 0, titlebarHeight, titlebarHeight);
     if (NSPointInRect(point, closeRect)) {
         NSLog(@"GSTheme: Hit close button");
         return GSThemeTitleBarButtonClose;
     }
 
     if (hasMaximize) {
-        NSRect miniRect = NSMakeRect(titlebarWidth - 2 * RIGHT_BUTTON_WIDTH, 0,
-                                     RIGHT_BUTTON_WIDTH, titlebarHeight);
+        NSRect miniRect = NSMakeRect(titlebarWidth - 2 * titlebarHeight, 0,
+                                     titlebarHeight, titlebarHeight);
         if (NSPointInRect(point, miniRect)) {
             NSLog(@"GSTheme: Hit miniaturize button (inner right)");
             return GSThemeTitleBarButtonMiniaturize;
         }
 
-        NSRect zoomRect = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH, 0,
-                                     RIGHT_BUTTON_WIDTH, titlebarHeight);
+        NSRect zoomRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
+                                     titlebarHeight, titlebarHeight);
         if (NSPointInRect(point, zoomRect)) {
             NSLog(@"GSTheme: Hit zoom button (far right)");
             return GSThemeTitleBarButtonZoom;
         }
     } else {
-        NSRect miniRect = NSMakeRect(titlebarWidth - RIGHT_BUTTON_WIDTH, 0,
-                                     RIGHT_BUTTON_WIDTH, titlebarHeight);
+        NSRect miniRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
+                                     titlebarHeight, titlebarHeight);
         if (NSPointInRect(point, miniRect)) {
             NSLog(@"GSTheme: Hit miniaturize button (far right, no zoom)");
             return GSThemeTitleBarButtonMiniaturize;

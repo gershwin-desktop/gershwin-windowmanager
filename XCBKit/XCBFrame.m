@@ -127,6 +127,15 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     [self setMinHeightHint:sizeHints->min_height];
     [self setMinWidthHint:sizeHints->min_width];
 
+    // Enforce an absolute minimum client area so windows can never collapse
+    // to just the titlebar height. Clients that don't set WM_NORMAL_HINTS
+    // get minHeightHint=0 which previously caused uint32_t underflows
+    // in the resize functions and allowed 0-height client areas.
+    if (minHeightHint < WM_MIN_CLIENT_HEIGHT)
+        minHeightHint = WM_MIN_CLIENT_HEIGHT;
+    if (minWidthHint < WM_MIN_CLIENT_WIDTH)
+        minWidthHint = WM_MIN_CLIENT_WIDTH;
+
     // Respect ICCCM WM_NORMAL_HINTS: if min == max for both dimensions, treat as non-resizable
     if ((sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
         (sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MAX_SIZE) &&
@@ -141,12 +150,26 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
+    // Determine client border: 0 in compositor mode (drop shadow handles visual separation),
+    // 1 in non-compositor mode (thin strip of frame background as border).
+    // Stored on self for use in resize functions and queried again in decorateClientWindow.
+    {
+        Class compositorClass = NSClassFromString(@"URSCompositingManager");
+        int cb = 1;
+        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+            id manager = [compositorClass sharedManager];
+            if ([manager respondsToSelector:@selector(compositingActive)])
+                cb = [manager compositingActive] ? 0 : 1;
+        }
+        self.clientBorder = cb;
+    }
+
     if (minWidthHint > [aClientWindow windowRect].size.width)
     {
         XCBRect rect = XCBMakeRect(XCBMakePoint(0,0), XCBMakeSize(minWidthHint, [aClientWindow windowRect].size.height));
         [aClientWindow setWindowRect:rect];
         [aClientWindow setOriginalRect:rect];
-        rect.size.width = rect.size.width + 2;  // 1px border on left + right
+        rect.size.width = rect.size.width + 2 * self.clientBorder;
         [self setWindowRect: rect];
         [self setOriginalRect:rect];
         uint32_t values[] = {rect.size.width};
@@ -160,7 +183,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         XCBRect rect = XCBMakeRect(XCBMakePoint(0,0), XCBMakeSize([aClientWindow windowRect].size.width, minHeightHint));
         [aClientWindow setWindowRect:rect];
         [aClientWindow setOriginalRect:rect];
-        rect.size.height = rect.size.height + titleHeight + 1;  // 1px border on bottom
+        rect.size.height = rect.size.height + titleHeight + self.clientBorder;
         [self setWindowRect:rect];
         [self setOriginalRect:rect];
         uint32_t values[] = {rect.size.height};
@@ -225,6 +248,11 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
             compositorActive = [manager compositingActive];
         }
     }
+
+    // Update clientBorder now that we have definitive compositor state.
+    // 0 = compositor mode (client flush with frame; drop shadow separates visually)
+    // 1 = non-compositor mode (1px border on left, right, bottom)
+    self.clientBorder = compositorActive ? 0 : 1;
 
     uint32_t values[4];  // May need up to 4 values for ARGB (back_pixel, colormap, border_pixel, event_mask)
     uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
@@ -356,8 +384,9 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     // Store title for later GSTheme rendering
     [titleBar setInternalTitle:windowTitle];
 
-    // Position client window below titlebar, inset 1px from left edge
-    XCBPoint position = XCBMakePoint(1, height);
+    // Position client window below titlebar; inset by clientBorder (1px in non-compositor, 0 in compositor)
+    int cb = self.clientBorder;
+    XCBPoint position = XCBMakePoint(cb, height);
     [connection reparentWindow:clientWindow toWindow:self position:position];
     [connection mapWindow:clientWindow];
     uint32_t border[] = {0};
@@ -366,9 +395,9 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     // Ensure no borders on client window
     xcb_configure_window([connection connection], [clientWindow window], XCB_CONFIG_WINDOW_BORDER_WIDTH, border);
 
-    // Resize client to fill frame below titlebar with 1px border on left, right, and bottom
-    uint32_t clientSize[2] = {[self windowRect].size.width - 2,
-                              [self windowRect].size.height - height - 1};
+    // Resize client to fill frame below titlebar (minus clientBorder on sides and bottom)
+    uint32_t clientSize[2] = {[self windowRect].size.width - 2 * (uint32_t)cb,
+                              [self windowRect].size.height - height - (uint32_t)cb};
     xcb_configure_window([connection connection], [clientWindow window],
                          XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, clientSize);
     
@@ -450,17 +479,18 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
 - (void) resize:(xcb_motion_notify_event_t *)anEvent xcbConnection:(xcb_connection_t*)aXcbConnection
 {
+    int clientBorder = self.clientBorder;
 
     /*** width ***/
 
     if (rightBorderClicked && !bottomBorderClicked && !leftBorderClicked && !topBorderClicked)
     {
-        resizeFromRightForEvent(anEvent, aXcbConnection, self, minWidthHint);
+        resizeFromRightForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
     if (leftBorderClicked && !bottomBorderClicked && !rightBorderClicked && !topBorderClicked)
     {
-        resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint);
+        resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
 
@@ -468,13 +498,13 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     if (bottomBorderClicked && !rightBorderClicked && !leftBorderClicked)
     {
-        resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight);
+        resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
     }
 
 
     if (topBorderClicked && !rightBorderClicked && !leftBorderClicked && !bottomBorderClicked)
     {
-        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight);
+        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
     }
 
 
@@ -483,35 +513,33 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     // SE corner (bottom-right)
     if (rightBorderClicked && bottomBorderClicked && !leftBorderClicked && !topBorderClicked)
     {
-        resizeFromAngleForEvent(anEvent, aXcbConnection, self, minWidthHint, minHeightHint, titleHeight);
+        resizeFromAngleForEvent(anEvent, aXcbConnection, self, minWidthHint, minHeightHint, titleHeight, clientBorder);
     }
 
     // NW corner (top-left) - combine top and left resizes
     if (topBorderClicked && leftBorderClicked && !rightBorderClicked && !bottomBorderClicked)
     {
-        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight);
-        resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint);
+        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
     // NE corner (top-right) - combine top and right resizes
     if (topBorderClicked && rightBorderClicked && !leftBorderClicked && !bottomBorderClicked)
     {
-        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight);
-        resizeFromRightForEvent(anEvent, aXcbConnection, self, minWidthHint);
+        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        resizeFromRightForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
     // SW corner (bottom-left) - combine bottom and left resizes
     if (bottomBorderClicked && leftBorderClicked && !rightBorderClicked && !topBorderClicked)
     {
-        resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight);
-        resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint);
+        resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
-    // Update resize zone positions if they exist
-    [self updateAllResizeZonePositions];
-
-    // Update shape mask for rounded corners (must match new window dimensions)
-    [self applyRoundedCornersShapeMask];
+    // Resize zones and shape mask are updated at button release (handleButtonRelease),
+    // not on every motion event.  This keeps the hot path to the minimum 2-3 async
+    // xcb_configure_window calls needed to move/resize the actual windows.
 
 }
 
@@ -772,6 +800,26 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 }
 
+- (void)clearShapeMasks
+{
+    // Remove any XShape bounding mask from the frame and titlebar windows so that
+    // the entire rectangle is visible during live resize.  This removes the stale
+    // pre-resize clip that would otherwise blank newly-painted pixels when the
+    // window grows.  Rounded corners are re-applied in full at button release.
+    const xcb_query_extension_reply_t *ext =
+        xcb_get_extension_data([connection connection], &xcb_shape_id);
+    if (!ext || !ext->present) return;
+
+    xcb_connection_t *conn = [connection connection];
+    xcb_shape_mask(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING, window, 0, 0, XCB_NONE);
+
+    XCBTitleBar *titleBar = (XCBTitleBar *)[self childWindowForKey:TitleBar];
+    if (titleBar) {
+        xcb_shape_mask(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                       [titleBar window], 0, 0, XCB_NONE);
+    }
+}
+
 - (void)applyRoundedCornersShapeMask
 {
     // Query theme for corner radii - default to 0 (square corners) if not provided
@@ -781,27 +829,69 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     if ([theme respondsToSelector:@selector(titlebarCornerRadius)]) {
         topRadius = [theme titlebarCornerRadius];
-        NSLog(@"XCBFrame: Theme titlebarCornerRadius = %.1f", topRadius);
-    } else {
-        NSLog(@"XCBFrame: Theme does NOT respond to titlebarCornerRadius selector");
     }
 
     if ([theme respondsToSelector:@selector(windowBottomCornerRadius)]) {
         bottomRadius = [theme windowBottomCornerRadius];
     }
 
-    NSLog(@"XCBFrame: Applying rounded corners - top=%.1f, bottom=%.1f for window %u",
-          topRadius, bottomRadius, window);
+    if (topRadius <= 0 && bottomRadius <= 0)
+        return;
 
-    if (topRadius > 0 || bottomRadius > 0) {
+    // Use internal windowRect rather than a blocking xcb_get_geometry round-trip.
+    // The C resize functions always update windowRect via setWindowRect: before
+    // returning, so this is always current.
+    XCBRect frameRect = [self windowRect];
+    int fw = (int)frameRect.size.width;
+    int fh = (int)frameRect.size.height;
+    if (fw <= 0 || fh <= 0)
+        return;
+
+    // Check if compositor is active
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    BOOL compositorActive = NO;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        id manager = [compositorClass sharedManager];
+        if ([manager respondsToSelector:@selector(compositingActive)]) {
+            compositorActive = [manager compositingActive];
+        }
+    }
+
+    // Apply bounding-shape to the FRAME window (always needed in non-compositor mode)
+    if (!compositorActive) {
         XCBShape *shape = [[XCBShape alloc] initWithConnection:connection withWinId:window];
         if ([shape checkSupported]) {
-            XCBGeometryReply *geometry = [self geometries];
-            if (!geometry) return;  // Window destroyed — nothing to shape
-            [shape calculateDimensionsFromGeometries:geometry];
+            shape.width = fw;
+            shape.height = fh;
+            shape.borderWidth = 0;
+            shape.orWidth = fw;
+            shape.orHeight = fh;
             [shape createPixmapsAndGCs];
             [shape createRoundedCornersWithTopRadius:(int)topRadius bottomRadius:(int)bottomRadius];
-            NSLog(@"XCBFrame: Shape mask applied with topRadius=%d", (int)topRadius);
+        }
+        shape = nil;
+    }
+
+    // In NON-compositor mode only: apply XShape to titlebar.
+    // In compositor mode, URSThemeIntegration.m handles rounded corners entirely via Cairo ARGB alpha.
+    // XShape in compositor mode causes the initial-map sharp-corners issue and is not needed.
+    if (topRadius > 0 && !compositorActive) {
+        XCBTitleBar *titleBar = (XCBTitleBar *)[self childWindowForKey:TitleBar];
+        if (titleBar) {
+            int th = (int)titleHeight;  // titlebar height = the band above client
+            XCBShape *tbShape = [[XCBShape alloc] initWithConnection:connection
+                                                             withWinId:[titleBar window]];
+            if ([tbShape checkSupported]) {
+                tbShape.width = fw;
+                tbShape.height = th;
+                tbShape.borderWidth = 0;
+                tbShape.orWidth = fw;
+                tbShape.orHeight = th;
+                [tbShape createPixmapsAndGCs];
+                [tbShape createTopArcsWithRadius:(int)topRadius];
+            }
+            tbShape = nil;
+            titleBar = nil;
         }
     }
 }
@@ -809,7 +899,8 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
                              xcb_connection_t *connection,
                              XCBFrame* frame,
-                             int minW)
+                             int minW,
+                             int cb)
 {
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
@@ -839,65 +930,41 @@ void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
         }
     }
 
-    uint32_t values[] = {newWidth};
+    // minW is a minimum *client* width; translate to minimum frame width
+    int32_t minimumClientWidth = (minW < 1) ? 1 : minW;
+    int32_t minimumFrameWidth = minimumClientWidth + 2 * cb;
 
-    if (frameRect.size.width <= minW && anEvent->event_x < minW)
-    {
-        frameRect.size.width = minW;
-        titleBarRect.size.width = minW;
-        clientRect.size.width = minW - 2;
-        values[0] = minW;
-        xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_WIDTH, &values);
-        xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_WIDTH, &values);
-        values[0] = minW - 2;
-        xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_WIDTH, &values);
+    // Clamp to minimum width using signed arithmetic to prevent underflow
+    if (newWidth < minimumFrameWidth)
+        newWidth = minimumFrameWidth;
 
-        [frame setWindowRect:frameRect];
-        [frame setOriginalRect:frameRect];
+    int32_t newClientWidth = newWidth - 2 * cb;
+    if (newClientWidth < minimumClientWidth)
+        newClientWidth = minimumClientWidth;
 
-        [titleBar setWindowRect:titleBarRect];
-        [titleBar setOriginalRect:titleBarRect];
+    uint32_t values[1];
 
-        [clientWindow setWindowRect:clientRect];
-        [clientWindow setOriginalRect:clientRect];
+    values[0] = (uint32_t)newWidth;
+    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_WIDTH, values);
+    xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_WIDTH, values);
+    values[0] = (uint32_t)newClientWidth;
+    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_WIDTH, values);
 
-        // Send synthetic ConfigureNotify to client
-        sendSyntheticConfigureNotify(connection, clientWindow,
-                                      frameRect.position.x + 1,
-                                      frameRect.position.y + [frame titleHeight],
-                                      clientRect.size.width,
-                                      clientRect.size.height);
-
-        clientWindow = nil;
-        titleBar = nil;
-        connection = NULL;
-        return;
-    }
-
-    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_WIDTH, &values);
-    xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_WIDTH, &values);
-    values[0] = anEvent->event_x - 2;
-    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_WIDTH, &values);
-
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
-
-    frameRect.size.width = anEvent->event_x;
-
+    frameRect.size.width = (uint16_t)newWidth;
     [frame setWindowRect:frameRect];
     [frame setOriginalRect:frameRect];
 
-    titleBarRect.size.width = anEvent->event_x;
+    titleBarRect.size.width = (uint16_t)newWidth;
     [titleBar setWindowRect:titleBarRect];
     [titleBar setOriginalRect:titleBarRect];
 
-    clientRect.size.width = anEvent->event_x - 2;
+    clientRect.size.width = (uint16_t)newClientWidth;
     [clientWindow setWindowRect:clientRect];
     [clientWindow setOriginalRect:clientRect];
 
     // Send synthetic ConfigureNotify to client
     sendSyntheticConfigureNotify(connection, clientWindow,
-                                  frameRect.position.x + 1,
+                                  frameRect.position.x + cb,
                                   frameRect.position.y + [frame titleHeight],
                                   clientRect.size.width,
                                   clientRect.size.height);
@@ -910,7 +977,8 @@ void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
 void resizeFromLeftForEvent(xcb_motion_notify_event_t *anEvent,
                             xcb_connection_t *connection,
                             XCBFrame* frame,
-                            int minW)
+                            int minW,
+                            int cb)
 {
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
@@ -948,86 +1016,58 @@ void resizeFromLeftForEvent(xcb_motion_notify_event_t *anEvent,
     }
 
     int xDelta = rect.position.x - newX;
-    uint32_t values[] = {newX, xDelta + rect.size.width};
+    int32_t newFrameWidth = xDelta + (int32_t)rect.size.width;
 
-    if (rect.size.width <= minW && anEvent->root_x > rect.position.x)
-    {
-        // When hitting minimum width, maintain the right edge position
-        // Calculate the correct left position to preserve right edge
-        int rightEdge = rect.position.x + rect.size.width;
-        int newX = rightEdge - minW;
+    int32_t minimumClientWidth = (minW < 1) ? 1 : minW;
+    int32_t minimumFrameWidth = minimumClientWidth + 2 * cb;
 
-        rect.size.width = minW;
-        rect.position.x = newX;
-        titleBarRect.size.width = minW;
-        titleBarRect.position.x = 0; // Relative to frame
-        clientRect.size.width = minW - 2;
-        clientRect.position.x = 1; // 1px left border
-
-        values[0] = newX;
-        values[1] = minW;
-        xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH, &values);
-        values[0] = 0;
-        xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH, &values);
-        values[0] = 1;
-        values[1] = minW - 2;
-        xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH, &values);
-
-        [frame setWindowRect:rect];
-        [frame setOriginalRect:rect];
-
-        titleBarRect.position.x = 0;
-        titleBarRect.size.width = minW;
-        [titleBar setWindowRect:titleBarRect];
-        [titleBar setOriginalRect:titleBarRect];
-
-        clientRect.position.x = 1;
-        clientRect.size.width = minW - 2;
-        [clientWindow setWindowRect:clientRect];
-        [clientWindow setOriginalRect:clientRect];
-
-        // Send synthetic ConfigureNotify to client
-        sendSyntheticConfigureNotify(connection, clientWindow,
-                                      rect.position.x + 1,
-                                      rect.position.y + [frame titleHeight],
-                                      clientRect.size.width,
-                                      clientRect.size.height);
-
-        clientWindow = nil;
-        titleBar = nil;
-        connection = NULL;
-        return;
+    // Clamp to minimum width using client-size hints translated to frame pixels
+    if (newFrameWidth < minimumFrameWidth) {
+        // Keep the right edge fixed; set left to preserve minimum size
+        int32_t rightEdge = rect.position.x + rect.size.width;
+        newX = rightEdge - minimumFrameWidth;
+        newFrameWidth = minimumFrameWidth;
     }
 
+    int32_t newClientWidth = newFrameWidth - 2 * cb;
+    if (newClientWidth < minimumClientWidth)
+        newClientWidth = minimumClientWidth;
 
-    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH, &values);
-    rect.position.x = values[0];
-    rect.size.width = values[1];
+    uint32_t values[2];
+
+    values[0] = (uint32_t)newX;
+    values[1] = (uint32_t)newFrameWidth;
+    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH, values);
+
+    rect.position.x = newX;
+    rect.size.width = (uint16_t)newFrameWidth;
+
     values[0] = 0;
-    xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH, &values);
-    values[1] = rect.size.width - 2;
-    values[0] = 1;
-    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH, &values);
+    values[1] = (uint32_t)newFrameWidth;
+    xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH, values);
 
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
+    titleBarRect.position.x = 0;
+    titleBarRect.size.width = (uint16_t)newFrameWidth;
+
+    values[0] = cb;
+    values[1] = (uint32_t)newClientWidth;
+    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH, values);
+
+    clientRect.position.x = cb;
+    clientRect.size.width = (uint16_t)newClientWidth;
 
     [frame setWindowRect:rect];
     [frame setOriginalRect:rect];
 
-    titleBarRect.position.x = 0;
-    titleBarRect.size.width = rect.size.width;
     [titleBar setWindowRect:titleBarRect];
     [titleBar setOriginalRect:titleBarRect];
 
-    clientRect.position.x = 1;
-    clientRect.size.width = rect.size.width - 2;
     [clientWindow setWindowRect:clientRect];
     [clientWindow setOriginalRect:clientRect];
 
     // Send synthetic ConfigureNotify to client
     sendSyntheticConfigureNotify(connection, clientWindow,
-                                  rect.position.x + 1,
+                                  rect.position.x + cb,
                                   rect.position.y + [frame titleHeight],
                                   clientRect.size.width,
                                   clientRect.size.height);
@@ -1042,7 +1082,8 @@ void resizeFromBottomForEvent(xcb_motion_notify_event_t *anEvent,
                               xcb_connection_t *connection,
                               XCBFrame* frame,
                               int minH,
-                              uint16_t titleBarHeight)
+                              uint16_t titleBarHeight,
+                              int cb)
 {
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
@@ -1069,55 +1110,37 @@ void resizeFromBottomForEvent(xcb_motion_notify_event_t *anEvent,
         }
     }
 
-    uint32_t values[] = {anEvent->event_y};
+    // Use signed arithmetic to prevent underflow when event_y is smaller than titlebar
+    int32_t newFrameHeight = (int32_t)anEvent->event_y;
+    int32_t minFrameHeight = minH + titleBarHeight + cb;
 
-    if (rect.size.height <= minH + titleBarHeight && anEvent->event_y < minH)
-    {
-        rect.size.height = minH + titleBarHeight;
-        clientRect.size.height = minH - 1;
-        values[0] = clientRect.size.height;
-        xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_HEIGHT, &values);
-        values[0] = rect.size.height;
-        xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_HEIGHT, &values);
+    // Clamp to minimum
+    if (newFrameHeight < minFrameHeight)
+        newFrameHeight = minFrameHeight;
 
-        [frame setWindowRect:rect];
-        [frame setOriginalRect:rect];
+    int32_t newClientHeight = newFrameHeight - titleBarHeight - cb;
+    if (newClientHeight < minH)
+        newClientHeight = minH;
 
-        [clientWindow setWindowRect:clientRect];
-        [clientWindow setOriginalRect:clientRect];
+    uint32_t values[1];
 
-        // Send synthetic ConfigureNotify to client
-        sendSyntheticConfigureNotify(connection, clientWindow,
-                                      rect.position.x + 1,
-                                      rect.position.y + titleBarHeight,
-                                      clientRect.size.width,
-                                      clientRect.size.height);
+    values[0] = (uint32_t)newClientHeight;
+    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_HEIGHT, values);
+    clientRect.size.height = (uint16_t)newClientHeight;
 
-        clientWindow = nil;
-        connection = NULL;
-        return;
-    }
+    values[0] = (uint32_t)newFrameHeight;
+    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_HEIGHT, values);
 
-    values[0] = anEvent->event_y - titleBarHeight - 1;
-    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_HEIGHT, &values);
-    clientRect.size.height = values[0];
-    values[0] = anEvent->event_y;
-    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_HEIGHT, &values);
-
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
+    rect.size.height = (uint16_t)newFrameHeight;
+    [frame setWindowRect:rect];
+    [frame setOriginalRect:rect];
 
     [clientWindow setWindowRect:clientRect];
     [clientWindow setOriginalRect:clientRect];
 
-
-    rect.size.height = values[0];
-    [frame setWindowRect:rect];
-    [frame setOriginalRect:rect];
-
     // Send synthetic ConfigureNotify to client
     sendSyntheticConfigureNotify(connection, clientWindow,
-                                  rect.position.x + 1,
+                                  rect.position.x + cb,
                                   rect.position.y + titleBarHeight,
                                   clientRect.size.width,
                                   clientRect.size.height);
@@ -1130,7 +1153,8 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
                            xcb_connection_t *connection,
                            XCBFrame* frame,
                            int minH,
-                           uint16_t titleBarHeight)
+                           uint16_t titleBarHeight,
+                           int cb)
 {
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
@@ -1139,7 +1163,6 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
         return;
     }
     XCBTitleBar* titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
-    //xcb_connection_t *connection = [[frame connection] connection];
 
     XCBRect rect = [frame windowRect];
     XCBRect titleBarRect = [titleBar windowRect];
@@ -1165,66 +1188,43 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
         }
     }
 
-    int yDelta = rect.position.y - newY;
+    int32_t yDelta = (int32_t)rect.position.y - (int32_t)newY;
+    int32_t newFrameHeight = (int32_t)rect.size.height + yDelta;
+    int32_t minFrameHeight = minH + titleBarHeight + cb;
 
-    uint32_t values[] = {newY, yDelta + rect.size.height};
-
-    if (rect.size.height <= minH + titleBarHeight && anEvent->root_y > rect.position.y)
-    {
-        // When hitting minimum height, maintain the bottom edge position
-        // Calculate the correct top position to preserve bottom edge
-        int bottomEdge = rect.position.y + rect.size.height;
-        int newY = bottomEdge - (minH + titleBarHeight);
-        rect.size.height = minH + titleBarHeight;
-        rect.position.y = newY;
-        clientRect.size.height = minH - 1;
-        clientRect.position.y = titleBarHeight;
-
-        values[0] = clientRect.position.y;
-        values[1] = clientRect.size.height;
-        xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_HEIGHT, &values);
-
-        values[0] = newY;
-        values[1] = rect.size.height;
-        xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_HEIGHT, &values);
-
-
-        [frame setWindowRect:rect];
-        [frame setOriginalRect:rect];
-
-        [clientWindow setWindowRect:clientRect];
-        [clientWindow setOriginalRect:clientRect];
-
-        // Send synthetic ConfigureNotify to client
-        sendSyntheticConfigureNotify(connection, clientWindow,
-                                      rect.position.x + 1,
-                                      rect.position.y + titleBarHeight,
-                                      clientRect.size.width,
-                                      clientRect.size.height);
-
-        titleBar = nil;
-        clientWindow = nil;
-        connection = NULL;
-
-        return;
+    // Clamp: if the new height is below minimum, fix the top position
+    if (newFrameHeight < minFrameHeight) {
+        // Keep the bottom edge fixed; set top to preserve minimum size
+        int32_t bottomEdge = rect.position.y + rect.size.height;
+        newY = bottomEdge - minFrameHeight;
+        newFrameHeight = minFrameHeight;
     }
 
-    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_HEIGHT, &values);
+    int32_t newClientHeight = newFrameHeight - titleBarHeight - cb;
+    if (newClientHeight < minH)
+        newClientHeight = minH;
 
-    rect.position.y = values[0];
-    rect.size.height = values[1];
+    uint32_t values[2];
+
+    // Configure frame (position + height)
+    values[0] = (uint32_t)newY;
+    values[1] = (uint32_t)newFrameHeight;
+    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_HEIGHT, values);
+
+    rect.position.y = newY;
+    rect.size.height = (uint16_t)newFrameHeight;
+
+    // Titlebar Y is always 0 relative to frame
     values[0] = 0;
-    xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_Y, &values);
-    titleBarRect.position.y = values[0];
+    xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_Y, values);
+    titleBarRect.position.y = 0;
 
+    // Configure client
     values[0] = titleBarHeight;
-    values[1] = rect.size.height - titleBarHeight - 1;
-
-    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_HEIGHT, &values);
-    clientRect.size.height = values[1];
-
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
+    values[1] = (uint32_t)newClientHeight;
+    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_HEIGHT, values);
+    clientRect.size.height = (uint16_t)newClientHeight;
+    clientRect.position.y = titleBarHeight;
 
     [frame setWindowRect:rect];
     [frame setOriginalRect:rect];
@@ -1232,13 +1232,12 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
     [titleBar setWindowRect:titleBarRect];
     [titleBar setOriginalRect:titleBarRect];
 
-
     [clientWindow setWindowRect:clientRect];
     [clientWindow setOriginalRect:clientRect];
 
     // Send synthetic ConfigureNotify to client
     sendSyntheticConfigureNotify(connection, clientWindow,
-                                  rect.position.x + 1,
+                                  rect.position.x + cb,
                                   rect.position.y + titleBarHeight,
                                   clientRect.size.width,
                                   clientRect.size.height);
@@ -1253,7 +1252,8 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
                              XCBFrame *frame,
                              int minW,
                              int minH,
-                             uint16_t titleBarHeight)
+                             uint16_t titleBarHeight,
+                             int cb)
 {
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
@@ -1268,77 +1268,54 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     XCBRect titleBarRect = [titleBar windowRect];
     XCBRect clientRect = [clientWindow windowRect];
 
-    uint32_t values[] = {anEvent->event_x, anEvent->event_y};
+    // Use signed arithmetic to prevent underflow
+    int32_t newFrameWidth = (int32_t)anEvent->event_x;
+    int32_t newFrameHeight = (int32_t)anEvent->event_y;
 
-    if (rect.size.width <= minW && anEvent->event_x < minW &&
-        rect.size.height <= minH + titleBarHeight && anEvent->event_y < minH)
-    {
-        rect.size.width = minW;
-        titleBarRect.size.width = minW;
-        clientRect.size.width = minW - 2;
+    // Clamp to minimum dimensions
+    int32_t minimumClientWidth = (minW < 1) ? 1 : minW;
+    int32_t minimumFrameWidth = minimumClientWidth + 2 * cb;
+    int32_t minFrameHeight = minH + titleBarHeight + cb;
+    if (newFrameWidth < minimumFrameWidth)
+        newFrameWidth = minimumFrameWidth;
+    if (newFrameHeight < minFrameHeight)
+        newFrameHeight = minFrameHeight;
 
-        rect.size.height = minH + titleBarHeight;
-        clientRect.size.height = minH - 1;
+    int32_t newClientWidth = newFrameWidth - 2 * cb;
+    int32_t newClientHeight = newFrameHeight - titleBarHeight - cb;
+    if (newClientWidth < minimumClientWidth) newClientWidth = minimumClientWidth;
+    if (newClientHeight < 1) newClientHeight = 1;
 
-        values[0] = rect.size.width;
-        values[1] = rect.size.height;
+    uint32_t values[2];
 
-        xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, &values);
-        values[0] = titleBarRect.size.width;
-        xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_WIDTH, &values);
-        values[0] = clientRect.size.width;
-        values[1] = clientRect.size.height;
-        xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, &values);
+    values[0] = (uint32_t)newFrameWidth;
+    values[1] = (uint32_t)newFrameHeight;
+    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values);
 
-        [frame setWindowRect:rect];
-        [frame setOriginalRect:rect];
+    values[0] = (uint32_t)newFrameWidth;
+    xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_WIDTH, values);
 
-        [titleBar setWindowRect:titleBarRect];
-        [titleBar setOriginalRect:titleBarRect];
+    values[0] = (uint32_t)newClientWidth;
+    values[1] = (uint32_t)newClientHeight;
+    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, values);
 
-        [clientWindow setWindowRect:clientRect];
-        [clientWindow setOriginalRect:clientRect];
-
-        // Send synthetic ConfigureNotify to client
-        sendSyntheticConfigureNotify(connection, clientWindow,
-                                      rect.position.x + 1,
-                                      rect.position.y + titleBarHeight,
-                                      clientRect.size.width,
-                                      clientRect.size.height);
-
-        titleBar = nil;
-        clientWindow = nil;
-        connection = NULL;
-
-        return;
-    }
-
-    xcb_configure_window(connection, [frame window], XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, &values);
-    xcb_configure_window(connection, [titleBar window], XCB_CONFIG_WINDOW_WIDTH, &values);
-    uint32_t clientVals[2] = {values[0] - 2, values[1] - titleBarHeight - 1};
-    xcb_configure_window(connection, [clientWindow window], XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, clientVals);
-
-    // Flush to ensure smooth resizing updates
-    xcb_flush(connection);
-
-    rect.size.width = anEvent->event_x;
-    rect.size.height = anEvent->event_y;
+    rect.size.width = (uint16_t)newFrameWidth;
+    rect.size.height = (uint16_t)newFrameHeight;
     [frame setWindowRect:rect];
     [frame setOriginalRect:rect];
 
-
-    titleBarRect.size.width = anEvent->event_x;
+    titleBarRect.size.width = (uint16_t)newFrameWidth;
     [titleBar setWindowRect:titleBarRect];
     [titleBar setOriginalRect:titleBarRect];
 
-    clientRect.size.width = clientVals[0];
-    clientRect.size.height = clientVals[1];
+    clientRect.size.width = (uint16_t)newClientWidth;
+    clientRect.size.height = (uint16_t)newClientHeight;
     [clientWindow setWindowRect:clientRect];
     [clientWindow setOriginalRect:clientRect];
 
     // Send synthetic ConfigureNotify to client
     sendSyntheticConfigureNotify(connection, clientWindow,
-                                  rect.position.x + 1,
+                                  rect.position.x + cb,
                                   rect.position.y + titleBarHeight,
                                   clientRect.size.width,
                                   clientRect.size.height);
@@ -1353,7 +1330,10 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     // Minimal implementation for maximum performance
     XCBPoint pos = XCBMakePoint(coordinates.x - offset.x, coordinates.y - offset.y);
 
-    uint32_t values[] = {(uint32_t)pos.x, (uint32_t)pos.y};
+    // Cast through int32_t first: (uint32_t)(negative double) is undefined
+    // behavior in C, causing window jumps when the position goes negative
+    // (e.g. left edge crossing the left screen border).
+    uint32_t values[] = {(uint32_t)(int32_t)pos.x, (uint32_t)(int32_t)pos.y};
     xcb_configure_window([connection connection], window, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, values);
     // PERFORMANCE FIX: Don't flush on every motion event - let the event loop batch flushes
     // xcb_flush([connection connection]);
@@ -1368,8 +1348,9 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 {
     xcb_configure_notify_event_t event;
     XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
-    XCBRect rect = [[self geometries] rect];
-    XCBRect clientRect = [clientWindow rectFromGeometries];
+    // Use cached in-memory rects — no blocking xcb_get_geometry round-trip.
+    XCBRect rect = [self windowRect];
+    XCBRect clientRect = [clientWindow windowRect];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
@@ -1377,7 +1358,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 
     event.event = [clientWindow window];
     event.window = [clientWindow window];
-    event.x = rect.position.x + 1;
+    event.x = rect.position.x + self.clientBorder;
     event.y = rect.position.y + height;
     event.border_width = 0;
     event.width = clientRect.size.width;
@@ -1406,7 +1387,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 
     // Use the static helper with explicit dimensions (same as manual resize)
     sendSyntheticConfigureNotify([connection connection], clientWindow,
-                                  framePos.x + 1,
+                                  framePos.x + self.clientBorder,
                                   framePos.y + titleHgt,
                                   clientSize.width,
                                   clientSize.height);

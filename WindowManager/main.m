@@ -90,9 +90,8 @@ int main(int argc, const char * argv[])
         [[NSUserDefaults standardUserDefaults] setBool:enableCompositing 
                                                  forKey:@"URSCompositingEnabled"];
 
-        // Initialize TitleBar settings (same as before)
+        // Initialize TitleBar settings - height will be queried from GSTheme below (source: AppearanceMetrics.h)
         TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-        [settings setHeight:25];
         XCBPoint closePosition = XCBMakePoint(3.5, 3.8);
         XCBPoint minimizePosition = XCBMakePoint(3, 8);
         XCBPoint maximizePosition = XCBMakePoint(3, 3);
@@ -104,6 +103,15 @@ int main(int argc, const char * argv[])
         NSLog(@"Initializing GSTheme titlebar integration...");
         [URSThemeIntegration initializeGSTheme];
         [URSThemeIntegration enableGSThemeTitleBars];
+
+        // Set titlebar height from theme (authoritative source: AppearanceMetrics.h in Eau theme)
+        {
+            GSTheme *theme = [GSTheme theme];
+            uint16_t themeHeight = [theme respondsToSelector:@selector(titlebarHeight)]
+                ? (uint16_t)[theme titlebarHeight]
+                : 22;
+            [settings setHeight:themeHeight];
+        }
 
         // Create custom NSApplication and hybrid event handler
         UROSWMApplication *app = [UROSWMApplication sharedApplication];
