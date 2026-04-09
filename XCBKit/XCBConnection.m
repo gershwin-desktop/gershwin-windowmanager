@@ -444,53 +444,6 @@ static XCBConnection *sharedInstance;
 
 }
 
-// In line with the Classic HIG, we should leave space at the right hand side
-// to see at least one row of icons on the Desktop; 
-// similarly, leave space the bottom for the Dock.
-// This function ensures new windows are placed within that "safe area"
-// on the main screen.
-static void constrainWindowToMainScreenSafeArea(XCBScreen *screenObj, int16_t *xPos, int16_t *yPos, uint16_t *winWidth, uint16_t *winHeight)
-{
-    if (!screenObj) return;
-    xcb_screen_t *screen = [screenObj screen];
-    if (screen == NULL) return;
-
-    const int16_t left_margin = 22;
-    const int16_t top_margin = 44;
-    const int16_t bottom_margin = 64;
-    const int16_t right_margin = 128;
-    const int16_t screenWidth = screen->width_in_pixels;
-    const int16_t screenHeight = screen->height_in_pixels;
-
-    if (*winWidth > (uint16_t)(screenWidth - right_margin - left_margin)) {
-        *winWidth = screenWidth - right_margin - left_margin;
-    }
-
-    if (*xPos < left_margin) {
-        *xPos = left_margin;
-    }
-    if (*xPos > screenWidth - right_margin - *winWidth) {
-        *xPos = screenWidth - right_margin - *winWidth;
-    }
-
-    if (*yPos < top_margin) {
-        *yPos = top_margin;
-    }
-
-    const int16_t maxHeight = screenHeight - bottom_margin - *yPos;
-    if (*winHeight > (uint16_t)maxHeight) {
-        *winHeight = maxHeight;
-    }
-
-    if (*yPos > screenHeight - bottom_margin - *winHeight) {
-        *yPos = screenHeight - bottom_margin - *winHeight;
-    }
-
-    if (*yPos < top_margin) {
-        *yPos = top_margin;
-    }
-}
-
 - (void)mapWindow:(XCBWindow *)aWindow
 {
     xcb_map_window(connection, [aWindow window]);
@@ -938,24 +891,6 @@ static void constrainWindowToMainScreenSafeArea(XCBScreen *screenObj, int16_t *x
                 }
             }
 
-            if (screenObj && !([window skipTaskBar] || [window skipPager] || [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]])) {
-                int16_t xPos = [window windowRect].position.x;
-                int16_t yPos = [window windowRect].position.y;
-                uint16_t winWidth = [window windowRect].size.width;
-                uint16_t winHeight = [window windowRect].size.height;
-
-                constrainWindowToMainScreenSafeArea(screenObj, &xPos, &yPos, &winWidth, &winHeight);
-                XCBRect adjustedRect = [window windowRect];
-                if (adjustedRect.position.x != xPos || adjustedRect.position.y != yPos ||
-                    adjustedRect.size.width != winWidth || adjustedRect.size.height != winHeight) {
-                    adjustedRect.position.x = xPos;
-                    adjustedRect.position.y = yPos;
-                    adjustedRect.size.width = winWidth;
-                    adjustedRect.size.height = winHeight;
-                    [window setWindowRect:adjustedRect];
-                }
-            }
-
             // No frame, just map the window
             [self mapWindow:window];
         }
@@ -1235,12 +1170,8 @@ static void constrainWindowToMainScreenSafeArea(XCBScreen *screenObj, int16_t *x
 
     [window onScreen]; // TODO: Just called in the else before this? really necessary?
     XCBScreen *screen = [window screen];
-    XCBScreen *mainScreen = nil;
-    if ([screens count] > 0) {
-        mainScreen = [screens objectAtIndex:0];
-        if (screen == nil) {
-            screen = mainScreen;
-        }
+    if (screen == nil && [screens count] > 0) {
+        screen = [screens objectAtIndex:0];
     }
     
     // Check if compositor is active for ARGB alpha transparency support
@@ -1395,19 +1326,6 @@ static void constrainWindowToMainScreenSafeArea(XCBScreen *screenObj, int16_t *x
         newRect.position.x = xPos;
         newRect.position.y = yPos;
         [window setWindowRect:newRect];
-    }
-
-    if (screen == mainScreen && mainScreen != nil && !([window skipTaskBar] || [window skipPager] || [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]])) {
-        constrainWindowToMainScreenSafeArea(mainScreen, &xPos, &yPos, &winWidth, &winHeight);
-        XCBRect adjustedRect = [window windowRect];
-        if (adjustedRect.position.x != xPos || adjustedRect.position.y != yPos ||
-            adjustedRect.size.width != winWidth || adjustedRect.size.height != winHeight) {
-            adjustedRect.position.x = xPos;
-            adjustedRect.position.y = yPos;
-            adjustedRect.size.width = winWidth;
-            adjustedRect.size.height = winHeight;
-            [window setWindowRect:adjustedRect];
-        }
     }
 
     XCBCreateWindowTypeRequest *request = [[XCBCreateWindowTypeRequest alloc] initForWindowType:XCBFrameRequest];
