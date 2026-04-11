@@ -182,7 +182,13 @@
                                                                           cw.windowId,
                                                                           self.rootWindow,
                                                                           0, 0);
-    xcb_translate_coordinates_reply_t *reply = xcb_translate_coordinates_reply(conn, cookie, NULL);
+    xcb_generic_error_t *translateError = NULL;
+    xcb_translate_coordinates_reply_t *reply = xcb_translate_coordinates_reply(conn, cookie, &translateError);
+    if (translateError)
+    {
+        free(translateError);
+        return;
+    }
     if (!reply) {
         return;
     }
@@ -820,13 +826,16 @@
     
     // Get window attributes
     xcb_get_window_attributes_cookie_t attr_cookie = xcb_get_window_attributes(conn, windowId);
-    xcb_get_window_attributes_reply_t *attr = xcb_get_window_attributes_reply(conn, attr_cookie, NULL);
-    
+    xcb_generic_error_t *attrError = NULL;
+    xcb_get_window_attributes_reply_t *attr = xcb_get_window_attributes_reply(conn, attr_cookie, &attrError);
+    if (attrError)
+    {
+        free(attrError);
+        return;
+    }
     if (!attr) {
         return;
     }
-    
-    // Skip InputOnly windows
     if (attr->_class == XCB_WINDOW_CLASS_INPUT_ONLY) {
         free(attr);
         return;
@@ -834,14 +843,18 @@
     
     // Get geometry
     xcb_get_geometry_cookie_t geom_cookie = xcb_get_geometry(conn, windowId);
-    xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(conn, geom_cookie, NULL);
-    
+    xcb_generic_error_t *geomError = NULL;
+    xcb_get_geometry_reply_t *geom = xcb_get_geometry_reply(conn, geom_cookie, &geomError);
+    if (geomError)
+    {
+        free(geomError);
+        free(attr);
+        return;
+    }
     if (!geom) {
         free(attr);
         return;
     }
-    
-    URSCompositeWindow *cw = [[URSCompositeWindow alloc] init];
     cw.windowId = windowId;
     cw.x = geom->x;
     cw.y = geom->y;
@@ -856,7 +869,10 @@
 
     // Track parent and compute absolute position in root coordinates
     xcb_query_tree_cookie_t tree_cookie = xcb_query_tree(conn, windowId);
-    xcb_query_tree_reply_t *tree_reply = xcb_query_tree_reply(conn, tree_cookie, NULL);
+    xcb_generic_error_t *treeError = NULL;
+    xcb_query_tree_reply_t *tree_reply = xcb_query_tree_reply(conn, tree_cookie, &treeError);
+    if (treeError)
+        free(treeError);
     if (tree_reply) {
         cw.parentWindowId = tree_reply->parent;
         free(tree_reply);
@@ -1000,7 +1016,10 @@
                                                                               cw.windowId,
                                                                               self.rootWindow,
                                                                               0, 0);
-        xcb_translate_coordinates_reply_t *reply = xcb_translate_coordinates_reply(conn, cookie, NULL);
+        xcb_generic_error_t *moveTranslateError = NULL;
+        xcb_translate_coordinates_reply_t *reply = xcb_translate_coordinates_reply(conn, cookie, &moveTranslateError);
+        if (moveTranslateError)
+            free(moveTranslateError);
         if (reply) {
             newX = reply->dst_x;
             newY = reply->dst_y;
@@ -1157,7 +1176,10 @@
                                                                               cw.windowId,
                                                                               self.rootWindow,
                                                                               0, 0);
-        xcb_translate_coordinates_reply_t *reply = xcb_translate_coordinates_reply(conn, cookie, NULL);
+        xcb_generic_error_t *resizeTranslateError = NULL;
+        xcb_translate_coordinates_reply_t *reply = xcb_translate_coordinates_reply(conn, cookie, &resizeTranslateError);
+        if (resizeTranslateError)
+            free(resizeTranslateError);
         if (reply) {
             newX = reply->dst_x;
             newY = reply->dst_y;
@@ -1361,7 +1383,13 @@
     // Walk up the window tree to find a tracked parent
     for (int depth = 0; depth < 10; depth++) { // Limit depth to prevent infinite loops
         xcb_query_tree_cookie_t tree_cookie = xcb_query_tree(conn, current);
-        xcb_query_tree_reply_t *tree_reply = xcb_query_tree_reply(conn, tree_cookie, NULL);
+        xcb_generic_error_t *treeError = NULL;
+        xcb_query_tree_reply_t *tree_reply = xcb_query_tree_reply(conn, tree_cookie, &treeError);
+        if (treeError)
+        {
+            free(treeError);
+            return XCB_NONE;
+        }
         
         if (!tree_reply) {
             return XCB_NONE;

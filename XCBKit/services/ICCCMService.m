@@ -110,11 +110,19 @@
 {
     xcb_connection_t *connection = [[aWindow connection] connection];
     xcb_get_property_cookie_t cookie = xcb_icccm_get_wm_normal_hints(connection, [aWindow window]);
-    
+
     xcb_size_hints_t *sizeHints = malloc(sizeof(xcb_size_hints_t));
-    
-    xcb_icccm_get_wm_normal_hints_reply(connection, cookie, sizeHints, NULL);
-    
+
+    xcb_generic_error_t *error = NULL;
+    if (!xcb_icccm_get_wm_normal_hints_reply(connection, cookie, sizeHints, &error))
+    {
+        if (error)
+            free(error);
+        free(sizeHints);
+        connection = NULL;
+        return NULL;
+    }
+
     connection = NULL;
     return sizeHints;
 }
@@ -126,29 +134,40 @@
 
 - (NSString*) getWmNameForWindow:(XCBWindow *)aWindow
 {
-    xcb_get_property_cookie_t cookie = xcb_icccm_get_wm_name([[aWindow connection] connection], [aWindow window]);
+    xcb_connection_t *conn = [[aWindow connection] connection];
+    xcb_get_property_cookie_t cookie = xcb_icccm_get_wm_name(conn, [aWindow window]);
     xcb_icccm_get_text_property_reply_t property;
-    
-    xcb_icccm_get_wm_name_reply([[aWindow connection] connection],
-                                cookie,
-                                &property,
-                                NULL);
-    NSString* name;
+    memset(&property, 0, sizeof(property));
+
+    xcb_generic_error_t *error = NULL;
+    xcb_icccm_get_wm_name_reply(conn, cookie, &property, &error);
+    if (error)
+    {
+        free(error);
+        return nil;
+    }
+
+    NSString *name = nil;
     if (property.name != NULL)
         name = [NSString stringWithCString:property.name encoding:NSASCIIStringEncoding];
-    
+
     return name;
 }
 
 - (xcb_icccm_wm_hints_t) wmHintsFromWindow:(XCBWindow*)aWindow
 {
     xcb_icccm_wm_hints_t wmHints;
+    memset(&wmHints, 0, sizeof(wmHints));
     xcb_get_property_cookie_t cookie = xcb_icccm_get_wm_hints([[super connection] connection],
                                                               [aWindow window]);
+    xcb_generic_error_t *error = NULL;
     uint8_t success = xcb_icccm_get_wm_hints_reply([[super connection] connection],
                                                    cookie,
                                                    &wmHints,
-                                                   NULL);
+                                                   &error);
+
+    if (error)
+        free(error);
 
     if (!success)
         NSLog(@"Error: Can't fill wmHints structure!");
@@ -199,13 +218,16 @@
 
 - (void) wmClassForWindow:(XCBWindow*)aWindow
 {
-    xcb_get_property_cookie_t cookie = xcb_icccm_get_wm_class_unchecked([[super connection] connection], [aWindow window]);
+    xcb_get_property_cookie_t cookie = xcb_icccm_get_wm_class([[super connection] connection], [aWindow window]);
     xcb_icccm_get_wm_class_reply_t reply;
 
+    xcb_generic_error_t *error = NULL;
     if (!xcb_icccm_get_wm_class_reply([[super connection] connection],
                                       cookie,
-                                      &reply, NULL))
+                                      &reply, &error))
     {
+        if (error)
+            free(error);
         NSLog(@"Error while checking WM_CLASS");
         return;
     }

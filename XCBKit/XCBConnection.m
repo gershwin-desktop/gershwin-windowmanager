@@ -743,7 +743,13 @@ static XCBConnection *sharedInstance;
                 xcb_atom_t animAtom = [atomSvc cacheAtom:@"_GERSHWIN_WINDOW_OPEN_ANIMATION_RECT"];
                 if (animAtom != XCB_NONE) {
                     xcb_get_property_cookie_t cookie = xcb_get_property(conn, 0, win, animAtom, XCB_ATOM_CARDINAL, 0, 4);
-                    xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, cookie, NULL);
+                    xcb_generic_error_t *animError = NULL;
+                    xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, cookie, &animError);
+                    if (animError)
+                    {
+                        free(animError);
+                        reply = NULL;
+                    }
                     
                     if (reply) {
                         int len = xcb_get_property_value_length(reply);

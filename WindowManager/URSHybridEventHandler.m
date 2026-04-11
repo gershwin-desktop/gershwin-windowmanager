@@ -2935,7 +2935,13 @@
                                                          utf8Atom,
                                                          0,
                                                          1024);
-    xcb_get_property_reply_t *reply = xcb_get_property_reply([connection connection], cookie, NULL);
+    xcb_generic_error_t *propError = NULL;
+    xcb_get_property_reply_t *reply = xcb_get_property_reply([connection connection], cookie, &propError);
+    if (propError)
+    {
+        free(propError);
+        return nil;
+    }
     if (!reply) {
         return nil;
     }
