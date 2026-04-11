@@ -855,6 +855,8 @@
         free(attr);
         return;
     }
+
+    URSCompositeWindow *cw = [[URSCompositeWindow alloc] init];
     cw.windowId = windowId;
     cw.x = geom->x;
     cw.y = geom->y;
