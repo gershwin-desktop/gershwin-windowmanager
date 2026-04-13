@@ -46,8 +46,6 @@ WindowManager/
 │   │   └── TitleBarSettingsService.h/m  Titlebar geometry configuration
 │   │
 │   └── utils/                      Utility classes and functions
-│       ├── CairoDrawer.h/m         Cairo rendering to XCB surfaces
-│       ├── CairoSurfacesSet.h/m    Cairo surface pool management
 │       ├── XCBCreateWindowTypeRequest.h/m  Window creation request builder
 │       ├── XCBWindowTypeResponse.h/m       Window creation response
 │       ├── Comparators.h/m         Color and struct comparison helpers
@@ -123,7 +121,7 @@ decorations, buttons, and text using the active GSTheme.
 **XCB Abstraction Layer** — `xcb/`
 Objective-C wrapper around libxcb. Provides object-oriented access to
 X11 windows, screens, cursors, selections, EWMH/ICCCM services, and
-Cairo-based rendering. No window management policy — only mechanism.
+GNUstep/XCB rendering. No window management policy — only mechanism.
 
 ## Build
 

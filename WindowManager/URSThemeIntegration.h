@@ -36,9 +36,6 @@
                         title:(NSString*)title
                        active:(BOOL)isActive;
 
-// Disable XCBTitleBar drawing by overriding its draw methods
-+ (void)disableXCBTitleBarDrawing:(XCBTitleBar*)titlebar;
-
 // Refresh all titlebars with current theme
 + (void)refreshAllTitlebars;
 

@@ -42,12 +42,12 @@
 
 - (void) drawArcsForColor:(TitleBarColor)aColor
 {
-    // GSTheme handles button rendering — legacy Cairo path removed.
+    // GSTheme handles button rendering — legacy path removed.
 }
 
 - (void) drawTitleBarForColor:(TitleBarColor)aColor
 {
-    // GSTheme handles titlebar background rendering — legacy Cairo path removed.
+    // GSTheme handles titlebar background rendering — legacy path removed.
 }
 
 - (void) generateButtons
@@ -196,7 +196,7 @@
 {
     [super drawArea:[super windowRect]];
 
-    // Check if GSTheme is active - if so, skip Cairo button drawing
+    // Check if GSTheme is active - if so, skip legacy button drawing
     if ([self isGSThemeActive]) {
         return;
     }
@@ -212,7 +212,7 @@
 
 - (void) drawTitleBarComponentsPixmaps
 {
-    // Check if GSTheme is active - if so, skip Cairo titlebar and button drawing
+    // Check if GSTheme is active - if so, skip legacy titlebar and button drawing
     if ([self isGSThemeActive]) {
         return;
     }
@@ -233,7 +233,7 @@
 
 - (void)putButtonsBackgroundPixmaps:(BOOL)aValue
 {
-    // Check if GSTheme is active - if so, skip Cairo button background setup
+    // Check if GSTheme is active - if so, skip legacy button background setup
     if ([self isGSThemeActive]) {
         return;
     }
@@ -266,11 +266,11 @@
     if ([title length] == 0)
         return;
 
-    // GSTheme handles title text rendering — legacy Cairo path removed.
+    // GSTheme handles title text rendering — legacy path removed.
     titleIsSet = YES;
 }
 
-// OPTIMIZATION: Set internal title without Cairo rendering
+// OPTIMIZATION: Set internal title without legacy rendering
 // Used when GSTheme will handle the actual titlebar rendering
 - (void) setInternalTitle:(NSString *) title
 {

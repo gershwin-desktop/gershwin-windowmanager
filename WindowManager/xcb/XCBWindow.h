@@ -136,9 +136,7 @@ typedef NS_ENUM(NSInteger, WindowState)
 - (xcb_void_cookie_t) createGraphicContextWithMask:(uint32_t) aMask andValues:(uint32_t*) values;
 - (void) destroyGraphicsContext;
 - (void) createPixmap;
-- (void) createPixmapDelayed;
 - (void) destroyPixmap;
-- (void) updatePixmap;
 - (void) clearArea:(XCBRect)aRect generatesExposure:(BOOL)aValue;
 - (void) drawArea:(XCBRect)aRect;
 
@@ -163,22 +161,18 @@ typedef NS_ENUM(NSInteger, WindowState)
 - (void) hide;
 - (void) close;
 - (void) restoreDimensionAndPosition;
-- (void) createMiniWindowAtPosition:(XCBPoint)position;
 - (void) restoreFromIconified;
 - (void) destroy;
 - (void) stackAbove;
 - (void) stackBelow;
 - (void) grabButton;
 - (void) ungrabButton;
-- (void) description;
 - (BOOL) grabPointer;
 - (void) ungrabPointer;
 - (XCBGeometryReply*) geometries;
 - (XCBRect) rectFromGeometries;
 - (void) updateRectsFromGeometries;
 - (void) configureForEvent:(xcb_configure_request_event_t *)anEvent;
-- (void) drawIcons;
-- (void) cairoPreview;
 - (void) focus;
 - (void) setIconicState;
 - (void) setNormalState;
@@ -190,7 +184,6 @@ typedef NS_ENUM(NSInteger, WindowState)
 - (void) shade;
 - (void) putWindowBackgroundWithPixmap:(xcb_pixmap_t)aPixmap;
 - (void) refreshBorder;
-- (void) generateWindowIcons;
 - (BOOL) updatePid;
 - (BOOL) updateLeaderWindow;
 

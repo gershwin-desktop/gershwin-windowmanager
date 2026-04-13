@@ -12,10 +12,8 @@
 #import "XCBSelection.h"
 #import "XCBTitleBar.h"
 #import "Transformers.h"
-#import "CairoDrawer.h"
 #import "ICCCMService.h"
 #import "XCBRegion.h"
-#import "CairoSurfacesSet.h"
 #import <xcb/xcb_aux.h>
 #import <enums/EIcccm.h>
 #import "TitleBarSettingsService.h"
@@ -475,21 +473,6 @@ static XCBConnection *sharedInstance;
     XCBWindow *window = [self windowForXCBId:anEvent->window];
     NSLog(@"[%@] The window %u is mapped!", NSStringFromClass([self class]), [window window]);
     [window setIsMapped:YES];
-
-    /*** FIXME: This code is just for testing ***/
-    /*if ([window isKindOfClass:[XCBTitleBar class]])
-    {
-        XCBTitleBar *titleBar = (XCBTitleBar*)window;
-        CairoDrawer *cairoDrawer = [[CairoDrawer alloc] initWithConnection:self window:titleBar];
-        [cairoDrawer drawContent];
-    }*/
-
-    /*** use this for slower machines?**/
-
-    /*if ([window pixmap] == 0 && [window isKindOfClass:[XCBWindow class]] &&
-        [[window parentWindow] isKindOfClass:[XCBFrame class]] &&
-        [window parentWindow] != [self rootWindowForScreenNumber:0])
-        [NSThread detachNewThreadSelector:@selector(createPixmapDelayed) toTarget:window withObject:nil];*/
 
     window = nil;
 }
@@ -1171,7 +1154,6 @@ static XCBConnection *sharedInstance;
             {
                 NSLog(@"Motif undecorated window: %d", [window window]);
                 free(motifHints);
-                [window generateWindowIcons];
                 XCBGeometryReply *geometry = [window geometries];
                 [window setWindowRect:[geometry rect]];  
                 [window setDecorated:NO];
@@ -1198,10 +1180,8 @@ static XCBConnection *sharedInstance;
         {
             /*** while here we are for the other apps class ***/
             
-            [window generateWindowIcons];
             [window onScreen];
             [window updateAttributes];
-            //[window drawIcons];
         }
 
         [window updateRectsFromGeometries];

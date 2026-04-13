@@ -15,7 +15,6 @@ To install WindowManager, you need XCBKit installed on your system.
 ### XCBKit Dependencies
 - libxcb
 - xcb-fixes
-- libcairo
 - xcb-icccm
 - gnustep-base
 

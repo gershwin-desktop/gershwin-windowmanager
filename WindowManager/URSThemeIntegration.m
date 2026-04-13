@@ -723,7 +723,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
         [titlebarImage unlockFocus];
 
-        // Convert NSImage to Cairo surface and apply to titlebar
+        // Convert NSImage to pixel buffer and apply to titlebar
         BOOL success = [self transferImage:titlebarImage toTitlebar:titlebar];
 
         if (success) {
@@ -919,7 +919,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         if (dimmedPixels) {
             memcpy(dimmedPixels, bitmapData, bufSize);
 
-            // Apply dimming in premultiplied Cairo ARGB32 space.
+            // Apply dimming in premultiplied ARGB32 space.
             // Equivalent to NSCompositeSourceAtop overlay of (0.5, 0.5, 0.5, 0.35):
             //   Cp' = Cp * 0.65 + 45 * (A/255)
             for (int dy = 0; dy < height; dy++) {
@@ -986,40 +986,6 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 
     return YES;
-}
-
-#pragma mark - GSTheme Method Swizzling Implementations
-
-// These methods replace XCBTitleBar's drawing methods
-- (void)gstheme_drawTitleBarComponentsPixmaps {
-    // Replace XCBTitleBar's Cairo drawing with GSTheme
-    NSDebugLog(@"GSTheme: Replacing drawTitleBarComponentsPixmaps with GSTheme rendering");
-
-    XCBTitleBar *titlebar = (XCBTitleBar*)self;
-    [URSThemeIntegration renderGSThemeTitlebar:titlebar
-                                         title:titlebar.windowTitle
-                                        active:YES];
-}
-
-- (void)gstheme_drawTitleBarComponents {
-    // Replace XCBTitleBar's Cairo drawing with GSTheme
-    NSDebugLog(@"GSTheme: Replacing drawTitleBarComponents with GSTheme rendering");
-
-    XCBTitleBar *titlebar = (XCBTitleBar*)self;
-    [URSThemeIntegration renderGSThemeTitlebar:titlebar
-                                         title:titlebar.windowTitle
-                                        active:YES];
-}
-
-- (void)gstheme_drawTitleBarForColor:(TitleBarColor)aColor {
-    // Replace XCBTitleBar's Cairo drawing with GSTheme
-    NSDebugLog(@"GSTheme: Replacing drawTitleBarForColor: with GSTheme rendering");
-
-    XCBTitleBar *titlebar = (XCBTitleBar*)self;
-    BOOL isActive = (aColor == TitleBarUpColor);
-    [URSThemeIntegration renderGSThemeTitlebar:titlebar
-                                         title:titlebar.windowTitle
-                                        active:isActive];
 }
 
 + (BOOL)renderGSThemeToWindow:(XCBWindow*)window
@@ -1543,10 +1509,10 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     [defaults synchronize];
 
     if (enabled) {
-        NSLog(@"GSTheme integration enabled - XCBKit will skip Cairo button drawing");
+        NSLog(@"GSTheme integration enabled - XCBKit will skip legacy button drawing");
         // Don't call refreshAllTitlebars here - let the periodic timer handle it
     } else {
-        NSLog(@"GSTheme integration disabled - falling back to Cairo rendering");
+        NSLog(@"GSTheme integration disabled - falling back to default titlebar rendering");
     }
 }
 
@@ -1554,11 +1520,6 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-}
-
-+ (void)disableXCBTitleBarDrawing:(XCBTitleBar*)titlebar {
-    // This method was declared but not used in our independent implementation
-    NSLog(@"URSThemeIntegration: disableXCBTitleBarDrawing called (not needed for independent system)");
 }
 
 @end

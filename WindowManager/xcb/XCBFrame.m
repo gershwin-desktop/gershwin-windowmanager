@@ -10,7 +10,6 @@
 #import "Transformers.h"
 #import "ICCCMService.h"
 #import "TitleBarSettingsService.h"
-#import "CairoDrawer.h"
 #import "XCBTypes.h"
 #import <AppKit/NSScroller.h>
 #import <GNUstepGUI/GSTheme.h>
@@ -360,12 +359,12 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     [titleBar updateAttributes];
     [titleBar setIsMapped:YES];
     
-    // OPTIMIZATION: Only create pixmaps - skip Cairo drawing if GSTheme will override
+    // OPTIMIZATION: Only create pixmaps - skip legacy drawing if GSTheme will override
     // GSTheme integration in URSHybridEventHandler will render the titlebar contents
     // Creating pixmaps is still needed as GSTheme renders to them
     [titleBar createPixmap];
     
-    // OPTIMIZATION: Skip button generation and Cairo drawing when GSTheme is active
+    // OPTIMIZATION: Skip button generation and legacy drawing when GSTheme is active
     // These operations are expensive and get completely overwritten by GSTheme
     if (![titleBar isGSThemeActive]) {
         [titleBar generateButtons];
@@ -883,7 +882,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     // In NON-compositor mode only: apply XShape to titlebar.
-    // In compositor mode, URSThemeIntegration.m handles rounded corners entirely via Cairo ARGB alpha.
+    // In compositor mode, URSThemeIntegration.m handles rounded corners via ARGB alpha blending.
     // XShape in compositor mode causes the initial-map sharp-corners issue and is not needed.
     if (topRadius > 0 && !compositorActive) {
         XCBTitleBar *titleBar = (XCBTitleBar *)[self childWindowForKey:TitleBar];

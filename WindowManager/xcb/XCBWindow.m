@@ -397,9 +397,6 @@
                   windowRect.size.width,
                   windowRect.size.height);*/
 
-    /*CairoDrawer *drawer = [[CairoDrawer alloc] initWithConnection:connection window:self];
-     * [drawer drawContent];*/
-
 }
 
 - (void) clearArea:(XCBRect)aRect generatesExposure:(BOOL)aValue
@@ -432,17 +429,6 @@
                   aRect.size.height);
 }
 
-- (void)createPixmapDelayed
-{
-    sleep(1); // 1 second
-    [self createPixmap];
-}
-
-- (void) cairoPreview
-{
-    // Legacy method — no-op.
-}
-
 - (XCBScreen*) onScreen
 {
     NSUInteger size = [[connection screens] count];
@@ -466,38 +452,6 @@
     queryTreeReply = nil;
     rootWindow = nil;
     return screen;
-}
-
-- (void)updatePixmap
-{
-    if (pixmap == 0)
-    {
-        NSLog(@"Pixmap not allocated");
-        return;
-    }
-
-    xcb_rectangle_t expose_rectangle = FnFromXCBRectToXcbRectangle(windowRect);
-
-    xcb_rectangle_t rectangles[] = {expose_rectangle};
-
-    xcb_poly_fill_rectangle([connection connection], pixmap, graphicContextId, 1, rectangles);
-    xcb_copy_area([connection connection],
-                  window,
-                  pixmap,
-                  graphicContextId,
-                  0,
-                  0,
-                  0,
-                  0,
-                  windowRect.size.width,
-                  windowRect.size.height);
-
-    pixmapSize = XCBMakeSize(windowRect.size.width, windowRect.size.height);
-
-    /** just for test */
-    /*CairoDrawer *drawer = [[CairoDrawer alloc] initWithConnection:connection window:self];
-
-    [drawer drawContent];*/
 }
 
 - (void)destroyPixmap
@@ -750,54 +704,6 @@
     /*** set iconic hints? or normal if not iconized hints? ***/
 
     atomService = nil;
-}
-
-- (void)createMiniWindowAtPosition:(XCBPoint)position
-{
-    oldRect = windowRect;
-
-    XCBSize newSize = XCBMakeSize(50, 50); //misure di prova
-    XCBRect newRect = XCBMakeRect(position, newSize);
-
-    windowRect = newRect;
-
-    if ([self isKindOfClass:[XCBFrame class]]) //FIXME: ????
-    {
-        XCBFrame *frameWindow = (XCBFrame *) self;
-        XCBWindow *clientWindow = [frameWindow childWindowForKey:ClientWindow];
-        XCBTitleBar *titleBar = (XCBTitleBar *) [frameWindow childWindowForKey:TitleBar];
-
-        [clientWindow setOldRect:[clientWindow windowRect]];
-        [titleBar setOldRect:[titleBar windowRect]];
-
-        frameWindow = nil;
-        clientWindow = nil;
-        titleBar = nil;
-    }
-
-    uint16_t mask = XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT;
-    uint32_t valueList[4] = {position.x, position.y, newSize.width, newSize.height};
-
-    xcb_configure_window([connection connection], window, mask, &valueList);
-
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-    XCBAtomService *atomService = [ewmhService atomService];
-
-    xcb_atom_t state[1] = {[atomService atomFromCachedAtomsWithKey:[ewmhService EWMHWMStateHidden]]};
-
-    [ewmhService changePropertiesForWindow:self
-                                  withMode:XCB_PROP_MODE_REPLACE
-                              withProperty:[ewmhService EWMHWMState]
-                                  withType:XCB_ATOM_ATOM
-                                withFormat:32
-                            withDataLength:1
-                                  withData:state];
-
-
-    atomService = nil;
-    ewmhService = nil;
-
-    return;
 }
 
 - (void)restoreFromIconified
@@ -1222,11 +1128,6 @@
     originalRect = rect;
 }
 
-- (void) drawIcons
-{
-    // Legacy method — no-op.
-}
-
 - (XCBVisual*) visual
 {
     xcb_visualid_t visualId = [attributes visualId];
@@ -1293,26 +1194,12 @@
     [connection unmapWindow:self];
 }
 
-- (void)description
-{
-    NSLog(@"WINDOW DESCRIPTION:\nWindow id: %u.\nParent window id: %u.\nWindow rect: %@;\nOld Rect: %@;\nWindow class: %@",
-          window, [parentWindow window], FnFromXCBRectToString(windowRect), FnFromXCBRectToString(oldRect), NSStringFromClass([self class]));
-}
-
 - (void) putWindowBackgroundWithPixmap:(xcb_pixmap_t)aPixmap
 {
     uint32_t mask = XCB_CW_BACK_PIXMAP;
     uint32_t values[] = {aPixmap};
 
     [self changeAttributes:values withMask:mask checked:NO];
-}
-
-- (void)generateWindowIcons
-{
-    // Icon loading via _NET_WM_ICON is handled by URSWindowSwitcher.
-    // This legacy Cairo-based method is a no-op.
-    [self onScreen];
-    [self updateAttributes];
 }
 
 - (BOOL)updatePid

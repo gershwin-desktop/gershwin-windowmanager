@@ -959,12 +959,6 @@
     }
 }
 
-#pragma mark - Phase 1 Validation Methods
-
-
-
-
-
 #pragma mark - GSTheme Integration (NEW)
 
 - (void)handleWindowCreated:(XCBTitleBar*)titlebar {
@@ -983,8 +977,8 @@
                                                        active:YES]; // Assume new windows are active
 
     if (!success) {
-        NSLog(@"GSTheme rendering failed for titlebar, falling back to Cairo");
-        // XCBTitleBar will fall back to its default Cairo rendering
+        NSLog(@"GSTheme rendering failed for titlebar, falling back to default titlebar path");
+        // XCBTitleBar will fall back to its default titlebar rendering
     }
 }
 
@@ -1164,7 +1158,7 @@
         if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
             XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
 
-            // Apply ONLY GSTheme rendering (no Cairo/XCBKit drawing)
+            // Apply ONLY GSTheme rendering (no legacy/XCBKit drawing)
             BOOL success = [URSThemeIntegration renderGSThemeToWindow:frame
                                                                 frame:frame
                                                                 title:titlebar.windowTitle

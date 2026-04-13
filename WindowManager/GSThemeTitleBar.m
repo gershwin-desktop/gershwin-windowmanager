@@ -3,7 +3,7 @@
 //  uroswm - GSTheme-based TitleBar Replacement
 //
 //  Implementation of GSTheme-based titlebar that completely replaces
-//  XCBTitleBar's Cairo rendering with authentic AppKit decorations.
+//  XCBTitleBar's legacy rendering with authentic AppKit decorations.
 //
 
 #import "GSThemeTitleBar.h"
