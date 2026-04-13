@@ -9,7 +9,7 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 #import <GNUstepGUI/GSTheme.h>
-#import <XCBKit/XCBTitleBar.h>
+#import "XCBTitleBar.h"
 
 // Button types for hit detection
 typedef NS_ENUM(NSInteger, GSThemeTitleBarButton) {

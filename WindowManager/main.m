@@ -13,8 +13,9 @@
 #import "URSHybridEventHandler.h"
 #import "UROSWMApplication.h"
 #import "URSThemeIntegration.h"
-#import <XCBKit/utils/XCBShape.h>
-#import <XCBKit/services/TitleBarSettingsService.h>
+#import "XCBTypes.h"
+#import "TitleBarSettingsService.h"
+#import "URSProfiler.h"
 #import <signal.h>
 #import <string.h>
 
@@ -123,6 +124,9 @@ int main(int argc, const char * argv[])
         
         // Setup signal handlers for clean shutdown
         setupSignalHandlers();
+
+        // Install profiling signal handler (SIGUSR1 dumps stats)
+        ursProfileInstallSignalHandler();
 
         // Start NSApplication main loop (replaces blocking XCB event loop)
         [app run];

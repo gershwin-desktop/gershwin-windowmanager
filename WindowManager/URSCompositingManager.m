@@ -11,7 +11,8 @@
 
 #define _DEFAULT_SOURCE  // For usleep
 #import "URSCompositingManager.h"
-#import <XCBKit/XCBScreen.h>
+#import "URSProfiler.h"
+#import "XCBScreen.h"
 #import <xcb/xcb.h>
 #import <xcb/composite.h>
 #import <xcb/xfixes.h>
@@ -45,6 +46,11 @@
 // OPTIMIZATION: Lazy picture creation - defer until first paint
 @property (assign, nonatomic) BOOL pictureValid;
 @property (assign, nonatomic) BOOL needsPictureCreation;
+// Track the window dimensions at the time the current picture was created.
+// Used during live resize to apply a scale transform so old content fills
+// the new (larger or smaller) frame instead of leaving a grey gap.
+@property (assign, nonatomic) uint16_t pictureWidth;
+@property (assign, nonatomic) uint16_t pictureHeight;
 // Cached geometry
 @property (assign, nonatomic) int16_t x;
 @property (assign, nonatomic) int16_t y;
@@ -88,6 +94,8 @@
         // OPTIMIZATION: Lazy picture creation
         _pictureValid = NO;
         _needsPictureCreation = YES;
+        _pictureWidth = 0;
+        _pictureHeight = 0;
         _shadowPicture = XCB_NONE;
         _shadowPixmap = XCB_NONE;
         _shadowOffsetX = 0;
@@ -891,8 +899,6 @@
     
     // OPTIMIZATION: Mark stacking order dirty (will be rebuilt on next paint)
     self.stackingOrderDirty = YES;
-
-    NSLog(@"[CompositingManager] Added window %u (parent: %u) pos={%d,%d} size={%hu,%hu} viewable=%d", windowId, cw.parentWindowId, cw.x, cw.y, cw.width, cw.height, (int)cw.viewable);
     
     free(attr);
     free(geom);
@@ -1196,26 +1202,46 @@
     
     // If size changed, we need to recreate the pixmap and picture
     if (cw.width != width || cw.height != height) {
-        if (cw.nameWindowPixmap != XCB_NONE) {
-            xcb_free_pixmap(conn, cw.nameWindowPixmap);
-            cw.nameWindowPixmap = XCB_NONE;
+        if ([self.connection resizeState]) {
+            // During live resize: retain the existing picture so the compositor can
+            // scale old content to the new frame dimensions. This eliminates the grey
+            // area that appeared when the picture was freed and a new one was captured
+            // before the client had repainted its content.
+            // The stale picture/pixmap dimensions are tracked in pictureWidth/pictureHeight
+            // so paintWindow can apply the correct scale transform.
+            // Shadow is regenerated at the end of resize via handleResizeComplete → updateWindow.
+            if (cw.shadowPicture != XCB_NONE) {
+                xcb_render_free_picture(conn, cw.shadowPicture);
+                cw.shadowPicture = XCB_NONE;
+            }
+            if (cw.shadowPixmap != XCB_NONE) {
+                xcb_free_pixmap(conn, cw.shadowPixmap);
+                cw.shadowPixmap = XCB_NONE;
+            }
+            // Keep using the existing picture (marked valid) — paintWindow will
+            // detect the size mismatch via pictureWidth/pictureHeight and scale.
+        } else {
+            // Outside resize (e.g., programmatic resize): free and recreate normally.
+            if (cw.nameWindowPixmap != XCB_NONE) {
+                xcb_free_pixmap(conn, cw.nameWindowPixmap);
+                cw.nameWindowPixmap = XCB_NONE;
+            }
+            if (cw.picture != XCB_NONE) {
+                xcb_render_free_picture(conn, cw.picture);
+                cw.picture = XCB_NONE;
+            }
+            if (cw.shadowPicture != XCB_NONE) {
+                xcb_render_free_picture(conn, cw.shadowPicture);
+                cw.shadowPicture = XCB_NONE;
+            }
+            if (cw.shadowPixmap != XCB_NONE) {
+                xcb_free_pixmap(conn, cw.shadowPixmap);
+                cw.shadowPixmap = XCB_NONE;
+            }
+            // Reset lazy picture flags so picture is recreated
+            cw.pictureValid = NO;
+            cw.needsPictureCreation = YES;
         }
-        if (cw.picture != XCB_NONE) {
-            xcb_render_free_picture(conn, cw.picture);
-            cw.picture = XCB_NONE;
-        }
-        // Recreate shadow with new size
-        if (cw.shadowPicture != XCB_NONE) {
-            xcb_render_free_picture(conn, cw.shadowPicture);
-            cw.shadowPicture = XCB_NONE;
-        }
-        if (cw.shadowPixmap != XCB_NONE) {
-            xcb_free_pixmap(conn, cw.shadowPixmap);
-            cw.shadowPixmap = XCB_NONE;
-        }
-        // OPTIMIZATION: Reset lazy picture flags so picture is recreated
-        cw.pictureValid = NO;
-        cw.needsPictureCreation = YES;
     }
     
     // If position or size changed, invalidate regions
@@ -1308,7 +1334,9 @@
 #pragma mark - Damage Handling
 
 - (void)handleDamageNotify:(xcb_window_t)windowId {
+    URS_PROFILE_BEGIN(damageNotify);
     if (!self.compositingActive) {
+        URS_PROFILE_END(damageNotify);
         return;
     }
 
@@ -1326,6 +1354,7 @@
     if (!cw || !cw.damage) {
         // Unknown window damaged; force full screen repaint to avoid artifacts
         [self damageScreen];
+        URS_PROFILE_END(damageNotify);
         return;
     }
 
@@ -1333,6 +1362,7 @@
     [self updateAbsolutePositionForWindow:cw];
 
     [self repairWindow:cw];
+    URS_PROFILE_END(damageNotify);
 }
 
 - (void)handleExposeEvent:(xcb_window_t)windowId {
@@ -1555,14 +1585,17 @@
 }
 
 - (void)performRepair {
+    URS_PROFILE_BEGIN(performRepair);
     if (!self.compositingActive) {
         self.repairScheduled = NO;
+        URS_PROFILE_END(performRepair);
         return;
     }
     
     // Check if there's damage to paint
     if (self.allDamage == XCB_NONE) {
         self.repairScheduled = NO;
+        URS_PROFILE_END(performRepair);
         return;
     }
     
@@ -1573,6 +1606,7 @@
     [self paintAll:damage];
     
     xcb_xfixes_destroy_region([self.connection connection], damage);
+    URS_PROFILE_END(performRepair);
 }
 
 - (void)performRepairNow {
@@ -1856,6 +1890,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 }
 
 - (void)paintAll:(xcb_xfixes_region_t)region {
+    URS_PROFILE_BEGIN(paintAll);
     xcb_connection_t *conn = [self.connection connection];
     
     if (self.rootBuffer == XCB_NONE) {
@@ -1932,6 +1967,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     [self.connection flush];
     
     // NSLog(@"[CompositingManager] paintAll: painted %lu windows", (unsigned long)num_windows);
+    URS_PROFILE_END(paintAll);
 }
 
 // Gaussian function for shadow blur
@@ -2122,6 +2158,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 }
 
 - (void)createShadowForWindow:(URSCompositeWindow *)cw {
+    URS_PROFILE_BEGIN(shadowCreate);
     xcb_connection_t *conn = [self.connection connection];
     
     if (self.argbFormat == XCB_NONE || !self.gaussianMap || cw.overrideRedirect) {
@@ -2193,13 +2230,14 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     
     // DO NOT free the pixmap - the Picture needs it to stay alive
     // It will be freed when the window is destroyed
+    URS_PROFILE_END(shadowCreate);
 }
 
 - (void)paintWindow:(URSCompositeWindow *)cw 
                 atX:(int16_t)screenX 
                 atY:(int16_t)screenY 
      withClipRegion:(xcb_xfixes_region_t)clipRegion {
-    
+    URS_PROFILE_BEGIN(paintWindow);
     xcb_connection_t *conn = [self.connection connection];
     BOOL animating = cw.animating;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -2303,15 +2341,36 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         if (cw.picture != XCB_NONE) {
             cw.pictureValid = YES;
             cw.needsPictureCreation = NO;
+            // Record the window dimensions at capture time so we can detect
+            // a size mismatch and apply a scale transform during live resize.
+            cw.pictureWidth  = cw.width  + 2 * cw.borderWidth;
+            cw.pictureHeight = cw.height + 2 * cw.borderWidth;
         }
     }
-    
+
     if (cw.picture != XCB_NONE) {
         int16_t destXInt = (int16_t)llround(destX);
         int16_t destYInt = (int16_t)llround(destY);
         uint16_t destWInt = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
         uint16_t destHInt = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
         xcb_render_picture_t alphaMask = XCB_NONE;
+
+        // During live resize the picture may have been captured at a different size
+        // than the current frame geometry.  Apply a scale transform so the old content
+        // stretches to fill the new dimensions, eliminating grey gaps.
+        BOOL appliedResizeScale = NO;
+        if ([self.connection resizeState] && !animating &&
+            cw.pictureWidth > 0 && cw.pictureHeight > 0 &&
+            (cw.pictureWidth != destWInt || cw.pictureHeight != destHInt))
+        {
+            double sx = (double)cw.pictureWidth  / (double)destWInt;
+            double sy = (double)cw.pictureHeight / (double)destHInt;
+            xcb_render_transform_t scaleTransform = URSIdentityTransform();
+            scaleTransform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
+            scaleTransform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
+            xcb_render_set_picture_transform(conn, cw.picture, scaleTransform);
+            appliedResizeScale = YES;
+        }
 
         if (animating) {
             double srcW = fmax(1.0, (double)cw.width + (2.0 * (double)cw.borderWidth));
@@ -2350,6 +2409,11 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         if (animating) {
             xcb_render_transform_t reset = URSIdentityTransform();
             xcb_render_set_picture_transform(conn, cw.picture, reset);
+        } else if (appliedResizeScale) {
+            // Reset the scale transform applied for live resize so it doesn't
+            // persist to the next paint cycle.
+            xcb_render_transform_t reset = URSIdentityTransform();
+            xcb_render_set_picture_transform(conn, cw.picture, reset);
         }
 
         if (alphaMask != XCB_NONE) {
@@ -2357,6 +2421,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
     }
     // No need to recursively paint children - IncludeInferiors handles that
+    URS_PROFILE_END(paintWindow);
 }
 
 // Note: Child window painting is handled automatically by IncludeInferiors

@@ -8,8 +8,8 @@
 //
 
 #import <Foundation/Foundation.h>
-#import <XCBKit/XCBConnection.h>
-#import <XCBKit/utils/XCBShape.h>
+#import "XCBConnection.h"
+#import "XCBTypes.h"
 
 @interface URSCompositingManager : NSObject
 

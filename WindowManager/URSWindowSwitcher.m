@@ -7,7 +7,7 @@
 //
 
 #import "URSWindowSwitcher.h"
-#import <XCBKit/utils/XCBShape.h>
+#import "XCBTypes.h"
 
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
@@ -16,14 +16,12 @@
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
 @end
-#import <XCBKit/XCBTitleBar.h>
-#import <XCBKit/XCBScreen.h>
-#import <XCBKit/services/ICCCMService.h>
-#import <XCBKit/services/EWMHService.h>
-#import <XCBKit/utils/CairoSurfacesSet.h>
+#import "XCBTitleBar.h"
+#import "XCBScreen.h"
+#import "ICCCMService.h"
+#import "EWMHService.h"
 #import <xcb/xcb.h>
 #import <xcb/xcb_icccm.h>
-#import <cairo/cairo.h>
 #import "URSThemeIntegration.h"
 
 #pragma mark - URSWindowEntry Implementation
@@ -515,17 +513,10 @@
     }
 }
 
-- (NSImage *)convertCairoSurfaceToNSImage:(cairo_surface_t *)surface {
-    if (!surface) return nil;
-    
-    int width = cairo_image_surface_get_width(surface);
-    int height = cairo_image_surface_get_height(surface);
-    int stride = cairo_image_surface_get_stride(surface);
-    unsigned char *data = cairo_image_surface_get_data(surface);
-    
-    if (!data || width <= 0 || height <= 0) return nil;
-    
-    // Create bitmap image rep from cairo surface data (BGRA format)
+- (NSImage *)convertNetWmIconData:(uint32_t *)iconData width:(int)width height:(int)height {
+    if (!iconData || width <= 0 || height <= 0) return nil;
+
+    // _NET_WM_ICON pixels are ARGB packed as 32-bit cardinals: A<<24|R<<16|G<<8|B
     NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc]
         initWithBitmapDataPlanes:NULL
         pixelsWide:width
@@ -537,30 +528,23 @@
         colorSpaceName:NSDeviceRGBColorSpace
         bytesPerRow:width * 4
         bitsPerPixel:32];
-    
+
     if (!bitmap) return nil;
-    
-    unsigned char *bitmapData = [bitmap bitmapData];
-    
-    // Convert from Cairo BGRA to NSBitmapImageRep RGBA
-    for (int y = 0; y < height; y++) {
-        uint32_t *srcRow = (uint32_t *)(data + (y * stride));
-        uint32_t *dstRow = (uint32_t *)(bitmapData + (y * width * 4));
-        
-        for (int x = 0; x < width; x++) {
-            uint32_t pixel = srcRow[x];
-            // Cairo BGRA (little-endian: A R G B) -> RGBA (little-endian: A B G R)
-            uint32_t b = (pixel >> 0) & 0xFF;
-            uint32_t g = (pixel >> 8) & 0xFF;
-            uint32_t r = (pixel >> 16) & 0xFF;
-            uint32_t a = (pixel >> 24) & 0xFF;
-            dstRow[x] = (a << 24) | (b << 16) | (g << 8) | r;
-        }
+
+    unsigned char *dst = [bitmap bitmapData];
+    for (int i = 0; i < width * height; i++) {
+        uint32_t pixel = iconData[i];
+        uint32_t a = (pixel >> 24) & 0xFF;
+        uint32_t r = (pixel >> 16) & 0xFF;
+        uint32_t g = (pixel >>  8) & 0xFF;
+        uint32_t b = (pixel >>  0) & 0xFF;
+        // NSBitmapImageRep RGBA layout (bytes: r, g, b, a)
+        uint32_t *dstPixel = (uint32_t *)(dst + i * 4);
+        *dstPixel = (a << 24) | (b << 16) | (g << 8) | r;
     }
-    
+
     NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(width, height)];
     [image addRepresentation:bitmap];
-    
     return image;
 }
 
@@ -662,40 +646,40 @@
         // FALLBACK 1: Try to get icon from X11 _NET_WM_ICON property
         EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
         xcb_get_property_reply_t *reply = [ewmhService netWmIconFromWindow:clientWindow];
-        
+
         if (reply) {
-            CairoSurfacesSet *cairoSet = [[CairoSurfacesSet alloc] initWithConnection:self.connection];
-            [cairoSet buildSetFromReply:reply];
-            NSArray *surfaces = [cairoSet cairoSurfaces];
-            
-            if (surfaces && [surfaces count] > 0) {
-                // Find the best icon size (closest to 48x48)
-                cairo_surface_t *bestSurface = NULL;
-                int bestDiff = INT_MAX;
-                
-                for (NSValue *surfaceValue in surfaces) {
-                    cairo_surface_t *surface = [surfaceValue pointerValue];
-                    int width = cairo_image_surface_get_width(surface);
-                    int height = cairo_image_surface_get_height(surface);
-                    int diff = abs(width - 48) + abs(height - 48);
-                    
+            // _NET_WM_ICON format: [width, height, ARGB32_pixels...] repeated per size
+            if (reply->type == XCB_ATOM_CARDINAL && reply->format == 32 && reply->length >= 2) {
+                uint32_t *data = (uint32_t *)xcb_get_property_value(reply);
+                uint32_t *end  = data + reply->length;
+
+                // Find the icon size closest to 48x48
+                uint32_t *bestData = NULL;
+                int bestWidth = 0, bestHeight = 0, bestDiff = INT_MAX;
+                uint32_t *p = data;
+                while (end - p >= 2) {
+                    uint32_t w = p[0], h = p[1];
+                    uint64_t npix = (uint64_t)w * h;
+                    if (w < 1 || h < 1 || npix > (uint64_t)(end - p) - 2) break;
+                    int diff = abs((int)w - 48) + abs((int)h - 48);
                     if (diff < bestDiff) {
                         bestDiff = diff;
-                        bestSurface = surface;
+                        bestWidth = (int)w;
+                        bestHeight = (int)h;
+                        bestData = p + 2;
                     }
+                    p += 2 + npix;
                 }
-                
-                if (bestSurface) {
-                    NSImage *icon = [self convertCairoSurfaceToNSImage:bestSurface];
+
+                if (bestData) {
+                    NSImage *icon = [self convertNetWmIconData:bestData width:bestWidth height:bestHeight];
                     if (icon) {
-                        // Resize to 48x48
                         [icon setSize:NSMakeSize(48.0, 48.0)];
                         free(reply);
                         return icon;
                     }
                 }
             }
-            
             free(reply);
         }
         

@@ -6,20 +6,16 @@
 //
 
 #import "URSThemeIntegration.h"
+#import "URSProfiler.h"
 #import "URSRenderingContext.h"
 #import "URSCompositingManager.h"
-#import <XCBKit/XCBConnection.h>
-#import <XCBKit/XCBFrame.h>
-#import <XCBKit/XCBScreen.h>
-#import <cairo/cairo.h>
-#import <cairo/cairo-xcb.h>
+#import "XCBConnection.h"
+#import "XCBFrame.h"
+#import "XCBScreen.h"
 #import <objc/runtime.h>
 #import <math.h>
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 #import "GSThemeTitleBar.h"
-#import <XCBKit/services/ICCCMService.h>
+#import "ICCCMService.h"
 
 // Category to expose private GSTheme methods for theme-agnostic titlebar rendering
 // These methods exist in GSTheme but aren't in the public header
@@ -520,7 +516,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
             // Resize the X11 titlebar window if it doesn't match the frame width
             if (xcbRect.size.width != frameRect.size.width) {
-                NSLog(@"Resizing titlebar X11 window from %d to %d to match frame",
+                NSDebugLog(@"Resizing titlebar X11 window from %d to %d to match frame",
                       xcbRect.size.width, frameRect.size.width);
 
                 uint32_t values[] = {frameRect.size.width};
@@ -555,7 +551,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             // Use NSCompositeCopy to truly clear to transparent (NSRectFill composites over existing content)
             [[NSColor clearColor] set];
             NSRectFillUsingOperation(NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height), NSCompositeCopy);
-            NSLog(@"[URSThemeIntegration] Using transparent background for compositor alpha support");
+            NSDebugLog(@"[URSThemeIntegration] Using transparent background for compositor alpha support");
         } else {
             [[NSColor lightGrayColor] set];
             NSRectFill(NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height));
@@ -578,7 +574,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             BOOL supportsDelete = [icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow];
 
             if (![clientWindow canClose] || !supportsDelete) {
-                NSLog(@"GSTheme: Client %u reports canClose=NO or lacks WM_DELETE_WINDOW - omitting control buttons", [clientWindow window]);
+                NSDebugLog(@"GSTheme: Client %u reports canClose=NO or lacks WM_DELETE_WINDOW - omitting control buttons", [clientWindow window]);
             } else {
                 styleMask |= NSClosableWindowMask;
 
@@ -600,7 +596,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
         GSThemeControlState state = isActive ? GSThemeNormalState : GSThemeSelectedState;
 
-        NSLog(@"Drawing GSTheme titlebar with styleMask: 0x%lx, state: %d", (unsigned long)styleMask, (int)state);
+        NSDebugLog(@"Drawing GSTheme titlebar with styleMask: 0x%lx, state: %d", (unsigned long)styleMask, (int)state);
 
         // Draw the window titlebar using GSTheme
         [theme drawWindowBorder:titlebarRect
@@ -627,7 +623,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                                                   hovered:NO];
                 NSRect iconRect = NSInsetRect(closeFrame, ICON_INSET, ICON_INSET);
                 [URSThemeIntegration drawCloseIconInRect:iconRect withColor:iconColor];
-                NSLog(@"Drew close button at: %@", NSStringFromRect(closeFrame));
+                NSDebugLog(@"Drew close button at: %@", NSStringFromRect(closeFrame));
             }
 
             // Side-by-side buttons on right: Minimize (-) inner, Maximize (+) outer
@@ -654,7 +650,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                                                   hovered:NO];
                 NSRect miniIconRect = NSInsetRect(miniFrame, ICON_INSET, ICON_INSET);
                 [URSThemeIntegration drawMinimizeIconInRect:miniIconRect withColor:iconColor];
-                NSLog(@"Drew miniaturize button at: %@", NSStringFromRect(miniFrame));
+                NSDebugLog(@"Drew miniaturize button at: %@", NSStringFromRect(miniFrame));
             }
 
             if (hasMaximize) {
@@ -670,7 +666,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                                                   hovered:NO];
                 NSRect zoomIconRect = NSInsetRect(zoomFrame, ICON_INSET, ICON_INSET);
                 [URSThemeIntegration drawMaximizeIconInRect:zoomIconRect withColor:iconColor];
-                NSLog(@"Drew zoom button at: %@", NSStringFromRect(zoomFrame));
+                NSDebugLog(@"Drew zoom button at: %@", NSStringFromRect(zoomFrame));
             }
 
             // Top highlight across title area (connecting button highlights)
@@ -731,7 +727,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         BOOL success = [self transferImage:titlebarImage toTitlebar:titlebar];
 
         if (success) {
-            NSLog(@"GSTheme titlebar rendered successfully for: %@", title);
+            NSDebugLog(@"GSTheme titlebar rendered successfully for: %@", title);
         } else {
             NSLog(@"Failed to transfer GSTheme titlebar for: %@", title);
         }
@@ -782,8 +778,13 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 
     if (!bitmap) {
-        // Create bitmap from image data
+        // GNUstep: Use TIFF encode/decode which is more reliable than direct
+        // bitmap context rendering (graphicsContextWithBitmapImageRep may not work)
         NSData *imageData = [image TIFFRepresentation];
+        if (!imageData) {
+            NSLog(@"Failed to create TIFF representation for titlebar transfer");
+            return NO;
+        }
         bitmap = [NSBitmapImageRep imageRepWithData:imageData];
     }
 
@@ -792,127 +793,44 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         return NO;
     }
 
+    // Validate bitmap data is actually allocated
+    unsigned char *bitmapData = [bitmap bitmapData];
+    if (!bitmapData) {
+        NSLog(@"Failed to get bitmap data pointer for titlebar transfer");
+        return NO;
+    }
+
     // Check if compositor is active for ARGB visual support
     BOOL compositorActive = [[URSCompositingManager sharedManager] compositingActive];
-    xcb_visualtype_t *visualType = titlebar.visual.visualType;
 
-    // Set up ARGB visual for Cairo if compositor is active
-    // Note: The titlebar window and pixmap are now created with 32-bit depth in XCBFrame.m
-    // We just need to get the correct visual type for Cairo surface creation
     if (compositorActive) {
         XCBScreen *screen = [titlebar onScreen];
         if (!screen) screen = [titlebar screen];
 
-        if (screen) {
-            // Check if titlebar already has ARGB visual configured (set by XCBFrame)
-            xcb_visualid_t argbVisualId = [titlebar argbVisualId];
+        if (screen && [titlebar argbVisualId] == 0) {
+            xcb_visualid_t argbVisualId = [self findARGBVisualForScreen:screen connection:titlebar.connection];
 
-            // If not already configured, set it up (fallback for windows created before this change)
-            if (argbVisualId == 0) {
-                argbVisualId = [self findARGBVisualForScreen:screen connection:titlebar.connection];
-
-                if (argbVisualId != 0) {
-                    // Set ARGB visual on titlebar for 32-bit pixmap support
-                    [titlebar setUse32BitDepth:YES];
-                    [titlebar setArgbVisualId:argbVisualId];
-
-                    // Recreate pixmap with 32-bit depth
-                    [titlebar createPixmap];
-                    NSLog(@"[URSThemeIntegration] Created 32-bit pixmap for titlebar (fallback path)");
-                }
-            }
-
-            // Get the ARGB visual type for Cairo surface
             if (argbVisualId != 0) {
-                xcb_visualtype_t *argbVisualType = [self findVisualTypeForId:argbVisualId screen:screen];
-                if (argbVisualType) {
-                    visualType = argbVisualType;
-                    NSLog(@"[URSThemeIntegration] Using 32-bit ARGB visual for Cairo surface (id: 0x%x)", argbVisualId);
-                }
+                [titlebar setUse32BitDepth:YES];
+                [titlebar setArgbVisualId:argbVisualId];
+                [titlebar createPixmap];
+                NSDebugLog(@"[URSThemeIntegration] Created 32-bit pixmap for titlebar (fallback path)");
             }
         }
     }
 
-    NSLog(@"Creating Cairo surface for titlebar pixmap: %u, size: %dx%d, compositor: %d",
-          titlebar.pixmap, (int)image.size.width, (int)image.size.height, compositorActive);
-
-    // DEBUG: Check bitmap format and sample pixel data
-    NSLog(@"Bitmap format: %ldx%ld, bitsPerPixel=%ld, bytesPerRow=%ld, colorSpace=%@, format=%u",
-          [bitmap pixelsWide], [bitmap pixelsHigh], [bitmap bitsPerPixel],
-          [bitmap bytesPerRow], [bitmap colorSpaceName], (unsigned int)[bitmap bitmapFormat]);
-
-    // Sample a few pixels to see actual byte values
-    unsigned char *pixels = [bitmap bitmapData];
-    if (pixels && [bitmap pixelsWide] >= 15 && [bitmap pixelsHigh] >= 8) {
-        int closeX = 18, closeY = 12;  // Should be red button area
-        int miniX = 37, miniY = 12;   // Should be yellow button area
-        int zoomX = 56, zoomY = 12;   // Should be green button area
-
-        int bytesPerPixel = [bitmap bitsPerPixel] / 8;
-
-        // Sample close button pixel (should be red)
-        int offset = (closeY * [bitmap bytesPerRow]) + (closeX * bytesPerPixel);
-        if (bytesPerPixel >= 4) {
-            NSLog(@"Close button pixel (%d,%d): [0]=%d [1]=%d [2]=%d [3]=%d",
-                  closeX, closeY, pixels[offset], pixels[offset+1], pixels[offset+2], pixels[offset+3]);
-        }
-
-        // Sample miniaturize button pixel (should be yellow)
-        offset = (miniY * [bitmap bytesPerRow]) + (miniX * bytesPerPixel);
-        if (bytesPerPixel >= 4) {
-            NSLog(@"Mini button pixel (%d,%d): [0]=%d [1]=%d [2]=%d [3]=%d",
-                  miniX, miniY, pixels[offset], pixels[offset+1], pixels[offset+2], pixels[offset+3]);
-        }
-
-        // Sample zoom button pixel (should be green)
-        offset = (zoomY * [bitmap bytesPerRow]) + (zoomX * bytesPerPixel);
-        if (bytesPerPixel >= 4) {
-            NSLog(@"Zoom button pixel (%d,%d): [0]=%d [1]=%d [2]=%d [3]=%d",
-                  zoomX, zoomY, pixels[offset], pixels[offset+1], pixels[offset+2], pixels[offset+3]);
-        }
-    }
-
-    // Create Cairo surface from XCB titlebar pixmap
-    // Use ARGB visual when compositor is active for alpha transparency
-    cairo_surface_t *x11Surface = cairo_xcb_surface_create(
-        [titlebar.connection connection],
-        titlebar.pixmap,
-        visualType,
-        (int)image.size.width,
-        (int)image.size.height
-    );
-
-    cairo_status_t surface_status = cairo_surface_status(x11Surface);
-    if (surface_status != CAIRO_STATUS_SUCCESS) {
-        NSLog(@"Failed to create Cairo X11 surface for titlebar: %s", cairo_status_to_string(surface_status));
-        cairo_surface_destroy(x11Surface);
-        return NO;
-    }
-
-    NSLog(@"Cairo X11 surface created successfully");
-
-    cairo_t *ctx = cairo_create(x11Surface);
-
-    // Create Cairo image surface from bitmap data
-    // Cairo ARGB32 expects pre-multiplied BGRA in memory (B, G, R, A bytes on little-endian)
-    unsigned char *bitmapPixels = [bitmap bitmapData];
+    // Convert bitmap pixels to premultiplied BGRA in memory for xcb_put_image (Z_PIXMAP).
     int width = [bitmap pixelsWide];
     int height = [bitmap pixelsHigh];
     int bytesPerRow = [bitmap bytesPerRow];
 
-    // Check bitmap format to determine correct conversion
-    // NSAlphaFirstBitmapFormat (1): Alpha is first byte (ARGB in memory)
-    // Otherwise: Alpha is last byte (RGBA in memory)
     NSBitmapFormat bitmapFormat = [bitmap bitmapFormat];
     BOOL alphaFirst = (bitmapFormat & NSAlphaFirstBitmapFormat) != 0;
 
-    NSLog(@"[URSThemeIntegration] Bitmap format: 0x%x, alphaFirst: %d", (unsigned)bitmapFormat, alphaFirst);
-
-    // Convert to Cairo ARGB32 format (BGRA in memory on little-endian)
-    int rowPixels = width;
+    // Convert to premultiplied BGRA: B | G<<8 | R<<16 | A<<24 on little-endian.
     for (int y = 0; y < height; y++) {
-        uint32_t *rowPtr = (uint32_t *)(bitmapPixels + (y * bytesPerRow));
-        for (int x = 0; x < rowPixels; x++) {
+        uint32_t *rowPtr = (uint32_t *)(bitmapData + (y * bytesPerRow));
+        for (int x = 0; x < width; x++) {
             uint32_t pixel = rowPtr[x];
             uint32_t r, g, b, a;
 
@@ -932,38 +850,19 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 a = (pixel >> 24) & 0xFF;
             }
 
-            // Pre-multiply RGB by alpha for Cairo ARGB32 format
-            // Cairo expects pre-multiplied alpha: R_out = R * (A / 255)
-            // This fixes transparent areas like clearColor (255,255,255,0) -> (0,0,0,0)
+            // Pre-multiply RGB by alpha.
             if (a < 255) {
                 r = (r * a) / 255;
                 g = (g * a) / 255;
                 b = (b * a) / 255;
             }
 
-            // Cairo ARGB32 on little-endian: B, G, R, A bytes = B | G<<8 | R<<16 | A<<24
+            // Premultiplied BGRA: B, G, R, A bytes = B | G<<8 | R<<16 | A<<24
             rowPtr[x] = b | (g << 8) | (r << 16) | (a << 24);
         }
     }
 
-    cairo_surface_t *imageSurface = cairo_image_surface_create_for_data(
-        bitmapPixels,
-        CAIRO_FORMAT_ARGB32,
-        width,
-        height,
-        bytesPerRow
-    );
-
-    if (cairo_surface_status(imageSurface) != CAIRO_STATUS_SUCCESS) {
-        NSLog(@"Failed to create Cairo image surface for titlebar transfer");
-        cairo_surface_destroy(imageSurface);
-        cairo_destroy(ctx);
-        cairo_surface_destroy(x11Surface);
-        return NO;
-    }
-
-    // Get corner radius from theme — mirrors the alt-tab NSBezierPath approach:
-    // clear corners to alpha=0 via Cairo rather than relying on XShape.
+    // Get corner radius — zero corner pixels for compositor transparency.
     CGFloat topR = 0;
     if (compositorActive) {
         GSTheme *theme = [GSTheme theme];
@@ -971,153 +870,109 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             topR = [theme titlebarCornerRadius];
     }
 
-    // Step 1: Clear entire surface to transparent (alpha=0 everywhere).
-    cairo_set_operator(ctx, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(ctx);
-
-    // Step 2: Clip to rounded-top-corners path so corner pixels remain transparent.
+    // Zero out corner pixels for rounded top corners directly in the pixel buffer.
     if (topR > 0) {
-        double r = (double)topR;
-        double w = (double)width;
-        double h = (double)height;
-        cairo_new_path(ctx);
-        cairo_move_to(ctx, 0, h);
-        cairo_line_to(ctx, 0, r);
-        cairo_arc(ctx, r, r, r, M_PI, -M_PI / 2.0);
-        cairo_line_to(ctx, w - r, 0);
-        cairo_arc(ctx, w - r, r, r, -M_PI / 2.0, 0.0);
-        cairo_line_to(ctx, w, h);
-        cairo_close_path(ctx);
-        cairo_clip(ctx);
+        int cr = (int)ceil((double)topR);
+        for (int y = 0; y < cr && y < height; y++) {
+            uint32_t *row = (uint32_t *)(bitmapData + y * bytesPerRow);
+            for (int x = 0; x < cr && x < width; x++) {
+                int dx = x - cr, dy = y - cr;
+                if (dx * dx + dy * dy > cr * cr)
+                    row[x] = 0;
+            }
+            for (int x = width - cr; x < width; x++) {
+                int dx = x - (width - cr), dy = y - cr;
+                if (dx * dx + dy * dy > cr * cr)
+                    row[x] = 0;
+            }
+        }
     }
 
-    // Step 3: Paint the theme bitmap within the clip.
-    cairo_set_operator(ctx, CAIRO_OPERATOR_SOURCE);
-    cairo_set_source_surface(ctx, imageSurface, 0, 0);
-    cairo_paint(ctx);
-    cairo_surface_flush(x11Surface);
+    // Upload pixels to the XCB pixmap via xcb_put_image (Z_PIXMAP).
+    {
+        xcb_connection_t *conn = [titlebar.connection connection];
+        uint8_t depth = 32;
+        if (!titlebar.use32BitDepth) {
+            XCBScreen *screen = [titlebar onScreen];
+            if (!screen) screen = [titlebar screen];
+            if (screen) depth = [screen screen]->root_depth;
+        }
+        xcb_gcontext_t gc = xcb_generate_id(conn);
+        xcb_create_gc(conn, gc, titlebar.pixmap, 0, NULL);
+        xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP,
+                      titlebar.pixmap, gc,
+                      (uint16_t)width, (uint16_t)height,
+                      0, 0, 0, depth,
+                      (uint32_t)((size_t)height * (size_t)bytesPerRow),
+                      bitmapData);
+        xcb_free_gc(conn, gc);
+    }
 
-    // Force immediate X11 update to ensure GSTheme is visible
-    [titlebar.connection flush];
-    xcb_flush([titlebar.connection connection]);
-
-    // Cleanup first surface
-    cairo_surface_destroy(imageSurface);
-    cairo_destroy(ctx);
-    cairo_surface_destroy(x11Surface);
-
-    // Paint DIMMED version to dPixmap (inactive pixmap) for unfocused windows
-    // XCBWindow.drawArea uses isAbove ? pixmap : dPixmap
+    // Paint DIMMED version to dPixmap (inactive pixmap) for unfocused windows.
+    // Generate dimmed pixels directly from already-converted active pixels
+    // instead of creating a separate NSImage, extracting bitmap (TIFF roundtrip),
+    // and doing a second full pixel format conversion.
     xcb_pixmap_t dPixmap = [titlebar dPixmap];
     if (dPixmap != 0) {
-        // Create a dimmed version of the titlebar image for inactive state
-        NSImage *dimmedImage = [self createDimmedImage:image];
-        if (dimmedImage) {
-            // Get bitmap from dimmed image
-            NSBitmapImageRep *dimmedBitmap = nil;
-            for (NSImageRep *rep in [dimmedImage representations]) {
-                if ([rep isKindOfClass:[NSBitmapImageRep class]]) {
-                    dimmedBitmap = (NSBitmapImageRep*)rep;
-                    break;
+        size_t bufSize = (size_t)height * (size_t)bytesPerRow;
+        unsigned char *dimmedPixels = malloc(bufSize);
+        if (dimmedPixels) {
+            memcpy(dimmedPixels, bitmapData, bufSize);
+
+            // Apply dimming in premultiplied Cairo ARGB32 space.
+            // Equivalent to NSCompositeSourceAtop overlay of (0.5, 0.5, 0.5, 0.35):
+            //   Cp' = Cp * 0.65 + 45 * (A/255)
+            for (int dy = 0; dy < height; dy++) {
+                uint32_t *rowPtr = (uint32_t *)(dimmedPixels + dy * bytesPerRow);
+                for (int dx = 0; dx < width; dx++) {
+                    uint32_t pixel = rowPtr[dx];
+                    uint32_t b_pm = (pixel >> 0)  & 0xFF;
+                    uint32_t g_pm = (pixel >> 8)  & 0xFF;
+                    uint32_t r_pm = (pixel >> 16) & 0xFF;
+                    uint32_t a     = (pixel >> 24) & 0xFF;
+
+                    r_pm = (r_pm * 166 + a * 45) >> 8;
+                    g_pm = (g_pm * 166 + a * 45) >> 8;
+                    b_pm = (b_pm * 166 + a * 45) >> 8;
+
+                    rowPtr[dx] = b_pm | (g_pm << 8) | (r_pm << 16) | (a << 24);
                 }
             }
-            if (!dimmedBitmap) {
-                NSData *dimmedData = [dimmedImage TIFFRepresentation];
-                dimmedBitmap = [NSBitmapImageRep imageRepWithData:dimmedData];
-            }
 
-            if (dimmedBitmap) {
-                unsigned char *dimmedPixels = [dimmedBitmap bitmapData];
-                int dimmedWidth = [dimmedBitmap pixelsWide];
-                int dimmedHeight = [dimmedBitmap pixelsHigh];
-                int dimmedBytesPerRow = [dimmedBitmap bytesPerRow];
-
-                // Check bitmap format for dimmed image
-                NSBitmapFormat dimmedFormat = [dimmedBitmap bitmapFormat];
-                BOOL dimmedAlphaFirst = (dimmedFormat & NSAlphaFirstBitmapFormat) != 0;
-
-                // Convert to Cairo ARGB32 format (BGRA in memory on little-endian)
-                for (int y = 0; y < dimmedHeight; y++) {
-                    uint32_t *rowPtr = (uint32_t *)(dimmedPixels + (y * dimmedBytesPerRow));
-                    for (int x = 0; x < dimmedWidth; x++) {
-                        uint32_t pixel = rowPtr[x];
-                        uint32_t r, g, b, a;
-
-                        if (dimmedAlphaFirst) {
-                            // ARGB in memory
-                            a = (pixel >> 0) & 0xFF;
-                            r = (pixel >> 8) & 0xFF;
-                            g = (pixel >> 16) & 0xFF;
-                            b = (pixel >> 24) & 0xFF;
-                        } else {
-                            // RGBA in memory
-                            r = (pixel >> 0) & 0xFF;
-                            g = (pixel >> 8) & 0xFF;
-                            b = (pixel >> 16) & 0xFF;
-                            a = (pixel >> 24) & 0xFF;
-                        }
-
-                        // Pre-multiply RGB by alpha for Cairo ARGB32 format
-                        if (a < 255) {
-                            r = (r * a) / 255;
-                            g = (g * a) / 255;
-                            b = (b * a) / 255;
-                        }
-
-                        // Cairo ARGB32 on little-endian: B, G, R, A bytes
-                        rowPtr[x] = b | (g << 8) | (r << 16) | (a << 24);
+            if (topR > 0) {
+                int cr = (int)ceil((double)topR);
+                for (int y = 0; y < cr && y < height; y++) {
+                    uint32_t *row = (uint32_t *)(dimmedPixels + y * bytesPerRow);
+                    for (int x = 0; x < cr && x < width; x++) {
+                        int dx = x - cr, dy = y - cr;
+                        if (dx * dx + dy * dy > cr * cr)
+                            row[x] = 0;
+                    }
+                    for (int x = width - cr; x < width; x++) {
+                        int dx = x - (width - cr), dy = y - cr;
+                        if (dx * dx + dy * dy > cr * cr)
+                            row[x] = 0;
                     }
                 }
-
-                // Use ARGB visual for dPixmap when compositor is active
-                cairo_surface_t *dSurface = cairo_xcb_surface_create(
-                    [titlebar.connection connection],
-                    dPixmap,
-                    visualType,  // Uses ARGB visual when compositor active
-                    dimmedWidth,
-                    dimmedHeight
-                );
-
-                if (cairo_surface_status(dSurface) == CAIRO_STATUS_SUCCESS) {
-                    cairo_t *dCtx = cairo_create(dSurface);
-
-                    cairo_surface_t *dImageSurface = cairo_image_surface_create_for_data(
-                        dimmedPixels,
-                        CAIRO_FORMAT_ARGB32,
-                        dimmedWidth,
-                        dimmedHeight,
-                        dimmedBytesPerRow
-                    );
-
-                    if (cairo_surface_status(dImageSurface) == CAIRO_STATUS_SUCCESS) {
-                        // Clear to transparent, then apply matching rounded-top clip.
-                        cairo_set_operator(dCtx, CAIRO_OPERATOR_CLEAR);
-                        cairo_paint(dCtx);
-                        if (topR > 0) {
-                            double r = (double)topR;
-                            double dw = (double)dimmedWidth;
-                            double dh = (double)dimmedHeight;
-                            cairo_new_path(dCtx);
-                            cairo_move_to(dCtx, 0, dh);
-                            cairo_line_to(dCtx, 0, r);
-                            cairo_arc(dCtx, r, r, r, M_PI, -M_PI / 2.0);
-                            cairo_line_to(dCtx, dw - r, 0);
-                            cairo_arc(dCtx, dw - r, r, r, -M_PI / 2.0, 0.0);
-                            cairo_line_to(dCtx, dw, dh);
-                            cairo_close_path(dCtx);
-                            cairo_clip(dCtx);
-                        }
-                        cairo_set_operator(dCtx, CAIRO_OPERATOR_SOURCE);
-                        cairo_set_source_surface(dCtx, dImageSurface, 0, 0);
-                        cairo_paint(dCtx);
-                        cairo_surface_flush(dSurface);
-                    }
-
-                    cairo_surface_destroy(dImageSurface);
-                    cairo_destroy(dCtx);
-                }
-                cairo_surface_destroy(dSurface);
             }
+
+            xcb_connection_t *conn = [titlebar.connection connection];
+            uint8_t dDepth = 32;
+            if (!titlebar.use32BitDepth) {
+                XCBScreen *screen = [titlebar onScreen];
+                if (!screen) screen = [titlebar screen];
+                if (screen) dDepth = [screen screen]->root_depth;
+            }
+            xcb_gcontext_t dGc = xcb_generate_id(conn);
+            xcb_create_gc(conn, dGc, dPixmap, 0, NULL);
+            xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP,
+                          dPixmap, dGc,
+                          (uint16_t)width, (uint16_t)height,
+                          0, 0, 0, dDepth,
+                          (uint32_t)((size_t)height * (size_t)bytesPerRow),
+                          dimmedPixels);
+            xcb_free_gc(conn, dGc);
+            free(dimmedPixels);
         }
     }
 
@@ -1138,7 +993,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 // These methods replace XCBTitleBar's drawing methods
 - (void)gstheme_drawTitleBarComponentsPixmaps {
     // Replace XCBTitleBar's Cairo drawing with GSTheme
-    NSLog(@"GSTheme: Replacing drawTitleBarComponentsPixmaps with GSTheme rendering");
+    NSDebugLog(@"GSTheme: Replacing drawTitleBarComponentsPixmaps with GSTheme rendering");
 
     XCBTitleBar *titlebar = (XCBTitleBar*)self;
     [URSThemeIntegration renderGSThemeTitlebar:titlebar
@@ -1148,7 +1003,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
 - (void)gstheme_drawTitleBarComponents {
     // Replace XCBTitleBar's Cairo drawing with GSTheme
-    NSLog(@"GSTheme: Replacing drawTitleBarComponents with GSTheme rendering");
+    NSDebugLog(@"GSTheme: Replacing drawTitleBarComponents with GSTheme rendering");
 
     XCBTitleBar *titlebar = (XCBTitleBar*)self;
     [URSThemeIntegration renderGSThemeTitlebar:titlebar
@@ -1158,7 +1013,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
 - (void)gstheme_drawTitleBarForColor:(TitleBarColor)aColor {
     // Replace XCBTitleBar's Cairo drawing with GSTheme
-    NSLog(@"GSTheme: Replacing drawTitleBarForColor: with GSTheme rendering");
+    NSDebugLog(@"GSTheme: Replacing drawTitleBarForColor: with GSTheme rendering");
 
     XCBTitleBar *titlebar = (XCBTitleBar*)self;
     BOOL isActive = (aColor == TitleBarUpColor);
@@ -1171,8 +1026,10 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                         frame:(XCBFrame*)frame
                         title:(NSString*)title
                        active:(BOOL)isActive {
+    URS_PROFILE_BEGIN(themeRender);
 
     if (![[URSThemeIntegration sharedInstance] enabled] || !window || !frame) {
+        URS_PROFILE_END(themeRender);
         return NO;
     }
 
@@ -1230,12 +1087,12 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // DEBUG: Also get client window dimensions for comparison
         XCBWindow *clientWin = [frame childWindowForKey:ClientWindow];
         XCBRect clientRect = clientWin ? [clientWin windowRect] : XCBMakeRect(XCBMakePoint(0,0), XCBMakeSize(0,0));
-        NSLog(@"DEBUG DIMENSIONS: frame=%dx%d, titlebar=%dx%d, client=%dx%d",
+        NSDebugLog(@"DEBUG DIMENSIONS: frame=%dx%d, titlebar=%dx%d, client=%dx%d",
               (int)frameRect.size.width, (int)frameRect.size.height,
               (int)titlebarRect.size.width, (int)titlebarRect.size.height,
               (int)clientRect.size.width, (int)clientRect.size.height);
 
-        NSLog(@"Rendering standalone GSTheme titlebar: %dx%d (frame: %dx%d) for window %u",
+        NSDebugLog(@"Rendering standalone GSTheme titlebar: %dx%d (frame: %dx%d) for window %u",
               (int)titlebarSize.width, (int)titlebarSize.height,
               (int)frameRect.size.width, (int)frameRect.size.height, [window window]);
 
@@ -1284,22 +1141,22 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
         GSThemeControlState state = isActive ? GSThemeNormalState : GSThemeSelectedState;
 
-        NSLog(@"Drawing standalone GSTheme titlebar with styleMask: 0x%lx, state: %d (fixedSize=%d, mini=%d)", (unsigned long)styleMask, (int)state, (int)isFixedSize, clientWindow ? (int)[clientWindow canMinimize] : 0);
+        NSDebugLog(@"Drawing standalone GSTheme titlebar with styleMask: 0x%lx, state: %d (fixedSize=%d, mini=%d)", (unsigned long)styleMask, (int)state, (int)isFixedSize, clientWindow ? (int)[clientWindow canMinimize] : 0);
 
         // Log GSTheme padding and size values to verify Eau theme values
         if ([theme respondsToSelector:@selector(titlebarPaddingLeft)]) {
-            NSLog(@"GSTheme titlebarPaddingLeft: %.1f", [theme titlebarPaddingLeft]);
+            NSDebugLog(@"GSTheme titlebarPaddingLeft: %.1f", [theme titlebarPaddingLeft]);
         }
         if ([theme respondsToSelector:@selector(titlebarPaddingRight)]) {
-            NSLog(@"GSTheme titlebarPaddingRight: %.1f", [theme titlebarPaddingRight]);
+            NSDebugLog(@"GSTheme titlebarPaddingRight: %.1f", [theme titlebarPaddingRight]);
         }
         if ([theme respondsToSelector:@selector(titlebarPaddingTop)]) {
-            NSLog(@"GSTheme titlebarPaddingTop: %.1f", [theme titlebarPaddingTop]);
+            NSDebugLog(@"GSTheme titlebarPaddingTop: %.1f", [theme titlebarPaddingTop]);
         }
         if ([theme respondsToSelector:@selector(titlebarButtonSize)]) {
-            NSLog(@"GSTheme titlebarButtonSize: %.1f", [theme titlebarButtonSize]);
+            NSDebugLog(@"GSTheme titlebarButtonSize: %.1f", [theme titlebarButtonSize]);
         }
-        NSLog(@"Expected Eau values: paddingLeft=2, paddingRight=2, paddingTop=6, buttonSize=13");
+        NSDebugLog(@"Expected Eau values: paddingLeft=2, paddingRight=2, paddingTop=6, buttonSize=13");
 
         // Get theme font settings for titlebar text
         NSString *themeFontName = @"LuxiSans"; // Default from Eau theme
@@ -1315,11 +1172,11 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
                 if (fontName) {
                     themeFontName = fontName;
-                    NSLog(@"Theme font name: %@", themeFontName);
+                    NSDebugLog(@"Theme font name: %@", themeFontName);
                 }
                 if (fontSize) {
                     themeFontSize = [fontSize floatValue];
-                    NSLog(@"Theme font size: %.1f", themeFontSize);
+                    NSDebugLog(@"Theme font size: %.1f", themeFontSize);
                 }
             }
         }
@@ -1329,9 +1186,9 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         if (!titlebarFont) {
             // Fallback if LuxiSans is not available
             titlebarFont = [NSFont systemFontOfSize:themeFontSize];
-            NSLog(@"Using system font fallback at size %.1f (LuxiSans not available)", themeFontSize);
+            NSDebugLog(@"Using system font fallback at size %.1f (LuxiSans not available)", themeFontSize);
         } else {
-            NSLog(@"Using theme font: %@ %.1f", themeFontName, themeFontSize);
+            NSDebugLog(@"Using theme font: %@ %.1f", themeFontName, themeFontSize);
         }
 
         // *** THEME-AGNOSTIC APPROACH ***
@@ -1353,7 +1210,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             // Use NSCompositeCopy to truly clear to transparent
             [[NSColor clearColor] set];
             NSRectFillUsingOperation(titleBarRect, NSCompositeCopy);
-            NSLog(@"[URSThemeIntegration] Using transparent prefill for compositor alpha support");
+            NSDebugLog(@"[URSThemeIntegration] Using transparent prefill for compositor alpha support");
         } else {
             // Grey40 #666666 - matches Eau border, prevents garbage at edges
             NSColor *prefillColor = [NSColor colorWithCalibratedWhite:0.4 alpha:1.0];
@@ -1467,7 +1324,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             }
         } else {
             // Edge mode: draw buttons, highlights, dividers
-            NSLog(@"Drawing side-by-side edge buttons for theme: %@", [theme name]);
+            NSDebugLog(@"Drawing side-by-side edge buttons for theme: %@", [theme name]);
 
             NSColor *iconColor = [self iconColorForActive:isActive highlighted:NO];
 
@@ -1487,7 +1344,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                     [self drawCloseIconInRect:iconRect withColor:iconColor];
                 }
 
-                NSLog(@"Drew close button at: %@ hovered:%d", NSStringFromRect(closeFrame), closeHovered);
+                NSDebugLog(@"Drew close button at: %@ hovered:%d", NSStringFromRect(closeFrame), closeHovered);
             }
 
             // Side-by-side buttons on right: Minimize (-) inner, Maximize (+) outer
@@ -1521,7 +1378,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                     [self drawMinimizeIconInRect:iconRect withColor:iconColor];
                 }
 
-                NSLog(@"Drew miniaturize button at: %@ hovered:%d", NSStringFromRect(miniFrame), miniHovered);
+                NSDebugLog(@"Drew miniaturize button at: %@ hovered:%d", NSStringFromRect(miniFrame), miniHovered);
             }
 
             if (hasMaximize) {
@@ -1543,7 +1400,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                     [self drawMaximizeIconInRect:iconRect withColor:iconColor];
                 }
 
-                NSLog(@"Drew zoom button at: %@ hovered:%d", NSStringFromRect(zoomFrame), zoomHovered);
+                NSDebugLog(@"Drew zoom button at: %@ hovered:%d", NSStringFromRect(zoomFrame), zoomHovered);
             }
 
             // Top highlight across title area (connecting button highlights)
@@ -1604,15 +1461,17 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         BOOL success = [self transferImage:titlebarImage toTitlebar:titlebar];
 
         if (success) {
-            NSLog(@"Standalone GSTheme titlebar rendered successfully for: %@", title);
+            NSDebugLog(@"Standalone GSTheme titlebar rendered successfully for: %@", title);
         } else {
             NSLog(@"Failed to transfer standalone GSTheme titlebar for: %@", title);
         }
 
+        URS_PROFILE_END(themeRender);
         return success;
 
     } @catch (NSException *exception) {
         NSLog(@"Standalone GSTheme titlebar rendering failed: %@", exception.reason);
+        URS_PROFILE_END(themeRender);
         return NO;
     }
 }

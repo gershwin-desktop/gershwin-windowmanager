@@ -7,9 +7,8 @@
 //
 
 #import "GSThemeTitleBar.h"
-#import <cairo/cairo.h>
-#import <cairo/cairo-xcb.h>
-#import <XCBKit/services/ICCCMService.h>
+#import "ICCCMService.h"
+#import "XCBScreen.h"
 #import "URSThemeIntegration.h"
 
 @implementation GSThemeTitleBar
@@ -132,56 +131,65 @@
         return;
     }
 
-    // Create Cairo surface from titlebar pixmap
-    cairo_surface_t *x11Surface = cairo_xcb_surface_create(
-        [[self connection] connection],
-        [self pixmap],
-        [[self visual] visualType],
-        (int)image.size.width,
-        (int)image.size.height
-    );
+    // Convert NSBitmapImageRep pixels to premultiplied BGRA for xcb_put_image.
+    int width = (int)[bitmap pixelsWide];
+    int height = (int)[bitmap pixelsHigh];
+    int bytesPerRow = (int)[bitmap bytesPerRow];
+    unsigned char *bitmapData = [bitmap bitmapData];
 
-    if (cairo_surface_status(x11Surface) != CAIRO_STATUS_SUCCESS) {
-        NSLog(@"GSThemeTitleBar: Failed to create Cairo X11 surface");
-        cairo_surface_destroy(x11Surface);
+    if (!bitmapData) {
+        NSLog(@"GSThemeTitleBar: Failed to get bitmap data");
         return;
     }
 
-    cairo_t *ctx = cairo_create(x11Surface);
+    NSBitmapFormat bitmapFormat = [bitmap bitmapFormat];
+    BOOL alphaFirst = (bitmapFormat & NSAlphaFirstBitmapFormat) != 0;
 
-    // Create Cairo image surface from bitmap data
-    cairo_surface_t *imageSurface = cairo_image_surface_create_for_data(
-        [bitmap bitmapData],
-        CAIRO_FORMAT_ARGB32,
-        [bitmap pixelsWide],
-        [bitmap pixelsHigh],
-        [bitmap bytesPerRow]
-    );
-
-    if (cairo_surface_status(imageSurface) != CAIRO_STATUS_SUCCESS) {
-        NSLog(@"GSThemeTitleBar: Failed to create Cairo image surface");
-        cairo_surface_destroy(imageSurface);
-        cairo_destroy(ctx);
-        cairo_surface_destroy(x11Surface);
-        return;
+    for (int y = 0; y < height; y++) {
+        uint32_t *rowPtr = (uint32_t *)(bitmapData + y * bytesPerRow);
+        for (int x = 0; x < width; x++) {
+            uint32_t pixel = rowPtr[x];
+            uint32_t r, g, b, a;
+            if (alphaFirst) {
+                a = (pixel >> 0) & 0xFF;
+                r = (pixel >> 8) & 0xFF;
+                g = (pixel >> 16) & 0xFF;
+                b = (pixel >> 24) & 0xFF;
+            } else {
+                r = (pixel >> 0) & 0xFF;
+                g = (pixel >> 8) & 0xFF;
+                b = (pixel >> 16) & 0xFF;
+                a = (pixel >> 24) & 0xFF;
+            }
+            if (a < 255) {
+                r = (r * a) / 255;
+                g = (g * a) / 255;
+                b = (b * a) / 255;
+            }
+            rowPtr[x] = b | (g << 8) | (r << 16) | (a << 24);
+        }
     }
 
-    // Clear and paint GSTheme image to X11 surface
-    cairo_set_operator(ctx, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(ctx);
-    cairo_set_operator(ctx, CAIRO_OPERATOR_OVER);
-    cairo_set_source_surface(ctx, imageSurface, 0, 0);
-    cairo_paint(ctx);
-    cairo_surface_flush(x11Surface);
+    // Upload pixels directly to the XCB pixmap.
+    xcb_connection_t *conn = [[self connection] connection];
+    uint8_t depth = 24;
+    XCBScreen *screen = [self onScreen];
+    if (!screen) screen = [self screen];
+    if (screen) depth = [screen screen]->root_depth;
 
-    // Cleanup
-    cairo_surface_destroy(imageSurface);
-    cairo_destroy(ctx);
-    cairo_surface_destroy(x11Surface);
+    xcb_gcontext_t gc = xcb_generate_id(conn);
+    xcb_create_gc(conn, gc, [self pixmap], 0, NULL);
+    xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP,
+                  [self pixmap], gc,
+                  (uint16_t)width, (uint16_t)height,
+                  0, 0, 0, depth,
+                  (uint32_t)((size_t)height * (size_t)bytesPerRow),
+                  bitmapData);
+    xcb_free_gc(conn, gc);
 
     // Flush connection
     [[self connection] flush];
-    xcb_flush([[self connection] connection]);
+    xcb_flush(conn);
 
     NSLog(@"GSThemeTitleBar: Successfully transferred GSTheme image to X11 pixmap");
 }
