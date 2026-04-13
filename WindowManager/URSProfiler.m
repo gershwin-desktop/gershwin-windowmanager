@@ -40,6 +40,7 @@ static URSProbeStats sProbes[URS_MAX_PROBES];
 static int           sProbeCount = 0;
 static struct timespec sLastDump;
 static int           sInitialized = 0;
+static volatile sig_atomic_t sDumpRequested = 0;
 
 // ── Internal helpers ────────────────────────────────────────────────
 
@@ -92,6 +93,13 @@ void ursProbeRecord(int index, uint64_t nanos) {
     p->totalNanos += nanos;
     if (nanos < p->minNanos) p->minNanos = nanos;
     if (nanos > p->maxNanos) p->maxNanos = nanos;
+
+    // Drain any pending signal-triggered dump request (safe: called on runloop thread)
+    if (sDumpRequested) {
+        sDumpRequested = 0;
+        ursProfileDump();
+        return;
+    }
 
     // Auto-dump every URS_PROFILE_INTERVAL seconds
     uint64_t intervalNs = (uint64_t)(URS_PROFILE_INTERVAL * 1e9);
@@ -151,7 +159,7 @@ void ursProfileDump(void) {
 
 static void ursProfileSignalHandler(int sig) {
     (void)sig;
-    ursProfileDump();
+    sDumpRequested = 1;         /* async-signal-safe: just set a flag */
 }
 
 void ursProfileInstallSignalHandler(void) {

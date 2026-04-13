@@ -171,11 +171,25 @@
     }
 
     // Upload pixels directly to the XCB pixmap.
+    // xcb_put_image expects tightly-packed rows (no extra stride/padding).
+    // NSBitmapImageRep may pad each row beyond width*4, so we repack first.
     xcb_connection_t *conn = [[self connection] connection];
     uint8_t depth = 24;
     XCBScreen *screen = [self onScreen];
     if (!screen) screen = [self screen];
     if (screen) depth = [screen screen]->root_depth;
+
+    int packedBytesPerRow = width * 4;
+    uint8_t *packed = (uint8_t *)malloc((size_t)height * (size_t)packedBytesPerRow);
+    if (!packed) {
+        NSLog(@"GSThemeTitleBar: Failed to allocate packed pixel buffer");
+        return;
+    }
+    for (int row = 0; row < height; row++) {
+        memcpy(packed + row * packedBytesPerRow,
+               bitmapData + row * bytesPerRow,
+               (size_t)packedBytesPerRow);
+    }
 
     xcb_gcontext_t gc = xcb_generate_id(conn);
     xcb_create_gc(conn, gc, [self pixmap], 0, NULL);
@@ -183,8 +197,9 @@
                   [self pixmap], gc,
                   (uint16_t)width, (uint16_t)height,
                   0, 0, 0, depth,
-                  (uint32_t)((size_t)height * (size_t)bytesPerRow),
-                  bitmapData);
+                  (uint32_t)((size_t)height * (size_t)packedBytesPerRow),
+                  packed);
+    free(packed);
     xcb_free_gc(conn, gc);
 
     // Flush connection

@@ -174,8 +174,10 @@
 
         int32_t  workareaX      = (int32_t)maxLeft;
         int32_t  workareaY      = (int32_t)maxTop;
-        uint32_t workareaWidth  = screenWidth  - maxLeft - maxRight;
-        uint32_t workareaHeight = screenHeight - maxTop  - maxBottom;
+        uint32_t workareaWidth  = (maxLeft + maxRight  < screenWidth)
+                                  ? screenWidth  - maxLeft - maxRight : 0;
+        uint32_t workareaHeight = (maxTop  + maxBottom < screenHeight)
+                                  ? screenHeight - maxTop  - maxBottom : 0;
 
         if (workareaX     == self.cachedWorkareaX &&
             workareaY     == self.cachedWorkareaY &&

@@ -14,6 +14,7 @@
 @interface URSKeyboardManager ()
 @property (strong, nonatomic) NSMutableArray *altKeycodes;
 @property (strong, nonatomic) NSTimer *altReleasePollTimer;
+@property (assign, nonatomic) xcb_keycode_t tabKeycode;
 @end
 
 @implementation URSKeyboardManager
@@ -30,6 +31,7 @@
     _shiftKeyPressed = NO;
     _altKeycodes = [[NSMutableArray alloc] init];
     _altReleasePollTimer = nil;
+    _tabKeycode = 23; /* fallback; overwritten by setupKeyboardGrabbing */
 
     return self;
 }
@@ -85,6 +87,8 @@
                     setup->min_keycode + (i / reply->keysyms_per_keycode);
 
                 NSLog(@"[Alt-Tab] Found Tab key at keycode %d", keycode);
+
+                self.tabKeycode = keycode;
 
                 // Grab Alt+Tab and Shift+Alt+Tab with all lock modifier combinations
                 uint16_t lockMasks[] = {
@@ -256,7 +260,7 @@
         }
 
         // Handle Tab key with Alt modifier
-        if (event->detail == 23 && altPressed) {
+        if (event->detail == self.tabKeycode && altPressed) {
             NSLog(@"[Alt-Tab] Tab pressed with Alt (shift=%d)", shiftPressed);
 
             if (!self.windowSwitcher.isSwitching) {
@@ -319,7 +323,7 @@
             } else {
                 if ([self.altKeycodes containsObject:@(event->detail)]) {
                     NSLog(@"[Alt-Tab] One Alt key released, but another Alt/Meta key is still held.");
-                } else if (event->detail == 23) {
+                } else if (event->detail == self.tabKeycode) {
                     NSLog(@"[Alt-Tab] Tab released, keeping switcher open as Alt is still held.");
                 }
             }
