@@ -456,13 +456,19 @@
 
 - (void)destroyPixmap
 {
-    if (pixmap == 0)
+    if (pixmap != 0)
     {
-        NSLog(@"Pixmap Not allocated");
-        return;
+        xcb_free_pixmap([connection connection], pixmap);
+        pixmap = 0;
     }
 
-    xcb_free_pixmap([connection connection], pixmap);
+    if (dPixmap != 0)
+    {
+        xcb_free_pixmap([connection connection], dPixmap);
+        dPixmap = 0;
+    }
+
+    pixmapSize = XCBMakeSize(0, 0);
 }
 
 - (xcb_window_t)window

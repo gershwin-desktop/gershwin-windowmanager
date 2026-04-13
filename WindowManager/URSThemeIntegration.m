@@ -1029,23 +1029,40 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             targetWidth = frameRect.size.width + 2;
             targetX = -1;
         }
-        NSDebugLog(@"DEBUG: Resizing titlebar X11 window to %d at x=%d (frame=%d, current titlebar=%d)",
-              targetWidth, targetX, frameRect.size.width, titlebarRect.size.width);
+        BOOL needsGeometryUpdate = (titlebarRect.position.x != targetX ||
+                                    titlebarRect.size.width != targetWidth);
+        XCBSize pixmapSize = [titlebar pixmapSize];
+        BOOL needsPixmapRecreate = ([titlebar pixmap] == 0 ||
+                                    [titlebar dPixmap] == 0 ||
+                                    pixmapSize.width != targetWidth ||
+                                    pixmapSize.height != titlebarRect.size.height);
 
-        uint32_t values[2] = {(uint32_t)targetX, targetWidth};
-        xcb_configure_window([[frame connection] connection],
-                             [titlebar window],
-                             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH,
-                             values);
+        if (needsGeometryUpdate) {
+            NSDebugLog(@"DEBUG: Resizing titlebar X11 window to %d at x=%d (frame=%d, current titlebar=%d)",
+                  targetWidth, targetX, frameRect.size.width, titlebarRect.size.width);
 
-        // Update the titlebar's internal rect
-        titlebarRect.size.width = targetWidth;
-        [titlebar setWindowRect:titlebarRect];
+            uint32_t values[2] = {(uint32_t)targetX, targetWidth};
+            xcb_configure_window([[frame connection] connection],
+                                 [titlebar window],
+                                 XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_WIDTH,
+                                 values);
 
-        // Recreate the pixmap with the new size
-        [titlebar createPixmap];
+            // Keep the cached rect in sync with X11 geometry updates.
+            titlebarRect.position.x = targetX;
+            titlebarRect.size.width = targetWidth;
+            [titlebar setWindowRect:titlebarRect];
+        }
 
-        [[frame connection] flush];
+        if (needsPixmapRecreate) {
+            if ([titlebar pixmap] != 0 || [titlebar dPixmap] != 0) {
+                [titlebar destroyPixmap];
+            }
+            [titlebar createPixmap];
+        }
+
+        if (needsGeometryUpdate || needsPixmapRecreate) {
+            [[frame connection] flush];
+        }
 
         NSSize titlebarSize = NSMakeSize(targetWidth, titlebarRect.size.height);
         NSDebugLog(@"DEBUG: Using titlebarSize.width = %d (frame was %d)", (int)titlebarSize.width, (int)frameRect.size.width);
