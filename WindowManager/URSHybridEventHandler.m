@@ -471,9 +471,11 @@
         [connection setNeedFlush:NO];
     }
     
-    // CRITICAL: If compositor has pending damage, flush it immediately
-    // This ensures cursor blinking and rapid updates are displayed without delay
-    if (self.compositingManager && [self.compositingManager compositingActive]) {
+    // Only force immediate repair when the compositor actually has pending work.
+    // This keeps fast updates responsive while avoiding redundant repair calls.
+    if (self.compositingManager &&
+        [self.compositingManager compositingActive] &&
+        [self.compositingManager hasPendingDamage]) {
         [self.compositingManager performRepairNow];
     }
 

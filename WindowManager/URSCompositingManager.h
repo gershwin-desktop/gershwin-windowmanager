@@ -77,6 +77,9 @@
 // Perform repair immediately without deferring (for critical updates like cursor blinking)
 - (void)performRepairNow;
 
+// Fast check used by the event loop to avoid redundant performRepairNow calls
+- (BOOL)hasPendingDamage;
+
 // Damage the entire screen region (used after resize/expose to force full redraw)
 - (void)damageScreen;
 
