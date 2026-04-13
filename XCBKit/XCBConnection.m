@@ -217,7 +217,6 @@ static XCBConnection *sharedInstance;
 
     xcb_window_t win = [aWindow window];
 
-    NSLog(@"[XCBConnection] Adding the window %u in the windowsMap", win);
     NSNumber *key = [[NSNumber alloc] initWithInt:win];
     XCBWindow *window = [windowsMap objectForKey:key];
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
@@ -236,7 +235,10 @@ static XCBConnection *sharedInstance;
         win = 0;
 
     if (win != 0)
+    {
+        NSLog(@"[XCBConnection] Adding the window %u in the windowsMap", win);
         clientList[clientListIndex++] = win;
+    }
 
     [ewmhService updateNetClientList];
     [windowsMap setObject:aWindow forKey:key];
@@ -253,7 +255,8 @@ static XCBConnection *sharedInstance;
         return;
 
     xcb_window_t win = [aWindow window];
-    NSLog(@"[XCBConnection] Removing the window %u from the windowsMap", win);
+    if (win != 0)
+        NSLog(@"[XCBConnection] Removing the window %u from the windowsMap", win);
     NSNumber *key = [[NSNumber alloc] initWithInt:win];
     [windowsMap removeObjectForKey:key];
     
@@ -3306,11 +3309,9 @@ static XCBConnection *sharedInstance;
 
 - (void) handleCreateNotify: (xcb_create_notify_event_t*)anEvent
 {
-    NSLog(@"[%@] Create notify for window %u", NSStringFromClass([self class]), anEvent->window);
-
-    // Create notify is sent when a window is created
-    // We typically don't need to take action here as we handle windows on MapRequest
-    // But we can track it for debugging purposes
+    // Create notify is sent when a window is created.
+    // We typically don't need to take action here as we handle windows on MapRequest.
+    // This method is kept for future tracking/debugging, but by default it stays silent.
 
     XCBWindow *parentWindow = [self windowForXCBId:anEvent->parent];
     if (parentWindow) {

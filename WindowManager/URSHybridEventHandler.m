@@ -27,6 +27,13 @@
 #import "GSThemeTitleBar.h"
 #import "URSWindowSwitcher.h"
 
+@interface URSHybridEventHandler ()
+@property (assign, nonatomic) int32_t cachedWorkareaX;
+@property (assign, nonatomic) int32_t cachedWorkareaY;
+@property (assign, nonatomic) uint32_t cachedWorkareaWidth;
+@property (assign, nonatomic) uint32_t cachedWorkareaHeight;
+@end
+
 @implementation URSHybridEventHandler
 
 @synthesize connection;
@@ -72,6 +79,10 @@
     
     // Initialize strut tracking dictionary
     self.windowStruts = [[NSMutableDictionary alloc] init];
+    self.cachedWorkareaX = INT32_MIN;
+    self.cachedWorkareaY = INT32_MIN;
+    self.cachedWorkareaWidth = UINT32_MAX;
+    self.cachedWorkareaHeight = UINT32_MAX;
     
     // Initialize set to track recently auto-focused windows (to prevent double-focus)
     self.recentlyAutoFocusedWindowIds = [[NSMutableSet alloc] init];
@@ -725,9 +736,7 @@
             }
             
             // Remove any struts for this window
-            [self removeStrutForWindow:destroyNotify->window];
-            // Check if strut removal requires workarea recalculation
-            if ([self.windowStruts count] > 0 || [[self.windowStruts allKeys] count] == 0) {
+            if ([self removeStrutForWindow:destroyNotify->window]) {
                 [self recalculateWorkarea];
             }
             
@@ -2888,21 +2897,19 @@
     
     NSString *atomName = [atomService atomNameFromAtom:event->atom];
     
-    // Check if this is a strut property change
-    if ([atomName isEqualToString:[ewmhService EWMHWMStrut]] ||
-        [atomName isEqualToString:[ewmhService EWMHWMStrutPartial]]) {
-        
-        NSLog(@"[ICCCM] Strut property changed for window %u: %@", event->window, atomName);
-        
-        if (event->state == XCB_PROPERTY_DELETE) {
-            // Strut was removed
-            [self removeStrutForWindow:event->window];
-        } else {
-            // Strut was added or modified
-            [self readAndRegisterStrutForWindow:event->window];
-        }
-        
-        // Recalculate workarea after strut change
+    if (![atomName isEqualToString:[ewmhService EWMHWMStrut]] &&
+        ![atomName isEqualToString:[ewmhService EWMHWMStrutPartial]]) {
+        return;
+    }
+
+    BOOL needsRecalc = NO;
+    if (event->state == XCB_PROPERTY_DELETE) {
+        needsRecalc = [self removeStrutForWindow:event->window];
+    } else {
+        needsRecalc = [self readAndRegisterStrutForWindow:event->window];
+    }
+
+    if (needsRecalc) {
         [self recalculateWorkarea];
     }
 }
@@ -3280,12 +3287,26 @@
 
 - (void)ensureFocusAfterWindowRemovalOfClientWindow:(xcb_window_t)removedClientId
 {
-    if (removedClientId == XCB_NONE) {
-        return;
-    }
-
+    // If the removed window was not the tracked focused window, we still need to
+    // verify that lastFocusedWindowId refers to a window that is actually alive
+    // and focusable.  If it is stale (e.g. the window crashed without a proper
+    // focus-out event, or focus tracking fell out of sync), we must pick a new
+    // target — otherwise the GNUstep AppMenu becomes the active entity.
     if (removedClientId != self.lastFocusedWindowId) {
-        return;
+        // If we never tracked a focused window there is nothing to repair.
+        if (self.lastFocusedWindowId == XCB_NONE) {
+            return;
+        }
+        XCBWindow *currentFocus = [self windowForClientWindowId:self.lastFocusedWindowId];
+        if (currentFocus && [self isWindowFocusable:currentFocus allowDesktop:NO]) {
+            // Current focus is healthy — nothing to do.
+            return;
+        }
+        // lastFocusedWindowId is stale.  Clear it and fall through to pick a
+        // new target using the same logic as when the focused window is removed.
+        NSLog(@"[Focus] lastFocusedWindowId %u is stale after removal of %u — reassigning",
+              self.lastFocusedWindowId, removedClientId);
+        self.lastFocusedWindowId = XCB_NONE;
     }
 
     xcb_window_t targetId = XCB_NONE;
@@ -3321,21 +3342,22 @@
     self.lastFocusedWindowId = targetId;
 }
 
-- (void)readAndRegisterStrutForWindow:(xcb_window_t)windowId
+- (BOOL)readAndRegisterStrutForWindow:(xcb_window_t)windowId
 {
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    NSNumber *key = @(windowId);
+    NSDictionary *existingStrut = [self.windowStruts objectForKey:key];
     
     // Create a temporary window object to read properties
     XCBWindow *window = [[XCBWindow alloc] initWithXCBWindow:windowId andConnection:connection];
     if (!window) {
         NSLog(@"[ICCCM] Cannot create window object for %u", windowId);
-        return;
+        return NO;
     }
     
     // Try to read _NET_WM_STRUT_PARTIAL first (more precise)
     uint32_t strutPartial[12] = {0};
     if ([ewmhService readStrutPartialForWindow:window strut:strutPartial]) {
-        // Store strut partial data
         NSMutableDictionary *strutData = [NSMutableDictionary dictionary];
         [strutData setObject:@(strutPartial[0]) forKey:@"left"];
         [strutData setObject:@(strutPartial[1]) forKey:@"right"];
@@ -3350,15 +3372,17 @@
         [strutData setObject:@(strutPartial[10]) forKey:@"bottom_start_x"];
         [strutData setObject:@(strutPartial[11]) forKey:@"bottom_end_x"];
         [strutData setObject:@(YES) forKey:@"isPartial"];
-        
-        [self.windowStruts setObject:strutData forKey:@(windowId)];
-        
+
+        if ([existingStrut isEqualToDictionary:strutData]) {
+            return NO;
+        }
+
+        [self.windowStruts setObject:strutData forKey:key];
         NSLog(@"[ICCCM] Registered strut partial for window %u: left=%u, right=%u, top=%u, bottom=%u",
               windowId, strutPartial[0], strutPartial[1], strutPartial[2], strutPartial[3]);
-        return;
+        return YES;
     }
     
-    // Fall back to _NET_WM_STRUT
     uint32_t strut[4] = {0};
     if ([ewmhService readStrutForWindow:window strut:strut]) {
         NSMutableDictionary *strutData = [NSMutableDictionary dictionary];
@@ -3367,21 +3391,29 @@
         [strutData setObject:@(strut[2]) forKey:@"top"];
         [strutData setObject:@(strut[3]) forKey:@"bottom"];
         [strutData setObject:@(NO) forKey:@"isPartial"];
-        
-        [self.windowStruts setObject:strutData forKey:@(windowId)];
-        
+
+        if ([existingStrut isEqualToDictionary:strutData]) {
+            return NO;
+        }
+
+        [self.windowStruts setObject:strutData forKey:key];
         NSLog(@"[ICCCM] Registered strut for window %u: left=%u, right=%u, top=%u, bottom=%u",
               windowId, strut[0], strut[1], strut[2], strut[3]);
+        return YES;
     }
+
+    return NO;
 }
 
-- (void)removeStrutForWindow:(xcb_window_t)windowId
+- (BOOL)removeStrutForWindow:(xcb_window_t)windowId
 {
     NSNumber *key = @(windowId);
     if ([self.windowStruts objectForKey:key]) {
         [self.windowStruts removeObjectForKey:key];
         NSLog(@"[ICCCM] Removed strut for window %u", windowId);
+        return YES;
     }
+    return NO;
 }
 
 - (void)recalculateWorkarea
@@ -3422,11 +3454,22 @@
         workareaY = (int32_t)maxTop;
         workareaWidth = screenWidth - maxLeft - maxRight;
         workareaHeight = screenHeight - maxTop - maxBottom;
+
+        if (workareaX == self.cachedWorkareaX &&
+            workareaY == self.cachedWorkareaY &&
+            workareaWidth == self.cachedWorkareaWidth &&
+            workareaHeight == self.cachedWorkareaHeight) {
+            return;
+        }
+
+        self.cachedWorkareaX = workareaX;
+        self.cachedWorkareaY = workareaY;
+        self.cachedWorkareaWidth = workareaWidth;
+        self.cachedWorkareaHeight = workareaHeight;
         
         NSLog(@"[ICCCM] Recalculated workarea: x=%d, y=%d, width=%u, height=%u (struts: left=%u, right=%u, top=%u, bottom=%u)",
               workareaX, workareaY, workareaWidth, workareaHeight, maxLeft, maxRight, maxTop, maxBottom);
         
-        // Update _NET_WORKAREA on root window
         EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
         [ewmhService updateWorkareaForRootWindow:rootWindow 
                                                x:workareaX 

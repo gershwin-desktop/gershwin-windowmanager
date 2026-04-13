@@ -1402,6 +1402,19 @@
         return;
     }
     
+    int32_t currentX = 0;
+    int32_t currentY = 0;
+    uint32_t currentWidth = 0;
+    uint32_t currentHeight = 0;
+    BOOL haveCurrent = [self readWorkareaForRootWindow:rootWindow
+                                                   x:&currentX
+                                                   y:&currentY
+                                               width:&currentWidth
+                                              height:&currentHeight];
+    if (haveCurrent && currentX == x && currentY == y && currentWidth == width && currentHeight == height) {
+        return;
+    }
+
     // _NET_WORKAREA is an array of 4 CARDINALs per desktop: x, y, width, height
     // For now we support a single desktop
     uint32_t workarea[4] = { (uint32_t)x, (uint32_t)y, width, height };
@@ -1484,9 +1497,6 @@
     if (outY) *outY = (int32_t)values[1];
     if (outWidth) *outWidth = values[2];
     if (outHeight) *outHeight = values[3];
-    
-    NSLog(@"[EWMH] Read _NET_WORKAREA: x=%d, y=%d, width=%u, height=%u", 
-          values[0], values[1], values[2], values[3]);
     
     free(reply);
     return YES;

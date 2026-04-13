@@ -88,8 +88,8 @@
 
 // ICCCM/EWMH Strut and Workarea Management
 - (void)handleStrutPropertyChange:(xcb_property_notify_event_t*)event;
-- (void)readAndRegisterStrutForWindow:(xcb_window_t)windowId;
-- (void)removeStrutForWindow:(xcb_window_t)windowId;
+- (BOOL)readAndRegisterStrutForWindow:(xcb_window_t)windowId;
+- (BOOL)removeStrutForWindow:(xcb_window_t)windowId;
 - (void)recalculateWorkarea;
 - (NSRect)currentWorkarea;
 
