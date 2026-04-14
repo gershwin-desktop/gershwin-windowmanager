@@ -1803,6 +1803,10 @@ static XCBConnection *sharedInstance;
             frame = (XCBFrame *) window;
 
         [frame resize:anEvent xcbConnection:connection];
+
+        // Keep rounded corners visible during interactive resize in non-composited mode.
+        // applyRoundedCornersShapeMask() uses cached geometry, so this avoids release-only updates.
+        [frame applyRoundedCornersShapeMask];
         needFlush = YES;
     }
 
@@ -2079,6 +2083,10 @@ static XCBConnection *sharedInstance;
     if ([frame window] != anEvent->root && [[frame childWindowForKey:ClientWindow] canMove])
     {
         dragState = YES;
+
+        // Keep rounded corners stable during move in non-composited mode.
+        // This is a cheap one-time call per drag and repairs any stale mask state.
+        [frame applyRoundedCornersShapeMask];
         
         // Cache workarea when drag starts for performance
         XCBScreen *screen = [frame onScreen];
@@ -2197,8 +2205,6 @@ static XCBConnection *sharedInstance;
             if ([frame grabPointer]) {
                 resizeState = YES;
                 dragState = NO;
-                // Clear stale shape mask so the window paints new area as it grows.
-                [frame clearShapeMasks];
             }
         } else {
             // Check border clicks (fallback for clicking on frame borders directly)
@@ -3028,9 +3034,6 @@ static XCBConnection *sharedInstance;
 
 - (void)borderClickedForFrameWindow:(XCBFrame *)aFrame withEvent:(xcb_button_press_event_t *)anEvent
 {
-    // Clear stale shape mask at resize start so growing windows paint new area.
-    [aFrame clearShapeMasks];
-
     int rightBorder = [aFrame windowRect].size.width;
     int bottomBorder = [aFrame windowRect].size.height;
     int leftBorder = [aFrame windowRect].position.x;

@@ -4,7 +4,7 @@
 //
 //  Provides optional XRender-based compositing for window transparency and effects.
 //  Uses defensive coding with fallback to non-compositing mode on any errors.
-//  Only activated when --compositing flag is specified.
+//  Enabled by default; can be disabled with --disable-compositing.
 //
 
 #import <Foundation/Foundation.h>

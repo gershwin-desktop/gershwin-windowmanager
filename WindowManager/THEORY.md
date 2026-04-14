@@ -22,7 +22,7 @@ WindowManager is an Objective-C window manager that operates as an **NSApplicati
 
 - Traditional X11 window management (reparenting, decorations, focus handling)
 - GNUstep GSTheme-based titlebar rendering for visual consistency with AppKit applications
-- Optional XRender-based compositing for transparency effects (`-c` flag)
+- XRender-based compositing for transparency effects (disable with `-dc` flag)
 
 ### Operating Modes
 
