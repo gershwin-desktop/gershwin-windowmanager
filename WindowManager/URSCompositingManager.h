@@ -4,12 +4,12 @@
 //
 //  Provides optional XRender-based compositing for window transparency and effects.
 //  Uses defensive coding with fallback to non-compositing mode on any errors.
-//  Only activated when --compositing flag is specified.
+//  Enabled by default; can be disabled with --disable-compositing.
 //
 
 #import <Foundation/Foundation.h>
-#import <XCBKit/XCBConnection.h>
-#import <XCBKit/utils/XCBShape.h>
+#import "XCBConnection.h"
+#import "XCBTypes.h"
 
 @interface URSCompositingManager : NSObject
 
@@ -76,6 +76,9 @@
 
 // Perform repair immediately without deferring (for critical updates like cursor blinking)
 - (void)performRepairNow;
+
+// Fast check used by the event loop to avoid redundant performRepairNow calls
+- (BOOL)hasPendingDamage;
 
 // Damage the entire screen region (used after resize/expose to force full redraw)
 - (void)damageScreen;

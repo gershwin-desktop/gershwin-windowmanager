@@ -70,12 +70,13 @@ export DISPLAY=$DISPLAY_NUM
 
 # Option to enable/disable compositing
 COMPOSITOR_FLAG=""
-if [ "$1" == "--compositing" ] || [ "$1" == "-c" ]; then
+if [ "$1" == "--disable-compositing" ] || [ "$1" == "-dc" ]; then
+    echo -e "${YELLOW}Starting window manager WITHOUT compositing${NC}"
+    COMPOSITOR_FLAG="-URSCompositingEnabled NO"
+else
     echo -e "${GREEN}Starting window manager with COMPOSITING ENABLED${NC}"
     COMPOSITOR_FLAG="-URSCompositingEnabled YES"
-else
-    echo -e "${YELLOW}Starting window manager WITHOUT compositing${NC}"
-    echo "(Use --compositing or -c flag to enable compositing)"
+    echo "(Use --disable-compositing or -dc to disable compositing)"
 fi
 
 # Start the window manager

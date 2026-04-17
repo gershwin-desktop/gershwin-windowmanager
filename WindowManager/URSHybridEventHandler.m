@@ -1,28 +1,29 @@
 //
 //  URSHybridEventHandler.m
-//  uroswm - Phase 1: NSApplication + NSRunLoop Integration
+//  uroswm - Event Coordinator
 //
 //  Created by Alessandro Sangiuliano on 22/06/20.
 //  Copyright (c) 2020 Alessandro Sangiuliano. All rights reserved.
 //
-//  Phase 1 Enhancement: NSApplication delegate that integrates XCB event handling
-//  with NSRunLoop using file descriptor monitoring (following libs-back pattern).
+//  Coordinator: owns the XCB event loop and dispatches to single-responsibility
+//  managers (focus, keyboard, workarea, titlebar, snapping menu).
 //
 
 #import "URSHybridEventHandler.h"
-#import <XCBKit/XCBScreen.h>
-#import <XCBKit/XCBQueryTreeReply.h>
-#import <XCBKit/XCBAttributesReply.h>
+#import "URSProfiler.h"
+#import "XCBScreen.h"
+#import "XCBQueryTreeReply.h"
+#import "XCBAttributesReply.h"
 #import <xcb/xcb.h>
 #import <xcb/xcb_icccm.h>
 #import <xcb/xcb_aux.h>
 #import <xcb/damage.h>
 #import <xcb/xproto.h>
 #import <X11/keysym.h>
-#import <XCBKit/services/EWMHService.h>
-#import <XCBKit/services/XCBAtomService.h>
-#import <XCBKit/services/ICCCMService.h>
-#import <XCBKit/XCBFrame.h>
+#import "EWMHService.h"
+#import "XCBAtomService.h"
+#import "ICCCMService.h"
+#import "XCBFrame.h"
 #import "URSThemeIntegration.h"
 #import "GSThemeTitleBar.h"
 #import "URSWindowSwitcher.h"
@@ -34,15 +35,14 @@
 @synthesize xcbEventsIntegrated;
 @synthesize nsRunLoopActive;
 @synthesize eventCount;
-@synthesize lastFocusedWindowId;
-@synthesize previousFocusedWindowId;
 @synthesize windowSwitcher;
-@synthesize altKeyPressed;
-@synthesize shiftKeyPressed;
 @synthesize compositingManager;
 @synthesize compositingRequested;
-@synthesize windowStruts;
-@synthesize recentlyAutoFocusedWindowIds;
+@synthesize focusManager;
+@synthesize keyboardManager;
+@synthesize workareaManager;
+@synthesize titlebarController;
+@synthesize snappingMenuController;
 
 #pragma mark - Initialization
 
@@ -59,27 +59,23 @@
     self.xcbEventsIntegrated = NO;
     self.nsRunLoopActive = NO;
     self.eventCount = 0;
-    self.lastFocusedWindowId = XCB_NONE;
-    self.previousFocusedWindowId = XCB_NONE;
 
-    // Initialize XCB connection (same as original)
+    // Initialize XCB connection
     connection = [XCBConnection sharedConnectionAsWindowManager:YES];
 
     // Initialize window switcher
     self.windowSwitcher = [URSWindowSwitcher sharedSwitcherWithConnection:connection];
-    self.altKeyPressed = NO;
-    self.shiftKeyPressed = NO;
-    
-    // Initialize strut tracking dictionary
-    self.windowStruts = [[NSMutableDictionary alloc] init];
-    
-    // Initialize set to track recently auto-focused windows (to prevent double-focus)
-    self.recentlyAutoFocusedWindowIds = [[NSMutableSet alloc] init];
-    
-    // Cache Alt keycodes (populated during setupKeyboardGrabbing)
-    self.altKeycodes = [[NSMutableArray alloc] init];
-    self.altReleasePollTimer = nil;
-    
+
+    // --- Create single-responsibility managers ---
+    self.focusManager = [[URSFocusManager alloc] initWithConnection:connection
+                                                    selectionWindow:nil]; // set after registerAsWindowManager
+    self.keyboardManager = [[URSKeyboardManager alloc] initWithConnection:connection
+                                                          windowSwitcher:self.windowSwitcher];
+    self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
+    self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
+    self.titlebarController.workareaManager = self.workareaManager;
+    self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
+
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
                                   boolForKey:@"URSCompositingEnabled"];
@@ -104,17 +100,21 @@
     // Mark NSRunLoop as active
     self.nsRunLoopActive = YES;
 
-    // Register as window manager (same as original)
+    // Register as window manager
     BOOL registered = [self registerAsWindowManager];
     if (!registered) {
         NSLog(@"[WindowManager] Failed to register as WM; terminating");
         [NSApp terminate:nil];
         return;
     }
+
+    // Wire selectionManagerWindow into the focus manager now that it exists
+    self.focusManager.selectionManagerWindow = self.selectionManagerWindow;
     
     // Initialize compositing if requested
     if (self.compositingRequested) {
         [self initializeCompositing];
+        self.titlebarController.compositingManager = self.compositingManager;
     }
 
     // Decorate any existing windows already on screen
@@ -128,7 +128,7 @@
     NSLog(@"GSTheme integration initialized with periodic checking enabled");
     
     // Setup keyboard grabbing for Alt-Tab
-    [self setupKeyboardGrabbing];
+    [self.keyboardManager setupKeyboardGrabbing];
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
@@ -262,6 +262,7 @@
 
         NSLog(@"[WindowManager] Decorating %u pre-existing windows", childCount);
 
+        connection.adoptingExistingWindows = YES;
         for (uint32_t i = 0; i < childCount; i++) {
             xcb_window_t winId = children[i];
 
@@ -293,7 +294,7 @@
             // Check if this is a dock window with struts - scan for struts even if already managed
             if ([ewmhService isWindowTypeDock:win]) {
                 NSLog(@"[WindowManager] Found dock window %u at startup - checking for struts", winId);
-                [self readAndRegisterStrutForWindow:winId];
+                [self.workareaManager readAndRegisterStrutForWindow:winId];
             }
 
             // Skip already-managed windows
@@ -312,16 +313,32 @@
 
             [connection handleMapRequest:&mapEvent];
 
+            // Mirror the XCB_MAP_REQUEST handler's post-processing for startup-adopted windows.
+            // Without this, pre-existing windows miss compositor registration and fixed-size
+            // border adjustment that the normal map-request flow provides.
+            XCBWindow *mappedClient = [connection windowForXCBId:winId];
+            if (mappedClient && [[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
+                if (self.compositingManager && [self.compositingManager compositingActive]) {
+                    [self.compositingManager registerWindow:winId];
+                    [self registerChildWindowsForCompositor:winId depth:3];
+                    XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
+                    [self.compositingManager registerWindow:[frame window]];
+                    [self registerChildWindowsForCompositor:[frame window] depth:3];
+                }
+                [self adjustBorderForFixedSizeWindow:winId];
+            }
+
             // Apply GSTheme rendering to the titlebar immediately after decoration.
             // The normal XCB_MAP_REQUEST path calls this; we must replicate it for
             // startup-adopted windows or they keep the unstyled placeholder titlebar.
             [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:winId]];
         }
+        connection.adoptingExistingWindows = NO;
 
         [connection flush];
         
         // Recalculate workarea after scanning all existing windows for struts
-        [self recalculateWorkarea];
+        [self.workareaManager recalculateWorkarea];
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowManager] Exception while decorating existing windows: %@", exception.reason);
@@ -385,6 +402,7 @@
 
 - (void)processAvailableXCBEvents
 {
+    URS_PROFILE_BEGIN(eventLoop);
     xcb_generic_event_t *e;
     xcb_motion_notify_event_t *lastMotionEvent = NULL;
     BOOL needFlush = NO;
@@ -417,9 +435,9 @@
             uint8_t nextType = e->response_type & ~0x80;
             if (nextType == XCB_BUTTON_RELEASE || nextType == XCB_BUTTON_PRESS) {
                 [connection handleMotionNotify:lastMotionEvent];
-                [self handleResizeDuringMotion:lastMotionEvent];
+                [self.titlebarController handleResizeDuringMotion:lastMotionEvent];
                 [self handleCompositingDuringMotion:lastMotionEvent];
-                [self handleTitlebarHoverDuringMotion:lastMotionEvent];
+                [self.titlebarController handleHoverDuringMotion:lastMotionEvent];
                 needFlush = YES;
                 free(lastMotionEvent);
                 lastMotionEvent = NULL;
@@ -439,9 +457,9 @@
     // Process any remaining compressed motion event (e.g. motion was last in queue)
     if (lastMotionEvent) {
         [connection handleMotionNotify:lastMotionEvent];
-        [self handleResizeDuringMotion:lastMotionEvent];
+        [self.titlebarController handleResizeDuringMotion:lastMotionEvent];
         [self handleCompositingDuringMotion:lastMotionEvent];
-        [self handleTitlebarHoverDuringMotion:lastMotionEvent];
+        [self.titlebarController handleHoverDuringMotion:lastMotionEvent];
         needFlush = YES;
         free(lastMotionEvent);
         lastMotionEvent = NULL;
@@ -453,9 +471,11 @@
         [connection setNeedFlush:NO];
     }
     
-    // CRITICAL: If compositor has pending damage, flush it immediately
-    // This ensures cursor blinking and rapid updates are displayed without delay
-    if (self.compositingManager && [self.compositingManager compositingActive]) {
+    // Only force immediate repair when the compositor actually has pending work.
+    // This keeps fast updates responsive while avoiding redundant repair calls.
+    if (self.compositingManager &&
+        [self.compositingManager compositingActive] &&
+        [self.compositingManager hasPendingDamage]) {
         [self.compositingManager performRepairNow];
     }
 
@@ -477,10 +497,64 @@
                    afterDelay:0.001]; // Very short delay to yield CPU
     }
 
+    URS_PROFILE_END(eventLoop);
+}
+
+- (BOOL)handleSnappingMenuTriggerForButtonPress:(xcb_button_press_event_t *)pressEvent
+{
+    if (!pressEvent || pressEvent->detail != XCB_BUTTON_INDEX_3) {
+        return NO;
+    }
+
+    XCBWindow *window = [connection windowForXCBId:pressEvent->event];
+    if (!window || ![window isKindOfClass:[XCBTitleBar class]]) {
+        return NO;
+    }
+
+    XCBFrame *frame = (XCBFrame *)[window parentWindow];
+    if (!frame || ![frame isKindOfClass:[XCBFrame class]]) {
+        return NO;
+    }
+
+    // The pointer is grabbed in sync mode by default; unfreeze it before menu tracking.
+    xcb_allow_events([connection connection], XCB_ALLOW_ASYNC_POINTER, pressEvent->time);
+
+    NSValue *pressValue =
+        [NSValue valueWithBytes:pressEvent objCType:@encode(xcb_button_press_event_t)];
+    [self performSelector:@selector(showDeferredSnappingMenuForButtonPress:)
+               withObject:pressValue
+               afterDelay:0];
+
+    return YES;
+}
+
+- (void)showDeferredSnappingMenuForButtonPress:(NSValue *)pressValue
+{
+    if (!pressValue) {
+        return;
+    }
+
+    xcb_button_press_event_t pressEvent;
+    [pressValue getValue:&pressEvent];
+
+    XCBWindow *window = [connection windowForXCBId:pressEvent.event];
+    if (!window || ![window isKindOfClass:[XCBTitleBar class]]) {
+        return;
+    }
+
+    XCBFrame *frame = (XCBFrame *)[window parentWindow];
+    if (!frame || ![frame isKindOfClass:[XCBFrame class]]) {
+        return;
+    }
+
+    [self.snappingMenuController showSnappingContextMenuForFrame:frame
+                                                     atX11Point:NSMakePoint(pressEvent.root_x,
+                                                                            pressEvent.root_y)];
 }
 
 - (void)processXCBEvent:(xcb_generic_event_t*)event
 {
+    URS_PROFILE_BEGIN(eventDispatch);
     // Process individual XCB event (same logic as original startEventHandlerLoop)
     switch (event->response_type & ~0x80) {
         case XCB_VISIBILITY_NOTIFY: {
@@ -521,13 +595,11 @@
             xcb_leave_notify_event_t *leaveEvent = (xcb_leave_notify_event_t *)event;
             [connection handleLeaveNotify:leaveEvent];
             // Clear hover state if leaving the hovered titlebar
-            [self handleTitlebarLeave:leaveEvent];
+            [self.titlebarController handleTitlebarLeave:leaveEvent];
             break;
         }
         case XCB_FOCUS_IN: {
             xcb_focus_in_event_t *focusInEvent = (xcb_focus_in_event_t *)event;
-            NSLog(@"XCB_FOCUS_IN received for window %u (detail=%d, mode=%d)",
-                  focusInEvent->event, focusInEvent->detail, focusInEvent->mode);
             [connection handleFocusIn:focusInEvent];
             [self handleFocusChange:focusInEvent->event isActive:YES];
             if (self.compositingManager && [self.compositingManager compositingActive]) {
@@ -537,8 +609,6 @@
         }
         case XCB_FOCUS_OUT: {
             xcb_focus_out_event_t *focusOutEvent = (xcb_focus_out_event_t *)event;
-            NSLog(@"XCB_FOCUS_OUT received for window %u (detail=%d, mode=%d)",
-                  focusOutEvent->event, focusOutEvent->detail, focusOutEvent->mode);
             [connection handleFocusOut:focusOutEvent];
             // Skip inferior focus changes - focus moved to a child window
             // within the same managed window (e.g., frame -> client)
@@ -549,11 +619,9 @@
         }
         case XCB_BUTTON_PRESS: {
             xcb_button_press_event_t *pressEvent = (xcb_button_press_event_t *)event;
-            NSLog(@"EVENT: XCB_BUTTON_PRESS received for window %u at (%d, %d)",
-                  pressEvent->event, pressEvent->event_x, pressEvent->event_y);
 
-            // Dismiss tiling context menu on any click outside it
-            if (self.tilingContextMenu) {
+            // Dismiss snapping context menu on any click outside it
+            if (self.snappingMenuController.activeMenu) {
                 NSEvent *syntheticUp = [NSEvent mouseEventWithType:NSLeftMouseUp
                                                           location:NSMakePoint(-1, -1)
                                                      modifierFlags:0
@@ -567,8 +635,13 @@
                 break;
             }
 
+            // Titlebar right-click opens the snapping menu instead of entering drag/focus path.
+            if ([self handleSnappingMenuTriggerForButtonPress:pressEvent]) {
+                break;
+            }
+
             // Check if this is a button click on a GSThemeTitleBar
-            if (![self handleTitlebarButtonPress:pressEvent]) {
+            if (![self.titlebarController handleTitlebarButtonPress:pressEvent]) {
                 // Not a titlebar button, let xcbkit handle normally
                 // This follows the complete XCBKit activation path:
                 // 1. Focus the client window (WM_TAKE_FOCUS, _NET_ACTIVE_WINDOW, ungrab keyboard)
@@ -586,9 +659,9 @@
         case XCB_BUTTON_RELEASE: {
             xcb_button_release_event_t *releaseEvent = (xcb_button_release_event_t *)event;
 
-            // Dismiss tiling context menu on button release outside it
+            // Dismiss snapping context menu on button release outside it
             // (e.g., user held right-click on titlebar and released off the window)
-            if (self.tilingContextMenu) {
+            if (self.snappingMenuController.activeMenu) {
                 NSEvent *syntheticUp = [NSEvent mouseEventWithType:NSLeftMouseUp
                                                           location:NSMakePoint(-1, -1)
                                                      modifierFlags:0
@@ -605,7 +678,7 @@
             // Let xcbkit handle the release first
             [connection handleButtonRelease:releaseEvent];
             // After resize completes, update the titlebar with GSTheme
-            [self handleResizeComplete:releaseEvent];
+            [self.titlebarController handleResizeComplete:releaseEvent];
 
             // If this was a move/drag end on a titlebar or frame, refresh compositor pixmap
             if (self.compositingManager && [self.compositingManager compositingActive]) {
@@ -646,8 +719,8 @@
             XCBWindow *tempWindow = [[XCBWindow alloc] initWithXCBWindow:mapRequestEvent->window andConnection:connection];
             if ([ewmhService isWindowTypeDock:tempWindow]) {
                 NSLog(@"[WindowManager] Dock window %u being mapped - checking for struts", mapRequestEvent->window);
-                [self readAndRegisterStrutForWindow:mapRequestEvent->window];
-                [self recalculateWorkarea];
+                [self.workareaManager readAndRegisterStrutForWindow:mapRequestEvent->window];
+                [self.workareaManager recalculateWorkarea];
             }
             tempWindow = nil;
             ewmhService = nil;
@@ -694,7 +767,7 @@
 
             // Try to focus the client window if it's focusable
             // This ensures dialogs, alerts, sheets and other special windows get focused too
-            if ([self isWindowFocusable:mappedClient allowDesktop:NO]) {
+            if ([self.focusManager isWindowFocusable:mappedClient allowDesktop:NO]) {
                 // Schedule focus after a brief delay to ensure the window is fully set up
                 [self performSelector:@selector(focusWindowAfterThemeApplied:)
                            withObject:mappedClient
@@ -704,20 +777,20 @@
         }
         case XCB_UNMAP_NOTIFY: {
             xcb_unmap_notify_event_t *unmapNotifyEvent = (xcb_unmap_notify_event_t *)event;
-            xcb_window_t removedClientId = [self clientWindowIdForWindowId:unmapNotifyEvent->window];
+            xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:unmapNotifyEvent->window];
             [connection handleUnMapNotify:unmapNotifyEvent];
-            
+
             // Notify compositor of unmap event
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager unmapWindow:unmapNotifyEvent->window];
             }
 
-            [self ensureFocusAfterWindowRemovalOfClientWindow:removedClientId];
+            [self.focusManager ensureFocusAfterWindowRemoval:removedClientId];
             break;
         }
         case XCB_DESTROY_NOTIFY: {
             xcb_destroy_notify_event_t *destroyNotify = (xcb_destroy_notify_event_t *)event;
-            xcb_window_t removedClientId = [self clientWindowIdForWindowId:destroyNotify->window];
+            xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:destroyNotify->window];
             
             // Unregister window from compositor before connection handles destroy
             if (self.compositingManager && [self.compositingManager compositingActive]) {
@@ -725,14 +798,12 @@
             }
             
             // Remove any struts for this window
-            [self removeStrutForWindow:destroyNotify->window];
-            // Check if strut removal requires workarea recalculation
-            if ([self.windowStruts count] > 0 || [[self.windowStruts allKeys] count] == 0) {
-                [self recalculateWorkarea];
+            if ([self.workareaManager removeStrutForWindow:destroyNotify->window]) {
+                [self.workareaManager recalculateWorkarea];
             }
             
             [connection handleDestroyNotify:destroyNotify];
-            [self ensureFocusAfterWindowRemovalOfClientWindow:removedClientId];
+            [self.focusManager ensureFocusAfterWindowRemoval:removedClientId];
             break;
         }
         case XCB_CLIENT_MESSAGE: {
@@ -786,19 +857,19 @@
         case XCB_PROPERTY_NOTIFY: {
             xcb_property_notify_event_t *propEvent = (xcb_property_notify_event_t *)event;
             // Check if this is a strut property change
-            [self handleStrutPropertyChange:propEvent];
+            [self.workareaManager handleStrutPropertyChange:propEvent];
             [self handleWindowTitlePropertyChange:propEvent];
             [connection handlePropertyNotify:propEvent];
             break;
         }
         case XCB_KEY_PRESS: {
             xcb_key_press_event_t *keyPressEvent = (xcb_key_press_event_t *)event;
-            [self handleKeyPressEvent:keyPressEvent];
+            [self.keyboardManager handleKeyPress:keyPressEvent];
             break;
         }
         case XCB_KEY_RELEASE: {
             xcb_key_release_event_t *keyReleaseEvent = (xcb_key_release_event_t *)event;
-            [self handleKeyReleaseEvent:keyReleaseEvent];
+            [self.keyboardManager handleKeyRelease:keyReleaseEvent];
             break;
         }
         case XCB_SELECTION_CLEAR: {
@@ -818,6 +889,7 @@
             break;
         }
     }
+    URS_PROFILE_END(eventDispatch);
 }
 
 - (void)registerChildWindowsForCompositor:(xcb_window_t)parentWindow depth:(NSUInteger)depth
@@ -889,12 +961,6 @@
     }
 }
 
-#pragma mark - Phase 1 Validation Methods
-
-
-
-
-
 #pragma mark - GSTheme Integration (NEW)
 
 - (void)handleWindowCreated:(XCBTitleBar*)titlebar {
@@ -913,19 +979,16 @@
                                                        active:YES]; // Assume new windows are active
 
     if (!success) {
-        NSLog(@"GSTheme rendering failed for titlebar, falling back to Cairo");
-        // XCBTitleBar will fall back to its default Cairo rendering
+        NSLog(@"GSTheme rendering failed for titlebar, falling back to default titlebar path");
+        // XCBTitleBar will fall back to its default titlebar rendering
     }
 }
 
 - (void)handleFocusChange:(xcb_window_t)windowId isActive:(BOOL)isActive {
     @try {
-        NSLog(@"handleFocusChange: window %u, isActive: %d", windowId, isActive);
-
         // Find the window that received focus change
         XCBWindow *window = [connection windowForXCBId:windowId];
         if (!window) {
-            NSLog(@"handleFocusChange: window %u not found in windowsMap, searching for frame containing it", windowId);
             // The focus event might be for a client window - search all frames
             NSDictionary *windowsMap = [connection windowsMap];
             for (NSString *mapWindowId in windowsMap) {
@@ -934,19 +997,15 @@
                     XCBFrame *testFrame = (XCBFrame*)mapWindow;
                     XCBWindow *clientWindow = [testFrame childWindowForKey:ClientWindow];
                     if (clientWindow && [clientWindow window] == windowId) {
-                        NSLog(@"handleFocusChange: Found frame containing client window %u", windowId);
                         window = testFrame;
                         break;
                     }
                 }
             }
             if (!window) {
-                NSLog(@"handleFocusChange: Could not find any frame for window %u", windowId);
                 return;
             }
         }
-
-        NSLog(@"handleFocusChange: Found window of type %@", NSStringFromClass([window class]));
 
         // Find the frame and titlebar
         XCBFrame *frame = nil;
@@ -976,13 +1035,10 @@
         NSLog(@"GSTheme: Focus %@ for window %@", isActive ? @"gained" : @"lost", titlebar.windowTitle);
 
         if (isActive) {
-            XCBWindow *clientWindow = [self clientWindowForWindow:window fallbackFrame:frame];
+            XCBWindow *clientWindow = [self.focusManager clientWindowForWindow:window fallbackFrame:frame];
             if (clientWindow) {
                 xcb_window_t clientId = [clientWindow window];
-                if (clientId != XCB_NONE && clientId != self.lastFocusedWindowId) {
-                    self.previousFocusedWindowId = self.lastFocusedWindowId;
-                    self.lastFocusedWindowId = clientId;
-                }
+                [self.focusManager trackFocusGain:clientId];
             }
         }
 
@@ -1104,7 +1160,7 @@
         if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
             XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
 
-            // Apply ONLY GSTheme rendering (no Cairo/XCBKit drawing)
+            // Apply ONLY GSTheme rendering (no legacy/XCBKit drawing)
             BOOL success = [URSThemeIntegration renderGSThemeToWindow:frame
                                                                 frame:frame
                                                                 title:titlebar.windowTitle
@@ -1155,12 +1211,18 @@
                     NSLog(@"Titlebar %u exposed, re-applying GSTheme", exposedWindow);
 
                     // Re-apply GSTheme rendering to override the expose redraw
-                    [URSThemeIntegration renderGSThemeToWindow:frame
-                                                         frame:frame
-                                                         title:titlebar.windowTitle
-                                                        active:YES];
-                    
-                    // Notify compositor about the content change (updateWindow already called in XCB_EXPOSE handler)
+                    BOOL exposeSuccess = [URSThemeIntegration renderGSThemeToWindow:frame
+                                                                             frame:frame
+                                                                             title:titlebar.windowTitle
+                                                                            active:YES];
+
+                    // Draw the updated pixmap into the window backing store so the
+                    // compositor captures themed content (not blank) on its next paint.
+                    if (exposeSuccess) {
+                        [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+                        [titlebar drawArea:[titlebar windowRect]];
+                    }
+                    // Compositor update is handled by the XCB_EXPOSE handler (updateWindow call)
                 }
                 break;
             }
@@ -1242,11 +1304,7 @@
         uint16_t screenHeight = [screen height];
         
         // Get the current workarea (respects struts from dock windows like menu bar)
-        NSRect workarea = [self currentWorkarea];
-        
-        // Calculate 70% of workarea size (not screen size - respects struts)
-        uint16_t newWidth = (uint16_t)(workarea.size.width * 0.7);
-        uint16_t newHeight = (uint16_t)(workarea.size.height * 0.7);
+        NSRect workarea = [self.workareaManager currentWorkarea];
         
         // Golden ratio positioning (0.618) within the workarea
         // Position window at (1 - φ) ≈ 0.382 to lean left and top
@@ -1317,29 +1375,43 @@
             }
             
             queryWindow = nil;
-            // Only apply WM defaults (70% + golden ratio) if:
+            // Clamp overly large windows before mapping.
+            // Rule: if either dimension exceeds 90% of screen, resize both dimensions to 80%
+            BOOL exceedsNinetyPercent =
+                ((uint32_t)geom_reply->width * 100 > (uint32_t)screenWidth * 90) ||
+                ((uint32_t)geom_reply->height * 100 > (uint32_t)screenHeight * 90);
+
+            if (!isDesktopWindow && !isFullscreenState && exceedsNinetyPercent) {
+                uint16_t clampedWidth = (uint16_t)(screenWidth * 0.8);
+                uint16_t clampedHeight = (uint16_t)(screenHeight * 0.8);
+
+                // Per HIG: place resized windows toward top-left so desktop status affordances
+                // (such as volume icons) remain visible and unobstructed.
+                uint32_t sizeValues[] = {goldenPosX, goldenPosY, clampedWidth, clampedHeight};
+                xcb_configure_window([connection connection],
+                                     clientWindowId,
+                             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+                             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                     sizeValues);
+                [connection flush];
+                NSLog(@"Window %u exceeds 90%% of screen (%ux%u). Clamped to 80%% (%ux%u) and placed at golden ratio (%u,%u) before map.",
+                      clientWindowId,
+                      geom_reply->width,
+                      geom_reply->height,
+                      clampedWidth,
+                    clampedHeight,
+                    goldenPosX,
+                    goldenPosY);
+            }
+
+            // Only apply WM golden-ratio placement if:
             // 1. Window is positioned at (0,0) - indicates no app positioning
-            // 2. AND window is full screen - indicates no app size constraints
-            // 3. AND window is not a desktop window
-            // 4. AND window is not explicitly requesting fullscreen
+            // 2. AND window is not a desktop window
+            // 3. AND window is not explicitly requesting fullscreen
             BOOL isAtOrigin = (geom_reply->x == 0 && geom_reply->y == 0);
             BOOL isFullScreenSize = (geom_reply->width >= screenWidth && geom_reply->height >= screenHeight);
             
-            if (isAtOrigin && isFullScreenSize && !isDesktopWindow && !isFullscreenState) {
-                NSLog(@"Window %u has no app-determined geometry (at 0,0 with full screen). Applying WM defaults: 70%% of workarea at golden ratio position",
-                      clientWindowId);
-                NSLog(@"[ICCCM] Workarea constraints: origin=(%.0f,%.0f) size=(%.0f x %.0f)",
-                      workarea.origin.x, workarea.origin.y, workarea.size.width, workarea.size.height);
-                
-                // Resize and position the window using WM defaults (within workarea)
-                uint32_t configValues[] = {goldenPosX, goldenPosY, newWidth, newHeight};
-                xcb_configure_window([connection connection],
-                                     clientWindowId,
-                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | 
-                                     XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-                                     configValues);
-                [connection flush];
-            } else if (isAtOrigin && (geom_reply->width < screenWidth) && !isDesktopWindow && !isFullscreenState) {
+            if (isAtOrigin && (geom_reply->width < screenWidth) && !isDesktopWindow && !isFullscreenState) {
                 // Window starts at (0,0) but is NOT full-width. This is usually a fallback position
                 // for apps that don't specify geometry. Move it to the golden ratio position
                 // which matches where a newly created window of the same type would get mapped.
@@ -1355,6 +1427,9 @@
             } else if (isDesktopWindow || isFullscreenState) {
                 NSLog(@"Window %u is desktop or fullscreen window. Skipping WM defaults (isDesktop=%d, isFullscreen=%d)",
                       clientWindowId, isDesktopWindow, isFullscreenState);
+            } else if (isAtOrigin && isFullScreenSize) {
+                NSLog(@"Window %u is exactly full screen size at origin; skipping >90%% clamp per 100%% exception.",
+                      clientWindowId);
             } else {
                 NSLog(@"Window %u has app-determined geometry (%ux%u at %d,%d). Respecting app preferences",
                       clientWindowId, geom_reply->width, geom_reply->height, geom_reply->x, geom_reply->y);
@@ -1406,7 +1481,16 @@
 
                             NSLog(@"Successfully applied GSTheme to titlebar for window %u: %@",
                                   windowId, titlebar.windowTitle ?: @"(untitled)");
-                            
+
+                            // Paint the GSTheme content into the titlebar's backing store NOW,
+                            // before the compositor takes its first NameWindowPixmap snapshot.
+                            // Without this, the compositor may capture the blank initial state
+                            // (no drawArea has been called yet) and show a flash of undecorated
+                            // content before the first Expose-driven redraw arrives.
+                            [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+                            [titlebar drawArea:[titlebar windowRect]];
+                            [self.connection flush];
+
                             // Notify compositor about the new window content
                             if (self.compositingManager && [self.compositingManager compositingActive]) {
                                 [self.compositingManager updateWindow:[frame window]];
@@ -1416,11 +1500,6 @@
                             // Focus after a small delay to ensure the window is properly rendered and ready
                             [self performSelector:@selector(focusWindowAfterThemeApplied:)
                                        withObject:clientWindow
-                                       afterDelay:0.1];
-
-                            // Apply GSTheme again after a short delay to override any subsequent XCBKit drawing
-                            [self performSelector:@selector(reapplyGSThemeToTitlebar:)
-                                       withObject:titlebar
                                        afterDelay:0.1];
                         } else {
                             NSLog(@"Failed to apply GSTheme to titlebar for window %u", windowId);
@@ -1437,7 +1516,7 @@
         XCBWindow *directWindow = [self.connection windowForXCBId:windowId];
         if (directWindow) {
             NSLog(@"[Focus] No frame found for %u; attempting direct focus on window %u", windowId, [directWindow window]);
-            if ([self isWindowFocusable:directWindow allowDesktop:NO]) {
+            if ([self.focusManager isWindowFocusable:directWindow allowDesktop:NO]) {
                 [self performSelector:@selector(focusWindowAfterThemeApplied:)
                            withObject:directWindow
                            afterDelay:0.1];
@@ -1545,84 +1624,6 @@
     }
 }
 
-#pragma mark - Resize Handling
-
-- (void)handleResizeDuringMotion:(xcb_motion_notify_event_t*)motionEvent {
-    @try {
-        // Find the window involved in the motion
-        XCBWindow *window = [connection windowForXCBId:motionEvent->event];
-        if (!window) {
-            return;
-        }
-
-        // Check if it's a frame (resize happens on frames)
-        XCBFrame *frame = nil;
-        if ([window isKindOfClass:[XCBFrame class]]) {
-            frame = (XCBFrame*)window;
-        }
-
-        if (!frame) {
-            return;
-        }
-
-        // Get the titlebar
-        XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
-        if (!titlebarWindow || ![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
-            return;
-        }
-        XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
-
-        // After xcbkit processes motion, windowRect is updated with new size
-        XCBRect titlebarRect = [titlebar windowRect];
-        XCBSize pixmapSize = [titlebar pixmapSize];
-
-        // Only update if the size has changed
-        if (pixmapSize.width != titlebarRect.size.width) {
-            // Save old pixmap IDs so we can free them AFTER setting the new background.
-            // This avoids a transient state where the X server has no background pixmap
-            // to paint from, eliminating flicker during resize.
-            xcb_pixmap_t oldPixmap = [titlebar pixmap];
-            xcb_pixmap_t oldDPixmap = [titlebar dPixmap];
-
-            // Create new pixmap at the new size (overwrites instance vars)
-            [titlebar createPixmap];
-
-            // Redraw with GSTheme
-            [URSThemeIntegration renderGSThemeToWindow:frame
-                                                 frame:frame
-                                                 title:[titlebar windowTitle]
-                                                active:YES];
-
-            // Set new pixmap as background BEFORE freeing old one
-            [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
-
-            // Now free the old pixmaps
-            if (oldPixmap != 0) {
-                xcb_free_pixmap([connection connection], oldPixmap);
-            }
-            if (oldDPixmap != 0) {
-                xcb_free_pixmap([connection connection], oldDPixmap);
-            }
-
-            // Copy the pixmap to the window immediately
-            [titlebar drawArea:titlebarRect];
-
-            // Notify compositor about the window content change
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager updateWindow:[frame window]];
-            }
-        } else {
-            // Width unchanged — restore background and repaint.
-            // Covers: vertical-only resize (background wasn't cleared, this is a no-op)
-            // and horizontal resize that hit min-width (background was cleared, need repaint).
-            [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
-            [titlebar drawArea:titlebarRect];
-        }
-    } @catch (NSException *exception) {
-        // Silently ignore exceptions during resize motion to avoid spam
-    }
-}
-
 // Handle compositor updates during window drag or resize
 - (void)handleCompositingDuringMotion:(xcb_motion_notify_event_t*)motionEvent {
     if (!self.compositingManager || ![self.compositingManager compositingActive]) {
@@ -1678,650 +1679,7 @@
     }
 }
 
-#pragma mark - Titlebar Button Hover Handling
-
-- (void)handleTitlebarHoverDuringMotion:(xcb_motion_notify_event_t*)motionEvent {
-    @try {
-        // Don't process hover during drag or resize operations
-        if ([connection dragState] || [connection resizeState]) {
-            return;
-        }
-
-        // Find the window under the cursor
-        XCBWindow *window = [connection windowForXCBId:motionEvent->event];
-        if (!window) {
-            return;
-        }
-
-        // Check if this is a titlebar
-        if (![window isKindOfClass:[XCBTitleBar class]]) {
-            // Not a titlebar - clear hover state if we were previously hovering
-            if ([URSThemeIntegration hoveredTitlebarWindow] != 0) {
-                xcb_window_t prevTitlebar = [URSThemeIntegration hoveredTitlebarWindow];
-                [URSThemeIntegration clearHoverState];
-                // Trigger redraw of the previously hovered titlebar
-                [self redrawTitlebarById:prevTitlebar];
-                NSLog(@"Hover: Cleared hover state, left titlebar %u", prevTitlebar);
-            }
-            return;
-        }
-
-        NSLog(@"Hover: Motion on titlebar %u at x=%d", motionEvent->event, motionEvent->event_x);
-
-        XCBTitleBar *titlebar = (XCBTitleBar *)window;
-        xcb_window_t titlebarId = [titlebar window];
-        XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
-
-        if (!frame) {
-            return;
-        }
-
-        // Reset cursor to normal arrow when over titlebar
-        // This ensures resize cursors from border areas don't persist
-        if (![[frame cursor] leftPointerSelected]) {
-            [frame showLeftPointerCursor];
-        }
-
-        // Get titlebar dimensions and determine if it has maximize button
-        XCBRect frameRect = [frame windowRect];
-        XCBRect titlebarRect = [titlebar windowRect];
-        CGFloat titlebarWidth = frameRect.size.width;
-        CGFloat titlebarHeight = titlebarRect.size.height;
-
-        // Check if this is a fixed-size window (no maximize button)
-        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-        xcb_window_t clientWindowId = clientWindow ? [clientWindow window] : 0;
-        BOOL hasMaximize = clientWindowId ? ![URSThemeIntegration isFixedSizeWindow:clientWindowId] : YES;
-
-        // Determine which button (if any) is under the cursor
-        // Use X coordinate for side-by-side button layout
-        CGFloat mouseX = motionEvent->event_x;
-        CGFloat mouseY = motionEvent->event_y;
-        NSInteger newButtonIndex = [URSThemeIntegration buttonIndexAtX:mouseX
-                                                                     y:mouseY
-                                                              forWidth:titlebarWidth
-                                                                height:titlebarHeight
-                                                           hasMaximize:hasMaximize];
-
-        // Check if hover state changed
-        xcb_window_t prevTitlebar = [URSThemeIntegration hoveredTitlebarWindow];
-        NSInteger prevButtonIndex = [URSThemeIntegration hoveredButtonIndex];
-
-        if (titlebarId != prevTitlebar || newButtonIndex != prevButtonIndex) {
-            NSLog(@"Hover: State changed - titlebar %u button %ld -> titlebar %u button %ld",
-                  prevTitlebar, (long)prevButtonIndex, titlebarId, (long)newButtonIndex);
-
-            // Update hover state
-            [URSThemeIntegration setHoveredTitlebar:titlebarId buttonIndex:newButtonIndex];
-
-            // Redraw the current titlebar
-            [self redrawTitlebar:titlebar inFrame:frame];
-
-            // If we moved from a different titlebar, redraw that one too
-            if (prevTitlebar != 0 && prevTitlebar != titlebarId) {
-                [self redrawTitlebarById:prevTitlebar];
-            }
-        }
-
-    } @catch (NSException *exception) {
-        // Silently ignore exceptions during hover handling
-    }
-}
-
-- (void)handleTitlebarLeave:(xcb_leave_notify_event_t*)leaveEvent {
-    @try {
-        xcb_window_t leavingWindow = leaveEvent->event;
-        xcb_window_t hoveredTitlebar = [URSThemeIntegration hoveredTitlebarWindow];
-
-        // Only clear if leaving the hovered titlebar
-        if (leavingWindow == hoveredTitlebar && hoveredTitlebar != 0) {
-            [URSThemeIntegration clearHoverState];
-            // Redraw the titlebar to remove hover effect
-            [self redrawTitlebarById:leavingWindow];
-        }
-    } @catch (NSException *exception) {
-        // Silently ignore exceptions
-    }
-}
-
-- (void)redrawTitlebar:(XCBTitleBar *)titlebar inFrame:(XCBFrame *)frame {
-    if (!titlebar || !frame) {
-        return;
-    }
-
-    // Get the client window for title
-    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-    NSString *title = [titlebar windowTitle];
-
-    // Determine if this is the active window
-    BOOL isActive = [titlebar isAbove];
-
-    // Render the titlebar with updated hover state
-    [URSThemeIntegration renderGSThemeToWindow:clientWindow
-                                         frame:frame
-                                         title:title
-                                        active:isActive];
-
-    // Force immediate display update
-    XCBRect rect = [titlebar windowRect];
-    [titlebar drawArea:rect];
-    [connection flush];
-}
-
-- (void)redrawTitlebarById:(xcb_window_t)titlebarId {
-    @try {
-        XCBWindow *window = [connection windowForXCBId:titlebarId];
-        if (!window || ![window isKindOfClass:[XCBTitleBar class]]) {
-            return;
-        }
-        XCBTitleBar *titlebar = (XCBTitleBar *)window;
-        XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
-        [self redrawTitlebar:titlebar inFrame:frame];
-    } @catch (NSException *exception) {
-        // Silently ignore
-    }
-}
-
-- (void)handleResizeComplete:(xcb_button_release_event_t*)releaseEvent {
-    @try {
-        // Find the window that was released
-        XCBWindow *window = [connection windowForXCBId:releaseEvent->event];
-        if (!window) {
-            return;
-        }
-
-        // Check if it's a frame (resize happens on frames)
-        XCBFrame *frame = nil;
-        if ([window isKindOfClass:[XCBFrame class]]) {
-            frame = (XCBFrame*)window;
-        } else if ([window parentWindow] && [[window parentWindow] isKindOfClass:[XCBFrame class]]) {
-            frame = (XCBFrame*)[window parentWindow];
-        }
-
-        if (!frame) {
-            return;
-        }
-
-        // Get the titlebar
-        XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
-        if (!titlebarWindow || ![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
-            return;
-        }
-        XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
-
-        // Check if the titlebar size has changed (compare pixmap size to window rect)
-        XCBRect titlebarRect = [titlebar windowRect];
-        XCBSize pixmapSize = [titlebar pixmapSize];
-
-        if (pixmapSize.width != titlebarRect.size.width ||
-            pixmapSize.height != titlebarRect.size.height) {
-            NSLog(@"GSTheme: Titlebar size changed from %dx%d to %dx%d, recreating pixmap",
-                  pixmapSize.width, pixmapSize.height,
-                  titlebarRect.size.width, titlebarRect.size.height);
-
-            // Recreate the titlebar pixmap at the new size
-            [titlebar destroyPixmap];
-            [titlebar createPixmap];
-
-            // Redraw with GSTheme
-            [URSThemeIntegration renderGSThemeToWindow:frame
-                                                 frame:frame
-                                                 title:[titlebar windowTitle]
-                                                active:YES];
-
-            // Update the window background pixmap to prevent X11 tiling
-            [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
-
-            // Copy the pixmap to the window
-            XCBRect titleRect = [titlebar windowRect];
-            [titlebar drawArea:titleRect];
-
-            [connection flush];
-            
-            // Notify compositor about the window content change
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager updateWindow:[frame window]];
-                
-                // After resize, damage the entire screen to clean up artifacts from window shrinking.
-                // When a window shrinks, the old window extent is left visible until the compositor repaints.
-                // This forces a full-screen composite to clean it up.
-                [self.compositingManager damageScreen];
-                [self.compositingManager performRepairNow];
-            }
-            NSLog(@"GSTheme: Titlebar redrawn after resize");
-        }
-    } @catch (NSException *exception) {
-        NSLog(@"Exception in handleResizeComplete: %@", exception.reason);
-    }
-}
-
-#pragma mark - Titlebar Button Handling
-
-// Button hit detection for titlebar buttons
-- (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point forTitlebar:(XCBTitleBar*)titlebar {
-    // Button metrics (must match URSThemeIntegration.m) - buttons are square: width == height
-    static const CGFloat ORB_SIZE = 15.0;
-    static const CGFloat ORB_PAD_LEFT = 10.5;
-    static const CGFloat ORB_SPACING = 4.0;
-
-    // Get titlebar dimensions
-    XCBRect titlebarRect = [titlebar windowRect];
-    CGFloat titlebarWidth = titlebarRect.size.width;
-    CGFloat titlebarHeight = titlebarRect.size.height;
-
-    // Get the frame to check style mask
-    XCBFrame *frame = nil;
-    if ([[titlebar parentWindow] isKindOfClass:[XCBFrame class]]) {
-        frame = (XCBFrame *)[titlebar parentWindow];
-    }
-
-    // Determine if window has maximize based on whether it's fixed-size
-    XCBWindow *clientWindow = frame ? [frame childWindowForKey:ClientWindow] : nil;
-    xcb_window_t clientWindowId = clientWindow ? [clientWindow window] : 0;
-    BOOL isFixedSize = clientWindowId && [URSThemeIntegration isFixedSizeWindow:clientWindowId];
-    BOOL hasMaximize = !isFixedSize;
-
-    NSLog(@"GSTheme: Button hit test at point (%.0f, %.0f), titlebar size: %.0fx%.0f, hasMaximize: %d",
-          point.x, point.y, titlebarWidth, titlebarHeight, hasMaximize);
-
-    if ([URSThemeIntegration isOrbButtonStyle]) {
-        // Orb layout: all buttons on left, 15x15, vertically centered
-        CGFloat buttonY = (titlebarHeight - ORB_SIZE) / 2.0;
-        CGFloat closeX = ORB_PAD_LEFT;
-        CGFloat miniX = closeX + ORB_SIZE + ORB_SPACING;
-        CGFloat zoomX = miniX + ORB_SIZE + ORB_SPACING;
-
-        NSRect closeRect = NSMakeRect(closeX, buttonY, ORB_SIZE, ORB_SIZE);
-        NSRect miniRect = NSMakeRect(miniX, buttonY, ORB_SIZE, ORB_SIZE);
-        NSRect zoomRect = NSMakeRect(zoomX, buttonY, ORB_SIZE, ORB_SIZE);
-
-        if (NSPointInRect(point, closeRect)) {
-            NSLog(@"GSTheme: Hit close orb");
-            return GSThemeTitleBarButtonClose;
-        }
-        if (NSPointInRect(point, miniRect)) {
-            NSLog(@"GSTheme: Hit miniaturize orb");
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-        if (hasMaximize && NSPointInRect(point, zoomRect)) {
-            NSLog(@"GSTheme: Hit zoom orb");
-            return GSThemeTitleBarButtonZoom;
-        }
-
-        NSLog(@"GSTheme: No orb button hit");
-        return GSThemeTitleBarButtonNone;
-    }
-
-    // Edge layout: Close at left | title | Minimize | Maximize at right (all buttons square)
-    NSRect closeRect = NSMakeRect(0, 0, titlebarHeight, titlebarHeight);
-    if (NSPointInRect(point, closeRect)) {
-        NSLog(@"GSTheme: Hit close button");
-        return GSThemeTitleBarButtonClose;
-    }
-
-    if (hasMaximize) {
-        NSRect miniRect = NSMakeRect(titlebarWidth - 2 * titlebarHeight, 0,
-                                     titlebarHeight, titlebarHeight);
-        if (NSPointInRect(point, miniRect)) {
-            NSLog(@"GSTheme: Hit miniaturize button (inner right)");
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-
-        NSRect zoomRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
-                                     titlebarHeight, titlebarHeight);
-        if (NSPointInRect(point, zoomRect)) {
-            NSLog(@"GSTheme: Hit zoom button (far right)");
-            return GSThemeTitleBarButtonZoom;
-        }
-    } else {
-        NSRect miniRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
-                                     titlebarHeight, titlebarHeight);
-        if (NSPointInRect(point, miniRect)) {
-            NSLog(@"GSTheme: Hit miniaturize button (far right, no zoom)");
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-    }
-
-    NSLog(@"GSTheme: No button hit");
-    return GSThemeTitleBarButtonNone;
-}
-
-- (BOOL)handleTitlebarButtonPress:(xcb_button_press_event_t*)pressEvent {
-    @try {
-        // Find the window that was clicked
-        XCBWindow *window = [connection windowForXCBId:pressEvent->event];
-        NSLog(@"GSTheme: handleTitlebarButtonPress for window ID %u, window object: %@",
-              pressEvent->event, window ? NSStringFromClass([window class]) : @"nil");
-
-        if (!window) {
-            NSLog(@"GSTheme: No window found for ID %u", pressEvent->event);
-            return NO;
-        }
-
-        // Check if it's an XCBTitleBar (GSTheme renders to XCBTitleBar, not a separate class)
-        if (![window isKindOfClass:[XCBTitleBar class]]) {
-            NSLog(@"GSTheme: Window is not XCBTitleBar, it's %@", NSStringFromClass([window class]));
-            return NO;
-        }
-
-        XCBTitleBar *titlebar = (XCBTitleBar*)window;
-        XCBRect titlebarRect = [titlebar windowRect];
-        NSLog(@"GSTheme: Found titlebar, windowRect: %ux%u at (%d,%d), parentWindow: %@",
-              (unsigned)titlebarRect.size.width, (unsigned)titlebarRect.size.height,
-              (int)titlebarRect.position.x, (int)titlebarRect.position.y,
-              [titlebar parentWindow] ? NSStringFromClass([[titlebar parentWindow] class]) : @"nil");
-
-        // Right-click on titlebar → show tiling context menu (deferred)
-        if (pressEvent->detail == 3) {
-            xcb_allow_events([connection connection], XCB_ALLOW_ASYNC_POINTER, pressEvent->time);
-            xcb_ungrab_pointer([connection connection], pressEvent->time);
-            [connection flush];
-
-            XCBFrame *frame = (XCBFrame*)[titlebar parentWindow];
-            if (frame && [frame isKindOfClass:[XCBFrame class]]) {
-                NSDictionary *info = @{
-                    @"frame": frame,
-                    @"x": @((double)pressEvent->root_x),
-                    @"y": @((double)pressEvent->root_y)
-                };
-                [self performSelector:@selector(deferredShowTilingContextMenu:)
-                           withObject:info
-                           afterDelay:0];
-            }
-            return YES;
-        }
-
-        // Check which button was clicked using the button layout
-        NSPoint clickPoint = NSMakePoint(pressEvent->event_x, pressEvent->event_y);
-        NSLog(@"GSTheme: Click at (%.0f, %.0f)", clickPoint.x, clickPoint.y);
-        GSThemeTitleBarButton button = [self buttonAtPoint:clickPoint forTitlebar:titlebar];
-
-        if (button == GSThemeTitleBarButtonNone) {
-            return NO; // Click wasn't on a button, let handleButtonPress: handle it
-        }
-
-        // Release the implicit grab from the button press. Use ASYNC_POINTER (not
-        // REPLAY_POINTER) because the WM fully handles titlebar button actions — replaying
-        // the event would re-trigger the passive grab and fire the action a second time.
-        xcb_allow_events([connection connection], XCB_ALLOW_ASYNC_POINTER, pressEvent->time);
-
-        // Find the frame that contains this titlebar
-        XCBFrame *frame = (XCBFrame*)[titlebar parentWindow];
-        if (!frame || ![frame isKindOfClass:[XCBFrame class]]) {
-            NSLog(@"GSTheme: Could not find frame for titlebar button action");
-            return NO;
-        }
-
-        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-
-        // Handle the button action using xcbkit methods
-        switch (button) {
-            case GSThemeTitleBarButtonClose:
-                NSLog(@"GSTheme: Close button clicked");
-                if (clientWindow) {
-                    [clientWindow close];
-                    [frame setNeedDestroy:YES];
-                }
-                break;
-
-            case GSThemeTitleBarButtonMiniaturize:
-                NSLog(@"GSTheme: Minimize button clicked");
-                [frame minimize];
-                break;
-
-            case GSThemeTitleBarButtonZoom:
-                NSLog(@"GSTheme: Zoom button clicked, frame isMaximized: %d", [frame isMaximized]);
-                if ([frame isMaximized]) {
-                    // Restore from maximized
-                    NSLog(@"GSTheme: Restoring window from maximized state");
-                    XCBRect startRect = [frame windowRect];
-                    XCBRect restoredRect = [frame oldRect];  // Get saved pre-maximize rect
-
-                    // Use programmatic resize that follows the same code path as manual resize
-                    [frame programmaticResizeToRect:restoredRect];
-                    [frame setFullScreen:NO];
-                    [titlebar setFullScreen:NO];
-                    if (clientWindow) {
-                        [clientWindow setFullScreen:NO];
-                    }
-                    [frame setIsMaximized:NO];
-
-                    // Recreate the titlebar pixmap at the restored size
-                    [titlebar destroyPixmap];
-                    [titlebar createPixmap];
-                    XCBRect restoredFrameRect = [frame windowRect];
-                    uint16_t titleHgt = [titlebar windowRect].size.height;
-                    NSLog(@"GSTheme: Titlebar pixmap recreated for restored size %dx%d",
-                          restoredFrameRect.size.width, titleHgt);
-
-                    // Redraw titlebar with GSTheme at restored size
-                    [URSThemeIntegration renderGSThemeToWindow:frame
-                                                         frame:frame
-                                                         title:[titlebar windowTitle]
-                                                        active:YES];
-
-                    // Update background pixmap and copy to window
-                    [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
-                    [titlebar drawArea:[titlebar windowRect]];
-
-                    // Update resize zone positions and shape mask for new dimensions
-                    [frame updateAllResizeZonePositions];
-                    [frame applyRoundedCornersShapeMask];
-
-                    {
-                        Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                        id compositor = nil;
-                        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                            compositor = [compositorClass performSelector:@selector(sharedManager)];
-                        }
-                        if (compositor && [compositor respondsToSelector:@selector(compositingActive)] &&
-                            [compositor compositingActive] &&
-                            [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
-                            XCBRect endRect = [frame windowRect];
-                            [compositor animateWindowTransition:[frame window]
-                                                 fromRect:startRect
-                                                   toRect:endRect
-                                                 duration:0.22
-                                                     fade:NO];
-                        }
-                    }
-
-                    NSLog(@"GSTheme: Restore complete, titlebar redrawn");
-                } else {
-                    // Maximize to workarea size (respects struts)
-                    NSLog(@"GSTheme: Maximizing window");
-                    XCBRect startRect = [frame windowRect];
-
-                    /*** Save pre-maximize rect for restore ***/
-                    [frame setOldRect:startRect];
-                    [titlebar setOldRect:[titlebar windowRect]];
-                    if (clientWindow) {
-                        [clientWindow setOldRect:[clientWindow windowRect]];
-                    }
-
-                    NSRect workarea = [self currentWorkarea];
-                    /*** Use programmatic resize that follows the same code path as manual resize ***/
-                    XCBRect targetRect = XCBMakeRect(XCBMakePoint((int32_t)workarea.origin.x, (int32_t)workarea.origin.y),
-                                                      XCBMakeSize((uint32_t)workarea.size.width, (uint32_t)workarea.size.height));
-                    [frame programmaticResizeToRect:targetRect];
-                    [frame setFullScreen:YES];
-                    [frame setIsMaximized:YES];
-                    [titlebar setFullScreen:YES];
-                    if (clientWindow) {
-                        [clientWindow setFullScreen:YES];
-                    }
-
-                    // Recreate the titlebar pixmap at the new size
-                    [titlebar destroyPixmap];
-                    [titlebar createPixmap];
-                    uint16_t titleHgt = [titlebar windowRect].size.height;
-                    NSLog(@"GSTheme: Titlebar pixmap recreated for maximized size %dx%d",
-                          (uint32_t)workarea.size.width, titleHgt);
-
-                    // Redraw titlebar with GSTheme at new size
-                    [URSThemeIntegration renderGSThemeToWindow:frame
-                                                         frame:frame
-                                                         title:[titlebar windowTitle]
-                                                        active:YES];
-
-                    // Update background pixmap and copy to window
-                    [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
-                    [titlebar drawArea:[titlebar windowRect]];
-
-                    // Update resize zone positions and shape mask for new dimensions
-                    [frame updateAllResizeZonePositions];
-                    [frame applyRoundedCornersShapeMask];
-
-                    {
-                        Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                        id compositor = nil;
-                        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                            compositor = [compositorClass performSelector:@selector(sharedManager)];
-                        }
-                        if (compositor && [compositor respondsToSelector:@selector(compositingActive)] &&
-                            [compositor compositingActive] &&
-                            [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
-                            XCBRect endRect = [frame windowRect];
-                            [compositor animateWindowTransition:[frame window]
-                                                 fromRect:startRect
-                                                   toRect:endRect
-                                                 duration:0.22
-                                                     fade:NO];
-                        }
-                    }
-
-                    NSLog(@"GSTheme: Maximize complete, titlebar redrawn at new size");
-                }
-                break;
-
-            default:
-                return NO;
-        }
-
-        // Clean up grab/drag state since handleButtonPress: is bypassed when we return YES.
-        // Without this, a dangling dragState from a prior interaction causes phantom drags
-        // after minimize/restore (the button release is lost when the window is unmapped).
-        [titlebar ungrabPointer];
-        connection.dragState = NO;
-        connection.resizeState = NO;
-
-        [connection flush];
-        return YES; // We handled the button press
-
-    } @catch (NSException *exception) {
-        NSLog(@"Exception handling titlebar button press: %@", exception.reason);
-        return NO;
-    }
-}
-
-#pragma mark - Focus Change Rendering
-
-- (void)rerenderTitlebarForFrame:(XCBFrame*)frame active:(BOOL)isActive {
-    if (!frame) {
-        return;
-    }
-
-    @try {
-        XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
-        if (!titlebarWindow || ![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
-            return;
-        }
-        XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
-
-        NSLog(@"Rerendering titlebar '%@' as %@", titlebar.windowTitle, isActive ? @"active" : @"inactive");
-
-        // Render with GSTheme
-        [URSThemeIntegration renderGSThemeToWindow:frame
-                                             frame:frame
-                                             title:[titlebar windowTitle]
-                                            active:isActive];
-
-        // Update background pixmap and redraw
-        [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
-        [titlebar drawArea:[titlebar windowRect]];
-        [connection flush];
-
-    } @catch (NSException *exception) {
-        NSLog(@"Exception in rerenderTitlebarForFrame: %@", exception.reason);
-    }
-}
-
-#pragma mark - Keyboard Event Handling (Alt-Tab)
-
-- (void)cleanupKeyboardGrabbing {
-    NSLog(@"[Alt-Tab] Cleaning up keyboard grabbing");
-    
-    @try {
-        XCBScreen *screen = [[connection screens] objectAtIndex:0];
-        xcb_window_t root = [[screen rootWindow] window];
-        xcb_connection_t *conn = [connection connection];
-        
-        // Ungrab all key combinations we previously grabbed
-        // We need to ungrab both Alt+Tab and Shift+Alt+Tab
-        
-        // Get the keyboard mapping to find Tab key (same as in setup)
-        xcb_get_keyboard_mapping_cookie_t cookie = xcb_get_keyboard_mapping(
-            conn,
-            8,   // min_keycode
-            248  // count (255 - 8 + 1)
-        );
-        
-        xcb_get_keyboard_mapping_reply_t *reply = xcb_get_keyboard_mapping_reply(conn, cookie, NULL);
-        if (!reply) {
-            NSLog(@"[Alt-Tab] Warning: Failed to get keyboard mapping during cleanup");
-            // Fallback ungrab with common Tab keycode, all lock modifier combinations
-            uint16_t fbLockMasks[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
-            for (int j = 0; j < 4; j++) {
-                xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | fbLockMasks[j]);
-                xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | fbLockMasks[j]);
-            }
-            [connection flush];
-            return;
-        }
-        
-        xcb_keysym_t *keysyms = xcb_get_keyboard_mapping_keysyms(reply);
-        int keysyms_len = xcb_get_keyboard_mapping_keysyms_length(reply);
-        
-        // Find Tab key and ungrab it
-        BOOL tabFound = NO;
-        for (int i = 0; i < keysyms_len; i++) {
-            if (keysyms[i] == XK_Tab) {
-                xcb_keycode_t keycode = 8 + (i / reply->keysyms_per_keycode);
-                
-                NSLog(@"[Alt-Tab] Ungrabbing Tab key at keycode %d", keycode);
-
-                // Ungrab Alt+Tab and Shift+Alt+Tab with all lock modifier combinations
-                uint16_t lockMasks[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
-                for (int j = 0; j < 4; j++) {
-                    xcb_ungrab_key(conn, keycode, root, XCB_MOD_MASK_1 | lockMasks[j]);
-                    xcb_ungrab_key(conn, keycode, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | lockMasks[j]);
-                }
-                
-                tabFound = YES;
-                break;
-            }
-        }
-        
-        if (!tabFound) {
-            NSLog(@"[Alt-Tab] Using fallback keycode 23 for ungrab");
-            uint16_t fbLockMasks2[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
-            for (int j = 0; j < 4; j++) {
-                xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | fbLockMasks2[j]);
-                xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | fbLockMasks2[j]);
-            }
-        }
-        
-        free(reply);
-        [connection flush];
-        NSLog(@"[Alt-Tab] Successfully ungrabbed keyboard");
-
-        // Ensure poll timer is stopped
-        [self stopAltReleasePoll];
-        
-    } @catch (NSException *exception) {
-        NSLog(@"[Alt-Tab] Exception in cleanupKeyboardGrabbing: %@", exception.reason);
-    }
-}
+#pragma mark - Cleanup
 
 - (void)cleanupRootWindowEventMask {
     NSLog(@"[WindowManager] Cleaning up root window event mask");
@@ -2331,10 +1689,8 @@
         XCBWindow *rootWindow = [[XCBWindow alloc] initWithXCBWindow:[[screen rootWindow] window] 
                                                         andConnection:connection];
         
-        // Clear SUBSTRUCTURE_REDIRECT to allow normal window manager behavior
-        // This allows window clicks and focus changes to work after WM exits
         uint32_t values[1];
-        values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;  // Keep notify, but remove redirect
+        values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
         
         BOOL success = [rootWindow changeAttributes:values 
                                            withMask:XCB_CW_EVENT_MASK 
@@ -2353,310 +1709,6 @@
     }
 }
 
-- (void)setupKeyboardGrabbing {
-    NSLog(@"[Alt-Tab] Setting up keyboard grabbing");
-    
-    @try {
-        XCBScreen *screen = [[connection screens] objectAtIndex:0];
-        xcb_window_t root = [[screen rootWindow] window];
-        xcb_connection_t *conn = [connection connection];
-        
-        // Standard keycodes for Tab on most keyboards
-        // Tab is usually keycode 23 on X11 systems
-        // But we need to grab all variations
-        
-        // Get the keyboard mapping to find Tab key
-        const xcb_setup_t *setup = xcb_get_setup(conn);
-        xcb_get_keyboard_mapping_cookie_t cookie = xcb_get_keyboard_mapping(
-            conn,
-            setup->min_keycode,
-            setup->max_keycode - setup->min_keycode + 1
-        );
-        
-        xcb_get_keyboard_mapping_reply_t *reply = xcb_get_keyboard_mapping_reply(conn, cookie, NULL);
-        if (!reply) {
-            NSLog(@"[Alt-Tab] ERROR: Failed to get keyboard mapping");
-            return;
-        }
-        
-        xcb_keysym_t *keysyms = xcb_get_keyboard_mapping_keysyms(reply);
-        int keysyms_len = xcb_get_keyboard_mapping_keysyms_length(reply);
-        
-        NSLog(@"[Alt-Tab] Found %d keysyms in keyboard mapping", keysyms_len);
-        
-        // Find Tab key and grab it, and cache Alt keycodes
-        BOOL tabFound = NO;
-        for (int i = 0; i < keysyms_len; i++) {
-            // Cache Alt/Meta keycodes for query_keymap polling
-            // We look for Alt, Meta, or Super keys as candidates for Mod1
-            if (keysyms[i] == XK_Alt_L || keysyms[i] == XK_Alt_R ||
-                keysyms[i] == XK_Meta_L || keysyms[i] == XK_Meta_R ||
-                keysyms[i] == XK_Super_L || keysyms[i] == XK_Super_R) {
-                xcb_keycode_t altcode = setup->min_keycode + (i / reply->keysyms_per_keycode);
-                
-                // Avoid duplicates
-                if (![self.altKeycodes containsObject:@(altcode)]) {
-                    NSLog(@"[Alt-Tab] Caching potential modifier key: %d (sym=0x%x)", altcode, (unsigned int)keysyms[i]);
-                    [self.altKeycodes addObject:@(altcode)];
-                }
-            }
-
-            if (keysyms[i] == XK_Tab) {
-                // Calculate keycode from index
-                // keycode = min_keycode + (index / keysyms_per_keycode)
-                xcb_keycode_t keycode = setup->min_keycode + (i / reply->keysyms_per_keycode);
-                
-                NSLog(@"[Alt-Tab] Found Tab key at keycode %d", keycode);
-                
-                // Grab Alt+Tab and Shift+Alt+Tab with all lock modifier combinations
-                // so that NumLock (Mod2) and CapsLock don't block the grab
-                uint16_t lockMasks[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
-                for (int j = 0; j < 4; j++) {
-                    xcb_grab_key(conn,
-                               0,  // owner_events
-                               root,
-                               XCB_MOD_MASK_1 | lockMasks[j],
-                               keycode,
-                               XCB_GRAB_MODE_ASYNC,
-                               XCB_GRAB_MODE_ASYNC);
-
-                    xcb_grab_key(conn,
-                               0,  // owner_events
-                               root,
-                               XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | lockMasks[j],
-                               keycode,
-                               XCB_GRAB_MODE_ASYNC,
-                               XCB_GRAB_MODE_ASYNC);
-                }
-                
-                tabFound = YES;
-                // Don't break, keep scanning for Alt keycodes
-            }
-        }
-        
-        // Also explicitly query the modifier mapping to find all keycodes assigned to Mod1
-        xcb_get_modifier_mapping_cookie_t modCookie = xcb_get_modifier_mapping(conn);
-        xcb_get_modifier_mapping_reply_t *modReply = xcb_get_modifier_mapping_reply(conn, modCookie, NULL);
-        if (modReply) {
-            int keycodesPerMod = modReply->keycodes_per_modifier;
-            xcb_keycode_t *modKeycodes = xcb_get_modifier_mapping_keycodes(modReply);
-            
-            // Mod1 is index 3
-            NSLog(@"[Alt-Tab] Querying Mod1 (Alt) modifier mapping (%d keycodes per modifier)", keycodesPerMod);
-            for (int i = 0; i < keycodesPerMod; i++) {
-                xcb_keycode_t kc = modKeycodes[3 * keycodesPerMod + i];
-                if (kc != 0) {
-                    if (![self.altKeycodes containsObject:@(kc)]) {
-                        NSLog(@"[Alt-Tab] Adding Mod1 keycode from mapping: %d", kc);
-                        [self.altKeycodes addObject:@(kc)];
-                    }
-                }
-            }
-            free(modReply);
-        }
-        
-        if (!tabFound) {
-            NSLog(@"[Alt-Tab] Warning: Tab key not found in keyboard mapping, using keycode 23 as fallback");
-            // Fallback to common Tab keycode, with all lock modifier combinations
-            uint16_t fbLockMasks[] = {0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2};
-            for (int j = 0; j < 4; j++) {
-                xcb_grab_key(conn, 0, root, XCB_MOD_MASK_1 | fbLockMasks[j], 23, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-                xcb_grab_key(conn, 0, root, XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | fbLockMasks[j], 23, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-            }
-        }
-        
-        free(reply);
-        [connection flush];
-        NSLog(@"[Alt-Tab] Successfully grabbed Alt+Tab and Shift+Alt+Tab");
-        
-    } @catch (NSException *exception) {
-        NSLog(@"[Alt-Tab] Exception in setupKeyboardGrabbing: %@", exception.reason);
-    }
-}
-
-- (void)handleKeyPressEvent:(xcb_key_press_event_t*)event {
-    @try {
-        // Check for modifier states directly from the event
-        BOOL altPressed = (event->state & XCB_MOD_MASK_1) != 0;
-        BOOL shiftPressed = (event->state & XCB_MOD_MASK_SHIFT) != 0;
-        
-        // Standard keycodes for reference
-        // Tab is typically keycode 23
-        // Alt keys are typically 64 (Alt_L) and 108 (Alt_R)
-        // Shift keys are typically 50 (Shift_L) and 62 (Shift_R)
-        
-        NSLog(@"[Alt-Tab] Key press: keycode=%d, state=0x%x, alt=%d, shift=%d", 
-              event->detail, event->state, altPressed, shiftPressed);
-        
-        // Track Alt key state using cached keycodes
-        if ([self.altKeycodes containsObject:@(event->detail)]) {
-            self.altKeyPressed = YES;
-            NSLog(@"[Alt-Tab] Alt-class key pressed: keycode=%d", event->detail);
-        }
-        
-        // Track Shift key state
-        if (event->detail == 50 || event->detail == 62) {  // Shift keys
-            self.shiftKeyPressed = YES;
-        }
-        
-        // Handle Tab key (keycode 23) with Alt modifier
-        if (event->detail == 23 && altPressed) {  // Tab with Alt
-            NSLog(@"[Alt-Tab] Tab pressed with Alt (shift=%d)", shiftPressed);
-            
-            // If not already switching, grab the keyboard to receive all future key events
-            // including the Alt key release
-            if (!self.windowSwitcher.isSwitching) {
-                XCBScreen *screen = [[connection screens] objectAtIndex:0];
-                xcb_window_t root = [[screen rootWindow] window];
-                xcb_connection_t *conn = [connection connection];
-                
-                // Actively grab the keyboard to receive all key events
-                xcb_grab_keyboard_cookie_t cookie = xcb_grab_keyboard(conn,
-                                                                      0,  // owner_events
-                                                                      root,
-                                                                      XCB_CURRENT_TIME,
-                                                                      XCB_GRAB_MODE_ASYNC,
-                                                                      XCB_GRAB_MODE_ASYNC);
-                xcb_grab_keyboard_reply_t *reply = xcb_grab_keyboard_reply(conn, cookie, NULL);
-                
-                if (reply) {
-                    if (reply->status == XCB_GRAB_STATUS_SUCCESS) {
-                        NSLog(@"[Alt-Tab] Successfully grabbed keyboard");
-                    } else {
-                        NSLog(@"[Alt-Tab] Warning: Keyboard grab failed with status %d", reply->status);
-                    }
-                    free(reply);
-                }
-                [connection flush];
-            }
-            
-            if (shiftPressed) {
-                // Shift+Alt+Tab: cycle backward
-                NSLog(@"[Alt-Tab] Cycling backward");
-                [self.windowSwitcher cycleBackward];
-            } else {
-                // Alt+Tab: cycle forward
-                NSLog(@"[Alt-Tab] Cycling forward");
-                [self.windowSwitcher cycleForward];
-            }
-
-            // Start polling for Alt release as a robust fallback in case release events are missed
-            [self startAltReleasePoll];
-        }
-        
-    } @catch (NSException *exception) {
-        NSLog(@"[Alt-Tab] Exception in handleKeyPressEvent: %@", exception.reason);
-    }
-}
-
-- (void)handleKeyReleaseEvent:(xcb_key_release_event_t*)event {
-    @try {
-        // Track Alt key state using cached keycodes
-        if ([self.altKeycodes containsObject:@(event->detail)]) {
-            self.altKeyPressed = NO;
-            NSLog(@"[Alt-Tab] Alt-class key release: keycode=%d", event->detail);
-        }
-
-        // If we're currently switching, check if the switch should be completed.
-        // We ONLY close when Alt is fully released. We use the server-side keymap 
-        // query for maximum robustness, as event->state can sometimes be unreliable 
-        // during grabs or focus changes.
-        if (self.windowSwitcher.isSwitching) {
-            // Check if ANY modifier key that acts as Alt (Mod1) is still pressed
-            if (![self altModifierCurrentlyDown]) {
-                NSLog(@"[Alt-Tab] Alt release confirmed via keymap query - completing switch");
-
-                // Ungrab the keyboard so normal input is restored
-                xcb_connection_t *conn = [connection connection];
-                xcb_ungrab_keyboard(conn, XCB_CURRENT_TIME);
-                [connection flush];
-
-                // Perform the actual window activation and hide the overlay
-                [self.windowSwitcher completeSwitching];
-
-                // Stop the poll timer
-                [self stopAltReleasePoll];
-            } else {
-                // If Alt is still down, just log for debugging
-                if ([self.altKeycodes containsObject:@(event->detail)]) {
-                    NSLog(@"[Alt-Tab] One Alt key released, but another Alt/Meta key is still held.");
-                } else if (event->detail == 23) {
-                    NSLog(@"[Alt-Tab] Tab released, keeping switcher open as Alt is still held.");
-                }
-            }
-        }
-        
-        // Track Shift key release
-        if (event->detail == 50 || event->detail == 62) {  // Shift keys
-            self.shiftKeyPressed = NO;
-        }
-        
-    } @catch (NSException *exception) {
-        NSLog(@"[Alt-Tab] Exception in handleKeyReleaseEvent: %@", exception.reason);
-    }
-}
-
-// Polling helpers for robust Alt release detection
-- (BOOL)altModifierCurrentlyDown {
-    xcb_connection_t *conn = [connection connection];
-    xcb_query_keymap_cookie_t cookie = xcb_query_keymap(conn);
-    xcb_query_keymap_reply_t *reply = xcb_query_keymap_reply(conn, cookie, NULL);
-    if (!reply) return NO;
-
-    const uint8_t *keys = reply->keys;  // Use reply->keys array from xcb_query_keymap_reply
-    BOOL down = NO;
-
-    for (NSNumber *num in self.altKeycodes) {
-        xcb_keycode_t keycode = (xcb_keycode_t)[num unsignedCharValue];
-        if (keycode < 8) continue; // safety
-        uint8_t byte = keys[keycode >> 3];
-        uint8_t mask = (1 << (keycode & 7));
-        if (byte & mask) {
-            down = YES;
-            break;
-        }
-    }
-
-    free(reply);
-    return down;
-}
-
-- (void)startAltReleasePoll {
-    if (self.altReleasePollTimer) return;
-    NSLog(@"[Alt-Tab] Starting Alt release poll timer");
-    self.altReleasePollTimer = [NSTimer scheduledTimerWithTimeInterval:0.05
-                                                                 target:self
-                                                               selector:@selector(checkAltReleaseTimerFired:)
-                                                               userInfo:nil
-                                                                repeats:YES];
-}
-
-- (void)stopAltReleasePoll {
-    if (!self.altReleasePollTimer) return;
-    NSLog(@"[Alt-Tab] Stopping Alt release poll timer");
-    [self.altReleasePollTimer invalidate];
-    self.altReleasePollTimer = nil;
-}
-
-- (void)checkAltReleaseTimerFired:(NSTimer*)timer {
-    if (!self.windowSwitcher.isSwitching) {
-        [self stopAltReleasePoll];
-        return;
-    }
-
-    if (![self altModifierCurrentlyDown]) {
-        NSLog(@"[Alt-Tab] Alt release detected via poll - completing switch");
-        xcb_connection_t *conn = [connection connection];
-        xcb_ungrab_keyboard(conn, XCB_CURRENT_TIME);
-        [connection flush];
-
-        [self.windowSwitcher completeSwitching];
-        [self stopAltReleasePoll];
-    }
-}
-
-#pragma mark - Cleanup
-
 - (void)cleanupBeforeExit
 {
     NSLog(@"[WindowManager] ========== Starting comprehensive cleanup ==========");
@@ -2672,7 +1724,7 @@
         
         // Step 1: Clean up keyboard grabs
         NSLog(@"[WindowManager] Step 1: Cleaning up keyboard grabs");
-        [self cleanupKeyboardGrabbing];
+        [self.keyboardManager cleanupKeyboardGrabbing];
         
         // Step 2: Undecorate and restore all client windows
         NSLog(@"[WindowManager] Step 2: Restoring all client windows");
@@ -2740,16 +1792,38 @@
                 
                 if (clientWindow) {
                     NSLog(@"[WindowManager] Restoring client window %u", [clientWindow window]);
-                    
-                    // Get client window geometry
-                    XCBRect clientRect = [clientWindow windowRect];
-                    
+
+                    // Translate client coordinates to root-space before reparenting.
+                    // clientWindow.windowRect is relative to the frame and causes
+                    // incorrect placement if used directly for root reparent.
+                    int16_t rootX = 0;
+                    int16_t rootY = 0;
+                    xcb_translate_coordinates_reply_t *translated =
+                        xcb_translate_coordinates_reply([connection connection],
+                                                       xcb_translate_coordinates([connection connection],
+                                                                                 [clientWindow window],
+                                                                                 [rootWindow window],
+                                                                                 0,
+                                                                                 0),
+                                                       NULL);
+
+                    if (translated) {
+                        rootX = translated->dst_x;
+                        rootY = translated->dst_y;
+                        free(translated);
+                    } else {
+                        XCBRect frameRect = [frame windowRect];
+                        XCBRect clientRect = [clientWindow windowRect];
+                        rootX = frameRect.position.x + clientRect.position.x;
+                        rootY = frameRect.position.y + clientRect.position.y;
+                    }
+
                     // Reparent client back to root window
                     xcb_reparent_window([connection connection],
                                       [clientWindow window],
                                       [rootWindow window],
-                                      clientRect.position.x,
-                                      clientRect.position.y);
+                                      rootX,
+                                      rootY);
                     
                     // Unmap the frame (this hides the decorations)
                     xcb_unmap_window([connection connection], [frame window]);
@@ -2757,7 +1831,7 @@
                     // Mark client as not decorated
                     [clientWindow setDecorated:NO];
                     
-                    NSLog(@"[WindowManager] Client window %u restored to root", [clientWindow window]);
+                    NSLog(@"[WindowManager] Client window %u restored to root at %d,%d", [clientWindow window], rootX, rootY);
                 }
                 
                 // Destroy the frame window (this will also clean up titlebar and buttons)
@@ -2877,36 +1951,6 @@
     }
 }
 
-#pragma mark - ICCCM/EWMH Strut and Workarea Management
-
-- (void)handleStrutPropertyChange:(xcb_property_notify_event_t*)event
-{
-    if (!event) return;
-    
-    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-    
-    NSString *atomName = [atomService atomNameFromAtom:event->atom];
-    
-    // Check if this is a strut property change
-    if ([atomName isEqualToString:[ewmhService EWMHWMStrut]] ||
-        [atomName isEqualToString:[ewmhService EWMHWMStrutPartial]]) {
-        
-        NSLog(@"[ICCCM] Strut property changed for window %u: %@", event->window, atomName);
-        
-        if (event->state == XCB_PROPERTY_DELETE) {
-            // Strut was removed
-            [self removeStrutForWindow:event->window];
-        } else {
-            // Strut was added or modified
-            [self readAndRegisterStrutForWindow:event->window];
-        }
-        
-        // Recalculate workarea after strut change
-        [self recalculateWorkarea];
-    }
-}
-
 #pragma mark - Window Title Updates
 
 - (NSString *)readUTF8Property:(NSString *)propertyName forWindow:(XCBWindow *)window
@@ -2935,7 +1979,13 @@
                                                          utf8Atom,
                                                          0,
                                                          1024);
-    xcb_get_property_reply_t *reply = xcb_get_property_reply([connection connection], cookie, NULL);
+    xcb_generic_error_t *propError = NULL;
+    xcb_get_property_reply_t *reply = xcb_get_property_reply([connection connection], cookie, &propError);
+    if (propError)
+    {
+        free(propError);
+        return nil;
+    }
     if (!reply) {
         return nil;
     }
@@ -3068,408 +2118,13 @@
     }
 }
 
-#pragma mark - Focus Management
-
-- (XCBWindow *)clientWindowForWindow:(XCBWindow *)window fallbackFrame:(XCBFrame *)frame
-{
-    if (!window) {
-        if (frame && [frame isKindOfClass:[XCBFrame class]]) {
-            return [frame childWindowForKey:ClientWindow];
-        }
-        return nil;
-    }
-
-    if ([window isKindOfClass:[XCBFrame class]]) {
-        return [(XCBFrame *)window childWindowForKey:ClientWindow];
-    }
-
-    if ([window isKindOfClass:[XCBTitleBar class]]) {
-        XCBFrame *parentFrame = (XCBFrame *)[window parentWindow];
-        if (parentFrame) {
-            return [parentFrame childWindowForKey:ClientWindow];
-        }
-    }
-
-    if ([window parentWindow] && [[window parentWindow] isKindOfClass:[XCBFrame class]]) {
-        return window; // client window inside a frame
-    }
-
-    if ([window parentWindow] && [[window parentWindow] isKindOfClass:[XCBTitleBar class]]) {
-        XCBFrame *parentFrame = (XCBFrame *)[[window parentWindow] parentWindow];
-        if (parentFrame) {
-            return [parentFrame childWindowForKey:ClientWindow];
-        }
-    }
-
-    if (frame && [frame isKindOfClass:[XCBFrame class]]) {
-        return [frame childWindowForKey:ClientWindow];
-    }
-
-    return window;
-}
-
-- (xcb_window_t)clientWindowIdForWindowId:(xcb_window_t)windowId
-{
-    if (windowId == XCB_NONE) {
-        return XCB_NONE;
-    }
-
-    XCBWindow *window = [connection windowForXCBId:windowId];
-    XCBWindow *clientWindow = [self clientWindowForWindow:window fallbackFrame:nil];
-    if (clientWindow) {
-        return [clientWindow window];
-    }
-
-    // If the window is already gone, try to match against frames
-    NSDictionary *windowsMap = [connection windowsMap];
-    for (NSString *mapWindowId in windowsMap) {
-        XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
-        if (mapWindow && [mapWindow isKindOfClass:[XCBFrame class]]) {
-            XCBFrame *frame = (XCBFrame *)mapWindow;
-            XCBWindow *client = [frame childWindowForKey:ClientWindow];
-            if (client && [client window] == windowId) {
-                return windowId;
-            }
-        }
-    }
-
-    return windowId;
-}
-
-- (XCBWindow *)windowForClientWindowId:(xcb_window_t)clientId
-{
-    if (clientId == XCB_NONE) {
-        return nil;
-    }
-
-    XCBWindow *window = [connection windowForXCBId:clientId];
-    if (window) {
-        return window;
-    }
-
-    NSDictionary *windowsMap = [connection windowsMap];
-    for (NSString *mapWindowId in windowsMap) {
-        XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
-        if (mapWindow && [mapWindow isKindOfClass:[XCBFrame class]]) {
-            XCBFrame *frame = (XCBFrame *)mapWindow;
-            XCBWindow *client = [frame childWindowForKey:ClientWindow];
-            if (client && [client window] == clientId) {
-                return client;
-            }
-        }
-    }
-
-    return nil;
-}
-
-- (BOOL)isWindowFocusable:(XCBWindow *)window allowDesktop:(BOOL)allowDesktop
-{
-    if (!window) {
-        return NO;
-    }
-
-    if (self.selectionManagerWindow && [window window] == [self.selectionManagerWindow window]) {
-        return NO;
-    }
-
-    if ([window needDestroy]) {
-        return NO;
-    }
-
-    if ([window isMinimized]) {
-        return NO;
-    }
-
-    [window updateAttributes];
-    XCBAttributesReply *attrs = [window attributes];
-    if (attrs && attrs.mapState != XCB_MAP_STATE_VIEWABLE) {
-        return NO;
-    }
-
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-    NSString *windowType = [window windowType];
-    BOOL isMenuWindow = [windowType isEqualToString:[ewmhService EWMHWMWindowTypeMenu]] ||
-                        [windowType isEqualToString:[ewmhService EWMHWMWindowTypePopupMenu]] ||
-                        [windowType isEqualToString:[ewmhService EWMHWMWindowTypeDropdownMenu]];
-
-    if (isMenuWindow) {
-        return NO;
-    }
-
-    BOOL isOtherNonFocusType = [windowType isEqualToString:[ewmhService EWMHWMWindowTypeTooltip]] ||
-                               [windowType isEqualToString:[ewmhService EWMHWMWindowTypeNotification]] ||
-                               [windowType isEqualToString:[ewmhService EWMHWMWindowTypeDock]] ||
-                               [windowType isEqualToString:[ewmhService EWMHWMWindowTypeToolbar]] ||
-                               [windowType isEqualToString:[ewmhService EWMHWMWindowTypeSplash]];
-
-    if (isOtherNonFocusType) {
-        return NO;
-    }
-
-    BOOL isDesktopWindow = [windowType isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]];
-    if (isDesktopWindow && !allowDesktop) {
-        return NO;
-    }
-
-    return YES;
-}
-
-- (xcb_window_t)desktopWindowCandidateExcluding:(xcb_window_t)excludedId
-{
-    NSDictionary *windowsMap = [connection windowsMap];
-    for (NSString *mapWindowId in windowsMap) {
-        XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
-        if (!mapWindow) {
-            continue;
-        }
-
-        XCBWindow *clientWindow = [self clientWindowForWindow:mapWindow fallbackFrame:nil];
-        if (!clientWindow) {
-            continue;
-        }
-
-        xcb_window_t clientId = [clientWindow window];
-        if (clientId == excludedId) {
-            continue;
-        }
-
-        if ([self isWindowFocusable:clientWindow allowDesktop:YES]) {
-            NSString *windowType = [clientWindow windowType];
-            EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-            if ([windowType isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]]) {
-                return clientId;
-            }
-        }
-    }
-
-    return XCB_NONE;
-}
-
-- (xcb_window_t)anyFocusableWindowExcluding:(xcb_window_t)excludedId
-{
-    NSDictionary *windowsMap = [connection windowsMap];
-    for (NSString *mapWindowId in windowsMap) {
-        XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
-        if (!mapWindow) {
-            continue;
-        }
-
-        XCBWindow *clientWindow = [self clientWindowForWindow:mapWindow fallbackFrame:nil];
-        if (!clientWindow) {
-            continue;
-        }
-
-        xcb_window_t clientId = [clientWindow window];
-        if (clientId == excludedId) {
-            continue;
-        }
-
-        if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
-            return clientId;
-        }
-    }
-
-    return XCB_NONE;
-}
-
-- (void)ensureFocusAfterWindowRemovalOfClientWindow:(xcb_window_t)removedClientId
-{
-    if (removedClientId == XCB_NONE) {
-        return;
-    }
-
-    if (removedClientId != self.lastFocusedWindowId) {
-        return;
-    }
-
-    xcb_window_t targetId = XCB_NONE;
-
-    if (self.previousFocusedWindowId != XCB_NONE && self.previousFocusedWindowId != removedClientId) {
-        XCBWindow *previousWindow = [self windowForClientWindowId:self.previousFocusedWindowId];
-        if (previousWindow && [self isWindowFocusable:previousWindow allowDesktop:NO]) {
-            targetId = self.previousFocusedWindowId;
-        }
-    }
-
-    if (targetId == XCB_NONE) {
-        targetId = [self desktopWindowCandidateExcluding:removedClientId];
-    }
-
-    if (targetId == XCB_NONE) {
-        targetId = [self anyFocusableWindowExcluding:removedClientId];
-    }
-
-    if (targetId == XCB_NONE) {
-        return;
-    }
-
-    XCBWindow *targetWindow = [self windowForClientWindowId:targetId];
-    if (!targetWindow) {
-        return;
-    }
-
-    NSLog(@"[Focus] Reassigning focus to window %u after removal of %u", targetId, removedClientId);
-    [targetWindow focus];
-
-    self.previousFocusedWindowId = self.lastFocusedWindowId;
-    self.lastFocusedWindowId = targetId;
-}
-
-- (void)readAndRegisterStrutForWindow:(xcb_window_t)windowId
-{
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-    
-    // Create a temporary window object to read properties
-    XCBWindow *window = [[XCBWindow alloc] initWithXCBWindow:windowId andConnection:connection];
-    if (!window) {
-        NSLog(@"[ICCCM] Cannot create window object for %u", windowId);
-        return;
-    }
-    
-    // Try to read _NET_WM_STRUT_PARTIAL first (more precise)
-    uint32_t strutPartial[12] = {0};
-    if ([ewmhService readStrutPartialForWindow:window strut:strutPartial]) {
-        // Store strut partial data
-        NSMutableDictionary *strutData = [NSMutableDictionary dictionary];
-        [strutData setObject:@(strutPartial[0]) forKey:@"left"];
-        [strutData setObject:@(strutPartial[1]) forKey:@"right"];
-        [strutData setObject:@(strutPartial[2]) forKey:@"top"];
-        [strutData setObject:@(strutPartial[3]) forKey:@"bottom"];
-        [strutData setObject:@(strutPartial[4]) forKey:@"left_start_y"];
-        [strutData setObject:@(strutPartial[5]) forKey:@"left_end_y"];
-        [strutData setObject:@(strutPartial[6]) forKey:@"right_start_y"];
-        [strutData setObject:@(strutPartial[7]) forKey:@"right_end_y"];
-        [strutData setObject:@(strutPartial[8]) forKey:@"top_start_x"];
-        [strutData setObject:@(strutPartial[9]) forKey:@"top_end_x"];
-        [strutData setObject:@(strutPartial[10]) forKey:@"bottom_start_x"];
-        [strutData setObject:@(strutPartial[11]) forKey:@"bottom_end_x"];
-        [strutData setObject:@(YES) forKey:@"isPartial"];
-        
-        [self.windowStruts setObject:strutData forKey:@(windowId)];
-        
-        NSLog(@"[ICCCM] Registered strut partial for window %u: left=%u, right=%u, top=%u, bottom=%u",
-              windowId, strutPartial[0], strutPartial[1], strutPartial[2], strutPartial[3]);
-        return;
-    }
-    
-    // Fall back to _NET_WM_STRUT
-    uint32_t strut[4] = {0};
-    if ([ewmhService readStrutForWindow:window strut:strut]) {
-        NSMutableDictionary *strutData = [NSMutableDictionary dictionary];
-        [strutData setObject:@(strut[0]) forKey:@"left"];
-        [strutData setObject:@(strut[1]) forKey:@"right"];
-        [strutData setObject:@(strut[2]) forKey:@"top"];
-        [strutData setObject:@(strut[3]) forKey:@"bottom"];
-        [strutData setObject:@(NO) forKey:@"isPartial"];
-        
-        [self.windowStruts setObject:strutData forKey:@(windowId)];
-        
-        NSLog(@"[ICCCM] Registered strut for window %u: left=%u, right=%u, top=%u, bottom=%u",
-              windowId, strut[0], strut[1], strut[2], strut[3]);
-    }
-}
-
-- (void)removeStrutForWindow:(xcb_window_t)windowId
-{
-    NSNumber *key = @(windowId);
-    if ([self.windowStruts objectForKey:key]) {
-        [self.windowStruts removeObjectForKey:key];
-        NSLog(@"[ICCCM] Removed strut for window %u", windowId);
-    }
-}
-
-- (void)recalculateWorkarea
-{
-    @try {
-        XCBScreen *screen = [[connection screens] objectAtIndex:0];
-        XCBWindow *rootWindow = [screen rootWindow];
-        
-        // Get screen dimensions
-        uint32_t screenWidth = [screen screen]->width_in_pixels;
-        uint32_t screenHeight = [screen screen]->height_in_pixels;
-        
-        // Start with full screen
-        int32_t workareaX = 0;
-        int32_t workareaY = 0;
-        uint32_t workareaWidth = screenWidth;
-        uint32_t workareaHeight = screenHeight;
-        
-        // Calculate maximum struts from all windows
-        uint32_t maxLeft = 0, maxRight = 0, maxTop = 0, maxBottom = 0;
-        
-        for (NSNumber *windowKey in self.windowStruts) {
-            NSDictionary *strutData = [self.windowStruts objectForKey:windowKey];
-            
-            uint32_t left = [[strutData objectForKey:@"left"] unsignedIntValue];
-            uint32_t right = [[strutData objectForKey:@"right"] unsignedIntValue];
-            uint32_t top = [[strutData objectForKey:@"top"] unsignedIntValue];
-            uint32_t bottom = [[strutData objectForKey:@"bottom"] unsignedIntValue];
-            
-            if (left > maxLeft) maxLeft = left;
-            if (right > maxRight) maxRight = right;
-            if (top > maxTop) maxTop = top;
-            if (bottom > maxBottom) maxBottom = bottom;
-        }
-        
-        // Apply struts to workarea
-        workareaX = (int32_t)maxLeft;
-        workareaY = (int32_t)maxTop;
-        workareaWidth = screenWidth - maxLeft - maxRight;
-        workareaHeight = screenHeight - maxTop - maxBottom;
-        
-        NSLog(@"[ICCCM] Recalculated workarea: x=%d, y=%d, width=%u, height=%u (struts: left=%u, right=%u, top=%u, bottom=%u)",
-              workareaX, workareaY, workareaWidth, workareaHeight, maxLeft, maxRight, maxTop, maxBottom);
-        
-        // Update _NET_WORKAREA on root window
-        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-        [ewmhService updateWorkareaForRootWindow:rootWindow 
-                                               x:workareaX 
-                                               y:workareaY 
-                                           width:workareaWidth 
-                                          height:workareaHeight];
-        
-        [connection flush];
-        
-    } @catch (NSException *exception) {
-        NSLog(@"[ICCCM] Exception recalculating workarea: %@", exception.reason);
-    }
-}
-
-- (NSRect)currentWorkarea
-{
-    XCBScreen *screen = [[connection screens] objectAtIndex:0];
-    uint32_t screenWidth = [screen screen]->width_in_pixels;
-    uint32_t screenHeight = [screen screen]->height_in_pixels;
-    
-    // Calculate maximum struts
-    uint32_t maxLeft = 0, maxRight = 0, maxTop = 0, maxBottom = 0;
-    
-    for (NSNumber *windowKey in self.windowStruts) {
-        NSDictionary *strutData = [self.windowStruts objectForKey:windowKey];
-        
-        uint32_t left = [[strutData objectForKey:@"left"] unsignedIntValue];
-        uint32_t right = [[strutData objectForKey:@"right"] unsignedIntValue];
-        uint32_t top = [[strutData objectForKey:@"top"] unsignedIntValue];
-        uint32_t bottom = [[strutData objectForKey:@"bottom"] unsignedIntValue];
-        
-        if (left > maxLeft) maxLeft = left;
-        if (right > maxRight) maxRight = right;
-        if (top > maxTop) maxTop = top;
-        if (bottom > maxBottom) maxBottom = bottom;
-    }
-    
-    return NSMakeRect((CGFloat)maxLeft, 
-                      (CGFloat)maxTop, 
-                      (CGFloat)(screenWidth - maxLeft - maxRight),
-                      (CGFloat)(screenHeight - maxTop - maxBottom));
-}
 
 #pragma mark - Cleanup
 
 - (void)dealloc
 {
     // Clean up keyboard grabs first
-    [self cleanupKeyboardGrabbing];
+    [self.keyboardManager cleanupKeyboardGrabbing];
 
     // Remove from run loop if integrated
     if (self.xcbEventsIntegrated && connection) {
@@ -3491,275 +2146,12 @@
 
 - (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow
 {
-    if (!clientWindow) {
-        return;
-    }
-    
-    xcb_window_t windowId = [clientWindow window];
-    NSNumber *windowIdNum = [NSNumber numberWithUnsignedInt:windowId];
-    
-    // Check if we already focused this window recently (prevent double-focus)
-    if ([self.recentlyAutoFocusedWindowIds containsObject:windowIdNum]) {
-        NSLog(@"[Focus] Window %u already auto-focused recently, skipping", windowId);
-        return;
-    }
-    
-    NSLog(@"[Focus] Focusing window %u after theme applied", windowId);
-    if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
-        [clientWindow focus];
-        [self.recentlyAutoFocusedWindowIds addObject:windowIdNum];
-        NSLog(@"[Focus] Successfully focused window %u", windowId);
-        
-        // Remove from set after 1 second to allow the window to be focused again if needed
-        [self performSelector:@selector(removeWindowFromRecentlyFocused:)
-                   withObject:windowIdNum
-                   afterDelay:1.0];
-    } else {
-        NSLog(@"[Focus] Window %u is not focusable", windowId);
-    }
+    [self.focusManager focusWindowAfterThemeApplied:clientWindow];
 }
 
 - (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum
 {
-    [self.recentlyAutoFocusedWindowIds removeObject:windowIdNum];
-}
-
-#pragma mark - Titlebar Context Menu (Right-Click Tiling)
-
-- (void)deferredShowTilingContextMenu:(NSDictionary *)info
-{
-    XCBFrame *frame = info[@"frame"];
-    NSPoint x11Point = NSMakePoint([info[@"x"] doubleValue], [info[@"y"] doubleValue]);
-    [self showTilingContextMenuForFrame:frame atX11Point:x11Point];
-}
-
-- (void)showTilingContextMenuForFrame:(XCBFrame *)frame atX11Point:(NSPoint)x11Point
-{
-    if (!frame) return;
-    if (self.tilingContextMenu) return;  // Prevent double-open
-
-    // Don't show the menu if the right button has already been released.
-    // The deferred perform can fire after the user released — showing a menu
-    // with no button held causes a grab-failure lockup in the tracking loop.
-    XCBScreen *screen = [[connection screens] objectAtIndex:0];
-    xcb_window_t root = [[screen rootWindow] window];
-    xcb_query_pointer_cookie_t cookie = xcb_query_pointer([connection connection], root);
-    xcb_query_pointer_reply_t *reply = xcb_query_pointer_reply([connection connection], cookie, NULL);
-    if (reply) {
-        BOOL rightButtonHeld = (reply->mask & XCB_KEY_BUT_MASK_BUTTON_3) != 0;
-        free(reply);
-        if (!rightButtonHeld) {
-            return;
-        }
-    }
-
-    // Convert X11 coordinates (Y=0 at top) to GNUstep (Y=0 at bottom)
-    uint16_t screenHeight = [screen height];
-    NSPoint gnustepPoint = NSMakePoint(x11Point.x, screenHeight - x11Point.y);
-
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Window"];
-
-    NSMenuItem *item;
-
-    item = [[NSMenuItem alloc] initWithTitle:@"Center"
-                                      action:@selector(tilingMenuCenter:)
-                               keyEquivalent:@""];
-    [item setTarget:self];
-    [item setRepresentedObject:frame];
-    [menu addItem:item];
-
-    item = [[NSMenuItem alloc] initWithTitle:@"Maximize Vertically"
-                                      action:@selector(tilingMenuMaximizeVertically:)
-                               keyEquivalent:@""];
-    [item setTarget:self];
-    [item setRepresentedObject:frame];
-    [menu addItem:item];
-
-    item = [[NSMenuItem alloc] initWithTitle:@"Maximize Horizontally"
-                                      action:@selector(tilingMenuMaximizeHorizontally:)
-                               keyEquivalent:@""];
-    [item setTarget:self];
-    [item setRepresentedObject:frame];
-    [menu addItem:item];
-
-    [menu addItem:[NSMenuItem separatorItem]];
-
-    item = [[NSMenuItem alloc] initWithTitle:@"Tile Left"
-                                      action:@selector(tilingMenuTileLeft:)
-                               keyEquivalent:@""];
-    [item setTarget:self];
-    [item setRepresentedObject:frame];
-    [menu addItem:item];
-
-    item = [[NSMenuItem alloc] initWithTitle:@"Tile Right"
-                                      action:@selector(tilingMenuTileRight:)
-                               keyEquivalent:@""];
-    [item setTarget:self];
-    [item setRepresentedObject:frame];
-    [menu addItem:item];
-
-    [menu addItem:[NSMenuItem separatorItem]];
-
-    item = [[NSMenuItem alloc] initWithTitle:@"Tile Top Left"
-                                      action:@selector(tilingMenuTileTopLeft:)
-                               keyEquivalent:@""];
-    [item setTarget:self];
-    [item setRepresentedObject:frame];
-    [menu addItem:item];
-
-    item = [[NSMenuItem alloc] initWithTitle:@"Tile Top Right"
-                                      action:@selector(tilingMenuTileTopRight:)
-                               keyEquivalent:@""];
-    [item setTarget:self];
-    [item setRepresentedObject:frame];
-    [menu addItem:item];
-
-    item = [[NSMenuItem alloc] initWithTitle:@"Tile Bottom Left"
-                                      action:@selector(tilingMenuTileBottomLeft:)
-                               keyEquivalent:@""];
-    [item setTarget:self];
-    [item setRepresentedObject:frame];
-    [menu addItem:item];
-
-    item = [[NSMenuItem alloc] initWithTitle:@"Tile Bottom Right"
-                                      action:@selector(tilingMenuTileBottomRight:)
-                               keyEquivalent:@""];
-    [item setTarget:self];
-    [item setRepresentedObject:frame];
-    [menu addItem:item];
-
-    NSLog(@"[TilingMenu] Showing context menu at GNUstep (%.0f, %.0f) for frame %u",
-          gnustepPoint.x, gnustepPoint.y, [frame window]);
-
-    NSEvent *event = [NSEvent mouseEventWithType: NSRightMouseDown
-                                        location: gnustepPoint
-                                   modifierFlags: 0
-                                       timestamp: 0
-                                    windowNumber: 0
-                                         context: nil
-                                     eventNumber: 0
-                                      clickCount: 1
-                                        pressure: 0];
-    self.tilingContextMenu = menu;  // Track before blocking call
-
-    // Watchdog: poll button state during menu tracking. If XGrabPointer fails
-    // (stale Xlib timestamp), the tracking loop won't see the button release.
-    // This timer fires in NSEventTrackingRunLoopMode and injects a synthetic
-    // mouse-up to break the loop when the right button is physically released.
-    NSTimer *watchdog = [NSTimer timerWithTimeInterval:0.05
-                                               target:self
-                                             selector:@selector(tilingMenuButtonWatchdog:)
-                                             userInfo:nil
-                                              repeats:YES];
-    [[NSRunLoop currentRunLoop] addTimer:watchdog forMode:NSEventTrackingRunLoopMode];
-
-    [NSMenu popUpContextMenu: menu withEvent: event forView: nil];
-
-    [watchdog invalidate];          // Safety: stop timer after menu dismissed
-    self.tilingContextMenu = nil;   // Clear after menu dismissed
-    menu = nil;
-}
-
-- (void)tilingMenuButtonWatchdog:(NSTimer *)timer
-{
-    if (!self.tilingContextMenu) {
-        [timer invalidate];
-        return;
-    }
-
-    XCBScreen *screen = [[connection screens] objectAtIndex:0];
-    xcb_window_t root = [[screen rootWindow] window];
-    xcb_query_pointer_cookie_t cookie = xcb_query_pointer([connection connection], root);
-    xcb_query_pointer_reply_t *reply = xcb_query_pointer_reply([connection connection], cookie, NULL);
-    if (reply) {
-        BOOL rightButtonHeld = (reply->mask & XCB_KEY_BUT_MASK_BUTTON_3) != 0;
-        free(reply);
-        if (!rightButtonHeld) {
-            NSEvent *syntheticUp = [NSEvent mouseEventWithType:NSLeftMouseUp
-                                                      location:NSMakePoint(-1, -1)
-                                                 modifierFlags:0
-                                                     timestamp:0
-                                                  windowNumber:0
-                                                       context:nil
-                                                   eventNumber:0
-                                                    clickCount:1
-                                                      pressure:0];
-            [NSApp postEvent:syntheticUp atStart:YES];
-            [timer invalidate];
-        }
-    }
-}
-
-- (void)tilingMenuCenter:(NSMenuItem *)sender
-{
-    XCBFrame *frame = [sender representedObject];
-    if (frame && [connection windowForXCBId:[frame window]]) {
-        [connection centerFrame:frame];
-    }
-}
-
-- (void)tilingMenuMaximizeVertically:(NSMenuItem *)sender
-{
-    XCBFrame *frame = [sender representedObject];
-    if (frame && [connection windowForXCBId:[frame window]]) {
-        [connection maximizeFrameVertically:frame];
-    }
-}
-
-- (void)tilingMenuMaximizeHorizontally:(NSMenuItem *)sender
-{
-    XCBFrame *frame = [sender representedObject];
-    if (frame && [connection windowForXCBId:[frame window]]) {
-        [connection maximizeFrameHorizontally:frame];
-    }
-}
-
-- (void)tilingMenuTileLeft:(NSMenuItem *)sender
-{
-    XCBFrame *frame = [sender representedObject];
-    if (frame && [connection windowForXCBId:[frame window]]) {
-        [connection executeSnapForZone:SnapZoneLeft frame:frame];
-    }
-}
-
-- (void)tilingMenuTileRight:(NSMenuItem *)sender
-{
-    XCBFrame *frame = [sender representedObject];
-    if (frame && [connection windowForXCBId:[frame window]]) {
-        [connection executeSnapForZone:SnapZoneRight frame:frame];
-    }
-}
-
-- (void)tilingMenuTileTopLeft:(NSMenuItem *)sender
-{
-    XCBFrame *frame = [sender representedObject];
-    if (frame && [connection windowForXCBId:[frame window]]) {
-        [connection executeSnapForZone:SnapZoneTopLeft frame:frame];
-    }
-}
-
-- (void)tilingMenuTileTopRight:(NSMenuItem *)sender
-{
-    XCBFrame *frame = [sender representedObject];
-    if (frame && [connection windowForXCBId:[frame window]]) {
-        [connection executeSnapForZone:SnapZoneTopRight frame:frame];
-    }
-}
-
-- (void)tilingMenuTileBottomLeft:(NSMenuItem *)sender
-{
-    XCBFrame *frame = [sender representedObject];
-    if (frame && [connection windowForXCBId:[frame window]]) {
-        [connection executeSnapForZone:SnapZoneBottomLeft frame:frame];
-    }
-}
-
-- (void)tilingMenuTileBottomRight:(NSMenuItem *)sender
-{
-    XCBFrame *frame = [sender representedObject];
-    if (frame && [connection windowForXCBId:[frame window]]) {
-        [connection executeSnapForZone:SnapZoneBottomRight frame:frame];
-    }
+    [self.focusManager removeWindowFromRecentlyFocused:windowIdNum];
 }
 
 @end

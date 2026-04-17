@@ -1,0 +1,339 @@
+//
+//  URSFocusManager.m
+//  uroswm - Focus Tracking and Window Resolution
+//
+//  Manages which window has focus, resolves window/frame/titlebar/client
+//  relationships, checks focusability, and reassigns focus after window removal.
+//
+
+#import "URSFocusManager.h"
+#import "URSProfiler.h"
+#import "XCBScreen.h"
+#import "XCBAttributesReply.h"
+#import "EWMHService.h"
+
+@interface URSFocusManager ()
+@property (strong, nonatomic) NSMutableSet *recentlyAutoFocusedWindowIds;
+@end
+
+@implementation URSFocusManager
+
+- (instancetype)initWithConnection:(XCBConnection *)aConnection
+                   selectionWindow:(XCBWindow *)aSelectionWindow
+{
+    self = [super init];
+    if (!self) return nil;
+
+    _connection = aConnection;
+    _selectionManagerWindow = aSelectionWindow;
+    _lastFocusedWindowId = XCB_NONE;
+    _previousFocusedWindowId = XCB_NONE;
+    _recentlyAutoFocusedWindowIds = [[NSMutableSet alloc] init];
+
+    return self;
+}
+
+#pragma mark - Focus Tracking
+
+- (void)trackFocusGain:(xcb_window_t)clientWindowId
+{
+    if (clientWindowId != XCB_NONE && clientWindowId != self.lastFocusedWindowId) {
+        self.previousFocusedWindowId = self.lastFocusedWindowId;
+        self.lastFocusedWindowId = clientWindowId;
+    }
+}
+
+- (void)ensureFocusAfterWindowRemoval:(xcb_window_t)removedClientId
+{
+    URS_PROFILE_BEGIN(focusResolve);
+    if (removedClientId != self.lastFocusedWindowId) {
+        if (self.lastFocusedWindowId == XCB_NONE) {
+            URS_PROFILE_END(focusResolve);
+            return;
+        }
+        XCBWindow *currentFocus = [self windowForClientWindowId:self.lastFocusedWindowId];
+        if (currentFocus && [self isWindowFocusable:currentFocus allowDesktop:NO]) {
+            URS_PROFILE_END(focusResolve);
+            return;
+        }
+        self.lastFocusedWindowId = XCB_NONE;
+    }
+
+    xcb_window_t targetId = XCB_NONE;
+
+    if (self.previousFocusedWindowId != XCB_NONE &&
+        self.previousFocusedWindowId != removedClientId) {
+        XCBWindow *previousWindow = [self windowForClientWindowId:self.previousFocusedWindowId];
+        if (previousWindow && [self isWindowFocusable:previousWindow allowDesktop:NO]) {
+            targetId = self.previousFocusedWindowId;
+        }
+    }
+
+    if (targetId == XCB_NONE) {
+        targetId = [self desktopWindowCandidateExcluding:removedClientId];
+    }
+
+    if (targetId == XCB_NONE) {
+        targetId = [self anyFocusableWindowExcluding:removedClientId];
+    }
+
+    if (targetId == XCB_NONE) {
+        URS_PROFILE_END(focusResolve);
+        return;
+    }
+
+    XCBWindow *targetWindow = [self windowForClientWindowId:targetId];
+    if (!targetWindow) {
+        URS_PROFILE_END(focusResolve);
+        return;
+    }
+
+    [targetWindow focus];
+
+    self.previousFocusedWindowId = self.lastFocusedWindowId;
+    self.lastFocusedWindowId = targetId;
+    URS_PROFILE_END(focusResolve);
+}
+
+- (void)focusWindowDelayed:(XCBWindow *)clientWindow
+{
+    if (!clientWindow) {
+        return;
+    }
+
+    xcb_window_t windowId = [clientWindow window];
+    NSNumber *windowIdNum = @(windowId);
+
+    if ([self.recentlyAutoFocusedWindowIds containsObject:windowIdNum]) {
+        NSLog(@"[Focus] Window %u already auto-focused recently, skipping", windowId);
+        return;
+    }
+
+    NSLog(@"[Focus] Focusing window %u after theme applied", windowId);
+    if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
+        [clientWindow focus];
+        [self.recentlyAutoFocusedWindowIds addObject:windowIdNum];
+        NSLog(@"[Focus] Successfully focused window %u", windowId);
+
+        [self performSelector:@selector(removeWindowFromRecentlyFocused:)
+                   withObject:windowIdNum
+                   afterDelay:1.0];
+    } else {
+        NSLog(@"[Focus] Window %u is not focusable", windowId);
+    }
+}
+
+- (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow
+{
+    [self focusWindowDelayed:clientWindow];
+}
+
+- (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum
+{
+    [self.recentlyAutoFocusedWindowIds removeObject:windowIdNum];
+}
+
+#pragma mark - Focusability Queries
+
+- (BOOL)isWindowFocusable:(XCBWindow *)window allowDesktop:(BOOL)allowDesktop
+{
+    if (!window) {
+        return NO;
+    }
+
+    if (self.selectionManagerWindow &&
+        [window window] == [self.selectionManagerWindow window]) {
+        return NO;
+    }
+
+    if ([window needDestroy]) {
+        return NO;
+    }
+
+    if ([window isMinimized]) {
+        return NO;
+    }
+
+    [window updateAttributes];
+    XCBAttributesReply *attrs = [window attributes];
+    if (attrs && attrs.mapState != XCB_MAP_STATE_VIEWABLE) {
+        return NO;
+    }
+
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
+    NSString *windowType = [window windowType];
+
+    BOOL isMenuWindow =
+        [windowType isEqualToString:[ewmhService EWMHWMWindowTypeMenu]] ||
+        [windowType isEqualToString:[ewmhService EWMHWMWindowTypePopupMenu]] ||
+        [windowType isEqualToString:[ewmhService EWMHWMWindowTypeDropdownMenu]];
+
+    if (isMenuWindow) {
+        return NO;
+    }
+
+    BOOL isOtherNonFocusType =
+        [windowType isEqualToString:[ewmhService EWMHWMWindowTypeTooltip]] ||
+        [windowType isEqualToString:[ewmhService EWMHWMWindowTypeNotification]] ||
+        [windowType isEqualToString:[ewmhService EWMHWMWindowTypeDock]] ||
+        [windowType isEqualToString:[ewmhService EWMHWMWindowTypeToolbar]] ||
+        [windowType isEqualToString:[ewmhService EWMHWMWindowTypeSplash]];
+
+    if (isOtherNonFocusType) {
+        return NO;
+    }
+
+    BOOL isDesktopWindow =
+        [windowType isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]];
+    if (isDesktopWindow && !allowDesktop) {
+        return NO;
+    }
+
+    return YES;
+}
+
+- (xcb_window_t)desktopWindowCandidateExcluding:(xcb_window_t)excludedId
+{
+    NSDictionary *windowsMap = [self.connection windowsMap];
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
+
+    for (NSString *mapWindowId in windowsMap) {
+        XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
+        if (!mapWindow) continue;
+
+        XCBWindow *clientWindow = [self clientWindowForWindow:mapWindow fallbackFrame:nil];
+        if (!clientWindow) continue;
+
+        xcb_window_t clientId = [clientWindow window];
+        if (clientId == excludedId) continue;
+
+        if ([self isWindowFocusable:clientWindow allowDesktop:YES]) {
+            NSString *windowType = [clientWindow windowType];
+            if ([windowType isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]]) {
+                return clientId;
+            }
+        }
+    }
+
+    return XCB_NONE;
+}
+
+- (xcb_window_t)anyFocusableWindowExcluding:(xcb_window_t)excludedId
+{
+    NSDictionary *windowsMap = [self.connection windowsMap];
+
+    for (NSString *mapWindowId in windowsMap) {
+        XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
+        if (!mapWindow) continue;
+
+        XCBWindow *clientWindow = [self clientWindowForWindow:mapWindow fallbackFrame:nil];
+        if (!clientWindow) continue;
+
+        xcb_window_t clientId = [clientWindow window];
+        if (clientId == excludedId) continue;
+
+        if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
+            return clientId;
+        }
+    }
+
+    return XCB_NONE;
+}
+
+#pragma mark - Window Resolution Utilities
+
+- (XCBWindow *)clientWindowForWindow:(XCBWindow *)window
+                       fallbackFrame:(XCBFrame *)frame
+{
+    if (!window) {
+        if (frame && [frame isKindOfClass:[XCBFrame class]]) {
+            return [frame childWindowForKey:ClientWindow];
+        }
+        return nil;
+    }
+
+    if ([window isKindOfClass:[XCBFrame class]]) {
+        return [(XCBFrame *)window childWindowForKey:ClientWindow];
+    }
+
+    if ([window isKindOfClass:[XCBTitleBar class]]) {
+        XCBFrame *parentFrame = (XCBFrame *)[window parentWindow];
+        if (parentFrame) {
+            return [parentFrame childWindowForKey:ClientWindow];
+        }
+    }
+
+    if ([window parentWindow] &&
+        [[window parentWindow] isKindOfClass:[XCBFrame class]]) {
+        return window;
+    }
+
+    if ([window parentWindow] &&
+        [[window parentWindow] isKindOfClass:[XCBTitleBar class]]) {
+        XCBFrame *parentFrame = (XCBFrame *)[[window parentWindow] parentWindow];
+        if (parentFrame) {
+            return [parentFrame childWindowForKey:ClientWindow];
+        }
+    }
+
+    if (frame && [frame isKindOfClass:[XCBFrame class]]) {
+        return [frame childWindowForKey:ClientWindow];
+    }
+
+    return window;
+}
+
+- (xcb_window_t)clientWindowIdForWindowId:(xcb_window_t)windowId
+{
+    if (windowId == XCB_NONE) {
+        return XCB_NONE;
+    }
+
+    XCBWindow *window = [self.connection windowForXCBId:windowId];
+    XCBWindow *clientWindow = [self clientWindowForWindow:window fallbackFrame:nil];
+    if (clientWindow) {
+        return [clientWindow window];
+    }
+
+    NSDictionary *windowsMap = [self.connection windowsMap];
+    for (NSString *mapWindowId in windowsMap) {
+        XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
+        if (mapWindow && [mapWindow isKindOfClass:[XCBFrame class]]) {
+            XCBFrame *frame = (XCBFrame *)mapWindow;
+            XCBWindow *client = [frame childWindowForKey:ClientWindow];
+            if (client && [client window] == windowId) {
+                return windowId;
+            }
+        }
+    }
+
+    return windowId;
+}
+
+- (XCBWindow *)windowForClientWindowId:(xcb_window_t)clientId
+{
+    if (clientId == XCB_NONE) {
+        return nil;
+    }
+
+    XCBWindow *window = [self.connection windowForXCBId:clientId];
+    if (window) {
+        return window;
+    }
+
+    NSDictionary *windowsMap = [self.connection windowsMap];
+    for (NSString *mapWindowId in windowsMap) {
+        XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
+        if (mapWindow && [mapWindow isKindOfClass:[XCBFrame class]]) {
+            XCBFrame *frame = (XCBFrame *)mapWindow;
+            XCBWindow *client = [frame childWindowForKey:ClientWindow];
+            if (client && [client window] == clientId) {
+                return client;
+            }
+        }
+    }
+
+    return nil;
+}
+
+@end

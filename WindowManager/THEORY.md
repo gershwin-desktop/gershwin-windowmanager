@@ -22,7 +22,7 @@ WindowManager is an Objective-C window manager that operates as an **NSApplicati
 
 - Traditional X11 window management (reparenting, decorations, focus handling)
 - GNUstep GSTheme-based titlebar rendering for visual consistency with AppKit applications
-- Optional XRender-based compositing for transparency effects (`-c` flag)
+- XRender-based compositing for transparency effects (disable with `-dc` flag)
 
 ### Operating Modes
 
@@ -141,7 +141,7 @@ The frame's geometry encompasses both the titlebar and client:
 The titlebar rendering involves multiple frameworks working together:
 
 ```
-1. GNUstep GSTheme          2. NSImage (in-memory)       3. Cairo Transfer
+1. GNUstep GSTheme          2. NSImage (in-memory)       3. Pixel Transfer
    draws to NSImage    →       RGBA bitmap buffer    →      to X11 Pixmap
    
    ┌─────────────┐           ┌─────────────┐           ┌─────────────┐
@@ -149,7 +149,7 @@ The titlebar rendering involves multiple frameworks working together:
    │  drawing    │           │ ImageRep    │           │  (X server) │
    │  context]   │           │ RGBA data   │           │             │
    └─────────────┘           └─────────────┘           └─────────────┘
-        AppKit                   CoreGraphics              X11/Cairo
+      AppKit                   CoreGraphics                 X11
 ```
 
 ### Detailed Steps
@@ -166,14 +166,14 @@ The titlebar rendering involves multiple frameworks working together:
    - Access raw RGBA pixel data
 
 3. **Format Conversion**
-   - Convert RGBA → BGRA (Cairo's ARGB32 format expects BGRA byte order)
+   - Convert RGBA → BGRA (X11 ARGB32 upload path expects BGRA byte order)
    - In-place byte swapping: swap R and B channels
 
-4. **Cairo Transfer**
-   - Create `cairo_xcb_surface_t` targeting the titlebar's X11 pixmap
-   - Create `cairo_image_surface_t` from the converted bitmap data
-   - Paint image surface onto X11 surface using `CAIRO_OPERATOR_SOURCE`
-   - Flush surfaces to ensure data reaches X server
+4. **Pixmap Upload Transfer**
+   - Target the titlebar's X11 pixmap directly
+   - Upload converted bitmap data via `xcb_put_image`
+   - Use `XCB_IMAGE_FORMAT_Z_PIXMAP` for direct pixel transfer
+   - Flush connection to ensure data reaches X server
 
 5. **Inactive State**
    - Create dimmed version of image (desaturated overlay)
@@ -450,7 +450,7 @@ Both states are pre-rendered to separate pixmaps for instant switching.
 ### 1. Eliminate Redundant Pixmap Copies
 
 **Current State:**
-- GSTheme renders to NSImage → copies to Cairo surface → copies to X11 pixmap
+- GSTheme renders to NSImage → uploads pixel buffer to X11 pixmap
 - Then pixmap is copied to window on expose
 
 **Improvement:**
@@ -568,7 +568,7 @@ xcb_copy_area(...);  // Now a no-op on some drivers
 ### 10. Reduce Format Conversions
 
 **Current State:**
-- NSImage (RGBA) → manual swap → Cairo (BGRA) → X11
+- NSImage (RGBA) → manual swap → X11 (BGRA)
 
 **Improvement:**
 - Configure NSBitmapImageRep with `NSAlphaFirstBitmapFormat` (ARGB)
@@ -592,20 +592,20 @@ NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
 
 The following optimizations have been implemented to bring the window manager to production quality:
 
-### A. Eliminated Redundant Cairo Rendering
+### A. Eliminated Redundant Legacy Rendering
 
-**Problem:** When GSTheme is active, the XCBKit layer would render full titlebars using Cairo (buttons, text, gradients), then URSThemeIntegration would immediately overwrite everything with GSTheme-rendered content. This wasted CPU cycles on drawing that was never visible.
+**Problem:** When GSTheme is active, the XCBKit layer would still execute legacy titlebar drawing (buttons, text, gradients), then URSThemeIntegration would immediately overwrite everything with GSTheme-rendered content. This wasted CPU cycles on drawing that was never visible.
 
 **Solution:** Added `isGSThemeActive` property to XCBTitleBar. When set, XCBFrame skips:
 - Button generation via TitleBarSettingsService
-- Cairo drawing of all buttons (close, minimize, maximize, etc.)
-- Cairo text rendering for window title
+- Legacy drawing of all buttons (close, minimize, maximize, etc.)
+- Legacy text rendering for window title
 
-The titlebar pixmap is still allocated for double-buffering, but Cairo drawing is bypassed entirely.
+The titlebar pixmap is still allocated for double-buffering, but legacy drawing is bypassed entirely.
 
 **Files Modified:**
 - `XCBTitleBar.h/m` - Added `setInternalTitle:` and conditional rendering in `setWindowTitle:`
-- `XCBFrame.m` - Added `isGSThemeActive` check before Cairo button drawing
+- `XCBFrame.m` - Added `isGSThemeActive` check before legacy button drawing
 
 ### B. Single-Pass Pixel Conversion with LUT
 
@@ -673,7 +673,7 @@ WindowManager achieves its hybrid architecture through careful layering:
 3. **URSThemeIntegration** bridges GNUstep theming to X11 visuals
 4. **URSCompositingManager** optionally provides composited rendering
 
-The key insight is using Cairo as the bridge between GNUstep's Quartz-like drawing model and X11's pixmap-based rendering. Double buffering at multiple levels (titlebar pixmaps, compositor root buffer) ensures smooth visual updates.
+The key insight is using direct XCB pixmap uploads as the bridge between GNUstep's Quartz-like drawing model and X11's pixmap-based rendering. Double buffering at multiple levels (titlebar pixmaps, compositor root buffer) ensures smooth visual updates.
 
 ### Remaining Optimization Opportunities
 

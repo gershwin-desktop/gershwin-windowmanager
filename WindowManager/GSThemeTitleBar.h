@@ -3,13 +3,13 @@
 //  uroswm - GSTheme-based TitleBar Replacement
 //
 //  A complete replacement for XCBTitleBar that uses GSTheme for all rendering
-//  instead of Cairo graphics. Provides authentic AppKit window decorations.
+//  using AppKit/GNUstep drawing. Provides authentic window decorations.
 //
 
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 #import <GNUstepGUI/GSTheme.h>
-#import <XCBKit/XCBTitleBar.h>
+#import "XCBTitleBar.h"
 
 // Button types for hit detection
 typedef NS_ENUM(NSInteger, GSThemeTitleBarButton) {

@@ -1,96 +1,71 @@
 //
 //  URSHybridEventHandler.h
-//  uroswm - Phase 1: NSApplication + NSRunLoop Integration
+//  uroswm - Event Coordinator
 //
 //  Created by Alessandro Sangiuliano on 22/06/20.
 //  Copyright (c) 2020 Alessandro Sangiuliano. All rights reserved.
 //
-//  Phase 1 Enhancement: NSApplication delegate that integrates XCB event handling
-//  with NSRunLoop using file descriptor monitoring (following libs-back pattern).
+//  Coordinator: owns the XCB event loop and dispatches to single-responsibility
+//  managers (focus, keyboard, workarea, titlebar, snapping menu).
 //
 
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
-#import <XCBKit/XCBConnection.h>
-#import <XCBKit/XCBWindow.h>
-#import <XCBKit/XCBTitleBar.h>
+#import "XCBConnection.h"
+#import "XCBWindow.h"
+#import "XCBTitleBar.h"
 #import "URSThemeIntegration.h"
 #import "URSWindowSwitcher.h"
 #import "URSWindowSwitcherOverlay.h"
 #import "URSCompositingManager.h"
-
-// Use GNUstep's existing RunLoopEventType and RunLoopEvents protocol
-// (already defined in Foundation/NSRunLoop.h)
+#import "URSFocusManager.h"
+#import "URSKeyboardManager.h"
+#import "URSWorkareaManager.h"
+#import "URSTitlebarController.h"
+#import "URSSnappingMenuController.h"
 
 @interface URSHybridEventHandler : NSObject <NSApplicationDelegate, RunLoopEvents>
 
-// XCB Integration Properties (same as original URSEventHandler)
-@property (strong, nonatomic) XCBConnection* connection;
-@property (strong, nonatomic) XCBWindow* selectionManagerWindow;
+// XCB Integration
+@property (strong, nonatomic) XCBConnection *connection;
+@property (strong, nonatomic) XCBWindow *selectionManagerWindow;
 
-// Phase 1 Validation Properties
+// Event loop bookkeeping
 @property (assign, nonatomic) BOOL xcbEventsIntegrated;
 @property (assign, nonatomic) BOOL nsRunLoopActive;
 @property (assign, nonatomic) NSUInteger eventCount;
 
-// Focus tracking to ensure a focused window exists
-@property (assign, nonatomic) xcb_window_t lastFocusedWindowId;
-@property (assign, nonatomic) xcb_window_t previousFocusedWindowId;
-
 // Window Switcher (Alt-Tab)
-@property (strong, nonatomic) URSWindowSwitcher* windowSwitcher;
-@property (assign, nonatomic) BOOL altKeyPressed;
-@property (assign, nonatomic) BOOL shiftKeyPressed;
+@property (strong, nonatomic) URSWindowSwitcher *windowSwitcher;
 
 // Compositing Manager
-@property (strong, nonatomic) URSCompositingManager* compositingManager;
+@property (strong, nonatomic) URSCompositingManager *compositingManager;
 @property (assign, nonatomic) BOOL compositingRequested;
 
-// ICCCM/EWMH Strut and Workarea Tracking
-@property (strong, nonatomic) NSMutableDictionary* windowStruts; // Maps window ID to strut data
+// --- Single-responsibility managers ---
+@property (strong, nonatomic) URSFocusManager *focusManager;
+@property (strong, nonatomic) URSKeyboardManager *keyboardManager;
+@property (strong, nonatomic) URSWorkareaManager *workareaManager;
+@property (strong, nonatomic) URSTitlebarController *titlebarController;
+@property (strong, nonatomic) URSSnappingMenuController *snappingMenuController;
 
-// Auto-focus tracking to prevent double-focusing windows
-@property (strong, nonatomic) NSMutableSet* recentlyAutoFocusedWindowIds;
-
-// Active tiling context menu (for dismiss-on-outside-click and double-open guard)
-@property (strong, nonatomic) NSMenu *tilingContextMenu;
-
-// Cached Alt keycodes and poll timer to robustly detect Alt release
-@property (strong, nonatomic) NSMutableArray* altKeycodes;
-@property (strong, nonatomic) NSTimer* altReleasePollTimer;
-
-// Original URSEventHandler methods (preserved for compatibility)
+// Window manager lifecycle
 - (BOOL)registerAsWindowManager;
 - (void)decorateExistingWindowsOnStartup;
 
-// New NSRunLoop Integration methods
+// NSRunLoop integration
 - (void)setupXCBEventIntegration;
-- (void)processXCBEvent:(xcb_generic_event_t*)event;
+- (void)processXCBEvent:(xcb_generic_event_t *)event;
 
-// NEW: GSTheme Integration methods
-- (void)handleWindowCreated:(XCBTitleBar*)titlebar;
-- (void)handleWindowFocusChanged:(XCBTitleBar*)titlebar isActive:(BOOL)active;
+// GSTheme integration
+- (void)handleWindowCreated:(XCBTitleBar *)titlebar;
+- (void)handleWindowFocusChanged:(XCBTitleBar *)titlebar isActive:(BOOL)active;
 - (void)refreshAllManagedWindows;
 
-// Cleanup methods
+// Cleanup
 - (void)cleanupBeforeExit;
 
-// ICCCM Manager Selection Protocol - Being Replaced
-- (void)handleSelectionClear:(xcb_selection_clear_event_t*)event;
-
-// Keyboard event handling for Alt-Tab
-- (void)setupKeyboardGrabbing;
-- (void)handleKeyPressEvent:(xcb_key_press_event_t*)event;
-- (void)handleKeyReleaseEvent:(xcb_key_release_event_t*)event;
-
-// Titlebar Context Menu (right-click tiling)
-- (void)showTilingContextMenuForFrame:(XCBFrame *)frame atX11Point:(NSPoint)x11Point;
-
-// ICCCM/EWMH Strut and Workarea Management
-- (void)handleStrutPropertyChange:(xcb_property_notify_event_t*)event;
-- (void)readAndRegisterStrutForWindow:(xcb_window_t)windowId;
-- (void)removeStrutForWindow:(xcb_window_t)windowId;
-- (void)recalculateWorkarea;
-- (NSRect)currentWorkarea;
+// ICCCM Manager Selection Protocol
+- (void)handleSelectionClear:(xcb_selection_clear_event_t *)event;
 
 @end

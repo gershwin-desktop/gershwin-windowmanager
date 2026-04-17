@@ -9,9 +9,9 @@
 #import <AppKit/AppKit.h>
 #import <GNUstepGUI/GSTheme.h>
 #import <xcb/xcb.h>
-#import <XCBKit/XCBTitleBar.h>
-#import <XCBKit/XCBFrame.h>
-#import <XCBKit/enums/ETitleBarColor.h>
+#import "XCBTitleBar.h"
+#import "XCBFrame.h"
+#import "ETitleBarColor.h"
 
 @interface URSThemeIntegration : NSObject
 
@@ -35,9 +35,6 @@
                         frame:(XCBFrame*)frame
                         title:(NSString*)title
                        active:(BOOL)isActive;
-
-// Disable XCBTitleBar drawing by overriding its draw methods
-+ (void)disableXCBTitleBarDrawing:(XCBTitleBar*)titlebar;
 
 // Refresh all titlebars with current theme
 + (void)refreshAllTitlebars;

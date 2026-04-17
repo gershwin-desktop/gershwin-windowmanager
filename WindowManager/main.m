@@ -1,20 +1,16 @@
 //
 //  main.m
-//  uroswm - Phase 1: NSApplication + NSRunLoop Integration
-//
-//  Created by Alessandro Sangiuliano on 22/06/20.
+//  Originally based on uroswm by Alessandro Sangiuliano.
 //  Copyright (c) 2020 Alessandro Sangiuliano. All rights reserved.
-//
-//  Phase 1 Enhancement: Convert from Foundation-only blocking event loop
-//  to NSApplication-based hybrid window manager with NSRunLoop integration.
 //
 
 #import <AppKit/AppKit.h>
 #import "URSHybridEventHandler.h"
 #import "UROSWMApplication.h"
 #import "URSThemeIntegration.h"
-#import <XCBKit/utils/XCBShape.h>
-#import <XCBKit/services/TitleBarSettingsService.h>
+#import "XCBTypes.h"
+#import "TitleBarSettingsService.h"
+#import "URSProfiler.h"
 #import <signal.h>
 #import <string.h>
 
@@ -67,21 +63,21 @@ int main(int argc, const char * argv[])
 {
     @autoreleasepool {
         
-        // Parse command-line arguments for compositing flag
-        BOOL enableCompositing = NO;
+        // Parse command-line arguments for compositing mode
+        BOOL enableCompositing = YES;
         for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--compositing") == 0) {
-                enableCompositing = YES;
-                NSLog(@"[WindowManager] Compositing mode enabled via command-line flag");
+            if (strcmp(argv[i], "-dc") == 0 || strcmp(argv[i], "--disable-compositing") == 0) {
+                enableCompositing = NO;
+                NSLog(@"[WindowManager] Compositing mode disabled via command-line flag");
                 break;
             } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
                 printf("WindowManager - Objective-C Window Manager\n");
                 printf("Usage: %s [options]\n\n", argv[0]);
                 printf("Options:\n");
-                printf("  -c, --compositing    Enable XRender compositing (experimental)\n");
+                printf("  -dc, --disable-compositing  Disable XRender compositing\n");
                 printf("  -h, --help          Show this help message\n\n");
-                printf("Without compositing, windows render directly (traditional mode).\n");
-                printf("With compositing, windows use XRender for transparency effects.\n");
+                printf("By default, windows use XRender compositing for transparency effects.\n");
+                printf("Use -dc to force traditional direct rendering mode.\n");
                 return 0;
             }
         }
@@ -123,6 +119,9 @@ int main(int argc, const char * argv[])
         
         // Setup signal handlers for clean shutdown
         setupSignalHandlers();
+
+        // Install profiling signal handler (SIGUSR1 dumps stats)
+        ursProfileInstallSignalHandler();
 
         // Start NSApplication main loop (replaces blocking XCB event loop)
         [app run];

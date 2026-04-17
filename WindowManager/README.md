@@ -15,7 +15,6 @@ To install WindowManager, you need XCBKit installed on your system.
 ### XCBKit Dependencies
 - libxcb
 - xcb-fixes
-- libcairo
 - xcb-icccm
 - gnustep-base
 
@@ -47,13 +46,13 @@ uroswm &
 uroswm [options]
 
 Options:
-  -c, --compositing    Enable XRender compositing (experimental)
+  -dc, --disable-compositing  Disable XRender compositing
   -h, --help          Show help message
 ```
 
 **Compositing Mode:**
-- **Without `-c`:** Windows render directly (traditional, stable mode)
-- **With `-c`:** Windows use XRender for transparency effects (experimental)
+- **Default:** Windows use XRender for transparency effects
+- **With `-dc`:** Windows render directly (traditional mode)
 - Automatically falls back to non-compositing on any errors
 - Requires COMPOSITE, RENDER, DAMAGE, and XFIXES X extensions
 
