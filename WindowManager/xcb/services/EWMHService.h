@@ -163,6 +163,9 @@
 @property (strong, nonatomic)NSString *EWMHStrutPartial;
 @property (strong, nonatomic)NSString *EWMHVisibleIconName;
 
+// Custom window properties for debugging
+@property (strong, nonatomic)NSString *WindowId;
+
 
 + (id) sharedInstanceWithConnection:(XCBConnection*)aConnection;
 
@@ -206,6 +209,12 @@
                               height:(uint32_t)height;
 - (BOOL) isWindowTypeDock:(XCBWindow*)aWindow;
 - (BOOL) readWorkareaForRootWindow:(XCBWindow*)rootWindow x:(int32_t*)outX y:(int32_t*)outY width:(uint32_t*)outWidth height:(uint32_t*)outHeight;
+
+// EWMH Client Window Properties (atoms management)
+- (void) setNetWmDesktopForWindow:(XCBWindow*)aWindow desktop:(uint32_t)desktopIndex;
+- (void) setNetWmAllowedActionsForWindow:(XCBWindow*)aWindow;
+- (void) setWindowIdAtomForWindow:(XCBWindow*)aWindow;
+- (void) initializeClientWindowAtomsForWindow:(XCBWindow*)aWindow;
 
 - (void) dealloc;
 

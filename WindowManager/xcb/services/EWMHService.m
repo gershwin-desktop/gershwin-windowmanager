@@ -147,6 +147,9 @@
 @synthesize EWMHStrutPartial;
 @synthesize EWMHVisibleIconName;
 
+// Custom window properties
+@synthesize WindowId;
+
 - (id) initWithConnection:(XCBConnection*)aConnection
 {
     self = [super init];
@@ -274,6 +277,9 @@
     EWMHFrameExtents = @"_NET_FRAME_EXTENTS";
     EWMHStrutPartial = @"_NET_WM_STRUT_PARTIAL";
     EWMHVisibleIconName = @"_NET_WM_VISIBLE_ICON_NAME";
+    
+    // Custom window property to display window ID
+    WindowId = @"_WINDOW_ID";
 
     //Array iitialization
     NSString* atomStrings[] =
@@ -391,27 +397,55 @@
     return sharedInstance;
 }
 
+
 - (void) putPropertiesForRootWindow:(XCBWindow *)rootWindow andWmWindow:(XCBWindow *)wmWindow
 {
+    // Standard EWMH atoms the WM supports - only include atoms defined in EWMH spec
     NSString *rootProperties[] =
     {
+        // Root Window Properties
         EWMHSupported,
         EWMHSupportingWMCheck,
-        EWMHStartupId,
         EWMHClientList,
         EWMHClientListStacking,
         EWMHNumberOfDesktops,
         EWMHCurrentDesktop,
         EWMHDesktopNames,
         EWMHActiveWindow,
+        EWMHWorkarea,
+        EWMHDesktopGeometry,
+        EWMHDesktopViewport,
+        EWMHVirtualRoots,
+        EWMHDesktopLayout,
+        EWMHShowingDesktop,
+        
+        // Root Window Messages
         EWMHCloseWindow,
-        EWMHFrameExtents,
+        EWMHMoveresizeWindow,
+        EWMHWMMoveresize,
+        EWMHRestackWindow,
+        EWMHRequestFrameExtents,
+        
+        // Window Manager Protocols
+        EWMHWMPing,
+        EWMHWMSyncRequest,
+        
+        // Client Window Properties
         EWMHWMName,
-        EWMHStrutPartial,
         EWMHWMIconName,
-        EWMHVisibleIconName,
         EWMHWMDesktop,
         EWMHWMWindowType,
+        EWMHWMState,
+        EWMHWMAllowedActions,
+        EWMHWMStrut,
+        EWMHWMStrutPartial,
+        EWMHWMIconGeometry,
+        EWMHWMIcon,
+        EWMHWMPid,
+        EWMHWMUserTime,
+        EWMHFrameExtents,
+        
+        // Window Types (all variants)
         EWMHWMWindowTypeDesktop,
         EWMHWMWindowTypeDock,
         EWMHWMWindowTypeToolbar,
@@ -426,27 +460,37 @@
         EWMHWMWindowTypeCombo,
         EWMHWMWindowTypeDnd,
         EWMHWMWindowTypeNormal,
-        EWMHWMIcon,
-        EWMHWMPid,
-        EWMHWMState,
+        
+        // Window States (all variants)
+        EWMHWMStateModal,
         EWMHWMStateSticky,
-        EWMHWMStateSkipTaskbar,
-        EWMHWMStateFullscreen,
-        EWMHWMStateMaximizedHorz,
         EWMHWMStateMaximizedVert,
+        EWMHWMStateMaximizedHorz,
+        EWMHWMStateShaded,
+        EWMHWMStateSkipTaskbar,
+        EWMHWMStateSkipPager,
+        EWMHWMStateHidden,
+        EWMHWMStateFullscreen,
         EWMHWMStateAbove,
         EWMHWMStateBelow,
-        EWMHWMStateModal,
-        EWMHWMStateHidden,
         EWMHWMStateDemandsAttention,
-        //EWMHRequestFrameExtents,
-        UTF8_STRING,
-        GNUStepFrameOffset,
-        GNUStepHideApp,
-        GNUStepWmAttr,
-        GNUStepMiniaturizeWindow,
-        GNUStepTitleBarState,
-        KdeNetWFrameStrut
+        
+        // Window Actions (all variants)
+        EWMHWMActionMove,
+        EWMHWMActionResize,
+        EWMHWMActionMinimize,
+        EWMHWMActionShade,
+        EWMHWMActionStick,
+        EWMHWMActionMaximizeHorz,
+        EWMHWMActionMaximizeVert,
+        EWMHWMActionFullscreen,
+        EWMHWMActionChangeDesktop,
+        EWMHWMActionClose,
+        EWMHWMActionAbove,
+        EWMHWMActionBelow,
+        
+        // Custom properties (for debugging/identification)
+        WindowId,
     };
 
     NSArray *rootAtoms = [NSArray arrayWithObjects:rootProperties count:sizeof(rootProperties)/sizeof(NSString*)];
@@ -454,6 +498,7 @@
     xcb_atom_t atomsTransformed[[rootAtoms count]];
     FnFromNSArrayAtomsToXcbAtomTArray(rootAtoms, atomsTransformed, atomService);
 
+    // Set _NET_SUPPORTED on root window
     xcb_change_property([connection connection],
                         XCB_PROP_MODE_REPLACE,
                         [rootWindow window],
@@ -465,6 +510,7 @@
 
     xcb_window_t wmXcbWindow = [wmWindow window];
 
+    // Set _NET_SUPPORTING_WM_CHECK on root pointing to WM window
     xcb_change_property([connection connection],
                         XCB_PROP_MODE_REPLACE,
                         [rootWindow window],
@@ -474,6 +520,7 @@
                         1,
                         &wmXcbWindow);
 
+    // Set _NET_SUPPORTING_WM_CHECK on WM window pointing to itself
     xcb_change_property([connection connection],
                         XCB_PROP_MODE_REPLACE,
                         wmXcbWindow,
@@ -483,6 +530,7 @@
                         1,
                         &wmXcbWindow);
 
+    // Set _NET_WM_NAME on WM window
     xcb_change_property([connection connection],
                         XCB_PROP_MODE_REPLACE,
                         wmXcbWindow,
@@ -492,9 +540,8 @@
                         6,
                         "uroswm");
 
-
+    // Set _NET_WM_PID on WM window
     int pid = getpid();
-
     xcb_change_property([connection connection],
                         XCB_PROP_MODE_REPLACE,
                         wmXcbWindow,
@@ -504,13 +551,9 @@
                         1,
                         &pid);
 
-    [self updateNetSupported:[[atomService cachedAtoms] allValues] forRootWindow:rootWindow];
-
-    //TODO: wm-specs says that if the _NET_WM_PID is set the ICCCM WM_CLIENT_MACHINE atom must be set.
-
     rootAtoms = nil;
-
 }
+
 
 - (void) changePropertiesForWindow:(XCBWindow *)aWindow
                           withMode:(uint8_t)mode
@@ -1323,6 +1366,371 @@
                            withData:atomList];
 }
 
+#pragma mark - EWMH Client Window Properties
+
+/**
+ * Set _NET_WM_DESKTOP on a window to specify which desktop it belongs to.
+ * @param aWindow The window to modify
+ * @param desktopIndex The desktop index (0-based), or 0xFFFFFFFF for all desktops
+ */
+- (void) setNetWmDesktopForWindow:(XCBWindow*)aWindow desktop:(uint32_t)desktopIndex
+{
+    if (!aWindow)
+        return;
+
+    [self changePropertiesForWindow:aWindow
+                           withMode:XCB_PROP_MODE_REPLACE
+                       withProperty:EWMHWMDesktop
+                           withType:XCB_ATOM_CARDINAL
+                         withFormat:32
+                     withDataLength:1
+                           withData:&desktopIndex];
+}
+
+/**
+ * Set _NET_WM_ALLOWED_ACTIONS on a window to advertise which actions are supported.
+ * For normal windows, this typically includes: MOVE, RESIZE, MINIMIZE, MAXIMIZE_HORZ,
+ * MAXIMIZE_VERT, FULLSCREEN, CHANGE_DESKTOP, and CLOSE.
+ */
+- (void) setNetWmAllowedActionsForWindow:(XCBWindow*)aWindow
+{
+    if (!aWindow)
+        return;
+
+    // Standard set of actions supported for normal windows
+    xcb_atom_t allowedActions[12];
+    int actionCount = 0;
+
+    // Get all the action atom values
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionMove] unsignedIntValue];
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionResize] unsignedIntValue];
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionMinimize] unsignedIntValue];
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionMaximizeHorz] unsignedIntValue];
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionMaximizeVert] unsignedIntValue];
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionFullscreen] unsignedIntValue];
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionChangeDesktop] unsignedIntValue];
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionClose] unsignedIntValue];
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionAbove] unsignedIntValue];
+    allowedActions[actionCount++] = [[[atomService cachedAtoms] objectForKey:EWMHWMActionBelow] unsignedIntValue];
+
+    [self changePropertiesForWindow:aWindow
+                           withMode:XCB_PROP_MODE_REPLACE
+                       withProperty:EWMHWMAllowedActions
+                           withType:XCB_ATOM_ATOM
+                         withFormat:32
+                     withDataLength:actionCount
+                           withData:allowedActions];
+}
+
+/**
+ * Set _WINDOW_ID atom on a window to display its XCB window ID.
+ * This makes it easy to identify windows with xprop.
+ */
+- (void) setWindowIdAtomForWindow:(XCBWindow*)aWindow
+{
+    if (!aWindow)
+        return;
+
+    xcb_window_t windowId = [aWindow window];
+    
+    // Get or intern the _WINDOW_ID atom
+    xcb_intern_atom_cookie_t cookie = xcb_intern_atom([connection connection], 
+                                                       0, 
+                                                       11, 
+                                                       "_WINDOW_ID");
+    xcb_intern_atom_reply_t *reply = xcb_intern_atom_reply([connection connection], 
+                                                            cookie, 
+                                                            NULL);
+    
+    if (reply)
+    {
+        xcb_change_property([connection connection],
+                            XCB_PROP_MODE_REPLACE,
+                            windowId,
+                            reply->atom,
+                            XCB_ATOM_CARDINAL,
+                            32,
+                            1,
+                            &windowId);
+        free(reply);
+    }
+}
+
+#pragma mark - Property Synchronization Between Client and Frame Windows
+
+/**
+ * Check if a property should be excluded from frame window synchronization.
+ * Uses a blacklist approach - properties NOT in this list will be copied.
+ * 
+ * @param propertyAtom The atom ID of the property to check
+ * @param propertyNameStr The property name string for logging
+ * @return YES if property should be EXCLUDED from copying, NO if it should be copied
+ */
+- (BOOL) shouldExcludePropertyFromFrameSync:(xcb_atom_t)propertyAtom
+                               propertyName:(NSString*)propertyNameStr
+{
+    // These properties should NOT be copied to frame window:
+    // - We explicitly manage these ourselves
+    // - These are client-window-specific
+    // - These are implementation details
+    
+    static NSSet *excludedProperties = nil;
+    if (excludedProperties == nil)
+    {
+        excludedProperties = [NSSet setWithObjects:
+            // Explicitly managed by WM - don't copy
+            @"_NET_WM_DESKTOP",
+            @"_NET_WM_ALLOWED_ACTIONS",
+            @"_WINDOW_ID",
+            @"_NET_WM_STATE",              // We manage state transitions
+            @"_NET_FRAME_EXTENTS",         // WM-specific frame info
+            
+            // Client-window-specific - shouldn't go on frame
+            @"_NET_WM_SYNC_REQUEST_COUNTER",
+            @"_NET_WM_SYNC_REQUEST",
+            @"WM_STATE",                   // Window state - client-specific
+            @"WM_CLIENT_MACHINE",
+            @"WM_WINDOW_ROLE",             // Client window role
+            @"WM_NORMAL_HINTS",            // Size hints - client-specific
+            @"WM_HINTS",                   // Client hints
+            @"WM_PROTOCOLS",               // Client protocols list
+            @"_MOTIF_WM_HINTS",            // Motif hints
+            @"_NET_WM_USER_TIME",          // User interaction time
+            @"_NET_WM_USER_TIME_WINDOW",   // User time window
+            @"_NET_WM_ICON_GEOMETRY",      // Icon geometry - typically manager-managed
+            @"_NET_WM_BYPASS_COMPOSITOR",  // Compositor bypass - client-specific
+            
+            // GNUstep internal
+            @"_GNUSTEP_WM_MINIATURIZE_WINDOW",
+            @"_GNUSTEP_WM_HIDE_APP",
+            @"_GNUSTEP_WM_ATTR",
+            @"_GNUSTEP_TITLEBAR_STATE",
+            @"_GNUSTEP_FRAME_OFFSETS",
+            
+            // Xdnd drag-drop - client-specific
+            @"XdndAware",
+            
+            // KDE/DBus - client-specific
+            @"_KDE_NET_WM_APPMENU_OBJECT_PATH",
+            @"_KDE_NET_WM_APPMENU_SERVICE_NAME",
+            @"_KDE_NET_WM_FRAME_STRUT",
+            
+            // Startup
+            @"_NET_STARTUP_ID",
+            
+            nil];
+    }
+    
+    if (propertyNameStr && [excludedProperties containsObject:propertyNameStr])
+    {
+        return YES;  // Should exclude
+    }
+    
+    return NO;  // Should include (copy to frame)
+}
+
+/**
+ * Synchronize all client window properties to the frame window (except blacklisted ones).
+ * This uses a blacklist approach: copies all properties from client to frame EXCEPT those
+ * explicitly excluded. This ensures complete property consistency and handles future properties
+ * without code changes.
+ * 
+ * Properties that are blacklisted (NOT copied):
+ * - WM-managed properties (_NET_WM_DESKTOP, _NET_WM_ALLOWED_ACTIONS, etc.)
+ * - Client-window-specific internals (WM_STATE, WM_NORMAL_HINTS, etc.)
+ * - Protocol and capability lists (WM_PROTOCOLS, XdndAware, etc.)
+ * - D-Bus/KDE service properties
+ */
+- (void) syncCriticalClientPropertiesToFrameWindow:(XCBWindow*)clientWindow
+{
+    if (!clientWindow)
+        return;
+    
+    XCBWindow *frameWindow = [clientWindow parentWindow];
+    if (!frameWindow)
+    {
+        NSLog(@"[EWMH] syncCriticalClientPropertiesToFrameWindow: No parent frame window found for client %u", [clientWindow window]);
+        return;
+    }
+    
+    xcb_connection_t *conn = [connection connection];
+    xcb_window_t clientWindowId = [clientWindow window];
+    xcb_window_t frameWindowId = [frameWindow window];
+    
+    NSLog(@"[EWMH] Syncing properties from client %u to frame %u (blacklist approach)", clientWindowId, frameWindowId);
+    
+    // Query the window tree to get all properties on the client window
+    xcb_list_properties_cookie_t propCookie = xcb_list_properties(conn, clientWindowId);
+    xcb_generic_error_t *error = NULL;
+    xcb_list_properties_reply_t *propReply = xcb_list_properties_reply(conn, propCookie, &error);
+    
+    if (!propReply)
+    {
+        if (error)
+        {
+            NSLog(@"[EWMH] Error querying properties for client window %u (error code: %d)", clientWindowId, error->error_code);
+            free(error);
+        }
+        else
+        {
+            NSLog(@"[EWMH] Failed to query properties for client window %u", clientWindowId);
+        }
+        return;
+    }
+    
+    xcb_atom_t *atoms = xcb_list_properties_atoms(propReply);
+    int atomCount = xcb_list_properties_atoms_length(propReply);
+    
+    NSLog(@"[EWMH] Found %d properties on client window %u", atomCount, clientWindowId);
+    
+    int copiedCount = 0;
+    
+    // Iterate through all properties on the client window
+    for (int i = 0; i < atomCount; i++)
+    {
+        xcb_atom_t propAtom = atoms[i];
+        
+        // Get property name for blacklist check
+        xcb_get_atom_name_cookie_t nameCookie = xcb_get_atom_name(conn, propAtom);
+        xcb_generic_error_t *nameError = NULL;
+        xcb_get_atom_name_reply_t *nameReply = xcb_get_atom_name_reply(conn, nameCookie, &nameError);
+        
+        NSString *propName = nil;
+        if (nameReply)
+        {
+            char *nameStr = xcb_get_atom_name_name(nameReply);
+            int nameLen = xcb_get_atom_name_name_length(nameReply);
+            propName = [NSString stringWithCString:nameStr length:nameLen];
+        }
+        else if (nameError)
+        {
+            free(nameError);
+        }
+        
+        // Check blacklist
+        if ([self shouldExcludePropertyFromFrameSync:propAtom propertyName:propName])
+        {
+            NSLog(@"[EWMH] Excluding blacklisted property: %@", propName ? propName : @"(unknown)");
+            if (nameReply)
+                free(nameReply);
+            continue;
+        }
+        
+        // Read the property value from client window
+        xcb_get_property_cookie_t readCookie = xcb_get_property_unchecked(conn,
+                                                                          0,
+                                                                          clientWindowId,
+                                                                          propAtom,
+                                                                          XCB_ATOM_ANY,
+                                                                          0,
+                                                                          UINT32_MAX);
+        
+        xcb_generic_error_t *readError = NULL;
+        xcb_get_property_reply_t *readReply = xcb_get_property_reply(conn, readCookie, &readError);
+        
+        if (!readReply)
+        {
+            if (readError)
+            {
+                NSLog(@"[EWMH] Error reading property %@ (error code: %d)", propName ? propName : @"(unknown)", readError->error_code);
+                free(readError);
+            }
+            if (nameReply)
+                free(nameReply);
+            continue;
+        }
+        
+        if (readReply->length == 0 || readReply->type == XCB_ATOM_NONE)
+        {
+            free(readReply);
+            if (nameReply)
+                free(nameReply);
+            continue;
+        }
+        
+        // Extract property data
+        void *propertyData = xcb_get_property_value(readReply);
+        uint32_t dataLength = xcb_get_property_value_length(readReply);
+        uint8_t format = readReply->format;
+        
+        if (!propertyData || dataLength == 0)
+        {
+            free(readReply);
+            if (nameReply)
+                free(nameReply);
+            continue;
+        }
+        
+        // Convert format (bits) to number of items based on item size
+        uint32_t itemCount = 0;
+        if (format == 8)
+            itemCount = dataLength;
+        else if (format == 16)
+            itemCount = dataLength / 2;
+        else if (format == 32)
+            itemCount = dataLength / 4;
+        
+        // Write property to frame window
+        xcb_change_property(conn,
+                            XCB_PROP_MODE_REPLACE,
+                            frameWindowId,
+                            propAtom,
+                            readReply->type,
+                            format,
+                            itemCount,
+                            propertyData);
+        
+        copiedCount++;
+        NSLog(@"[EWMH] Copied property %@ (format=%d, items=%u) to frame", 
+              propName ? propName : @"(unknown)", format, itemCount);
+        
+        free(readReply);
+        if (nameReply)
+            free(nameReply);
+    }
+    
+    free(propReply);
+    NSLog(@"[EWMH] Property sync complete: copied %d/%d properties", copiedCount, atomCount);
+}
+
+/**
+ * Initialize all standard EWMH atoms on a newly mapped client window.
+ * This ensures the window is fully EWMH-compliant from creation.
+ * Sets: _NET_WM_DESKTOP, _NET_WM_ALLOWED_ACTIONS, _WINDOW_ID, and ensures other critical atoms are present.
+ * 
+ * Also applies atoms to the parent frame window so that interactive xprop clicking
+ * on any part of the window (frame or client) will display the EWMH properties.
+ * Additionally, copies critical client window properties (WM_CLASS, _NET_WM_NAME, _NET_WM_ICON, etc.)
+ * from the client to frame window to maintain window property consistency.
+ */
+- (void) initializeClientWindowAtomsForWindow:(XCBWindow*)aWindow
+{
+    if (!aWindow)
+        return;
+
+    // Set _NET_WM_DESKTOP to 0 (first desktop/workspace)
+    [self setNetWmDesktopForWindow:aWindow desktop:0];
+    
+    // Set _NET_WM_ALLOWED_ACTIONS with standard set of supported actions
+    [self setNetWmAllowedActionsForWindow:aWindow];
+    
+    // Set _WINDOW_ID to display the XCB window ID
+    [self setWindowIdAtomForWindow:aWindow];
+    
+    // Also set atoms on parent frame window so xprop clicking on frame shows atoms too
+    XCBWindow *parentWindow = [aWindow parentWindow];
+    if (parentWindow)
+    {
+        [self setNetWmDesktopForWindow:parentWindow desktop:0];
+        [self setNetWmAllowedActionsForWindow:parentWindow];
+        [self setWindowIdAtomForWindow:parentWindow];
+        
+        // Synchronize critical client properties to frame window
+        // This ensures frame and client have consistent EWMH/ICCCM atoms
+        [self syncCriticalClientPropertiesToFrameWindow:aWindow];
+    }
+}
+
 #pragma mark - ICCCM/EWMH Strut and Workarea Support
 
 - (BOOL) readStrutForWindow:(XCBWindow*)aWindow strut:(uint32_t[4])outStrut
@@ -1622,6 +2030,7 @@
     EWMHFrameExtents = nil;
     EWMHStrutPartial = nil;
     EWMHVisibleIconName = nil;
+    WindowId = nil;
 
     atoms = nil;
     connection = nil;

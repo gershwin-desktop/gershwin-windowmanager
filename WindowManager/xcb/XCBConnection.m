@@ -224,18 +224,24 @@ static XCBConnection *sharedInstance;
         // Window already registered - skip duplicate registration
         window = nil;
         key = nil;
+        ewmhService = nil;
         return;
     }
     
     if ([aWindow isKindOfClass:[XCBFrame class]] ||
         [aWindow isKindOfClass:[XCBTitleBar class]] ||
         [aWindow isCloseButton] || [aWindow isMaximizeButton] || [aWindow isMinimizeButton])
+    {
         win = 0;
+    }
 
     if (win != 0)
     {
         NSLog(@"[XCBConnection] Adding the window %u in the windowsMap", win);
         clientList[clientListIndex++] = win;
+        
+        // Initialize standard EWMH atoms for client windows
+        [ewmhService initializeClientWindowAtomsForWindow:aWindow];
     }
 
     [ewmhService updateNetClientList];
