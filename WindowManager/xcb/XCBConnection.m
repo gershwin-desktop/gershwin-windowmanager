@@ -2010,7 +2010,7 @@ static XCBConnection *sharedInstance;
     // because focus() alone does not reach updateNetActiveWindow for those apps.
     if (clientWindow) {
         self.expectedFocusWindow = [clientWindow window];
-        self.expectedFocusTimestamp = currentTime;
+        self.expectedFocusTimestamp = anEvent->time;
         EWMHService *ewmhActiveService = [EWMHService sharedInstanceWithConnection:self];
         NSLog(@"[handleButtonPress] Setting _NET_ACTIVE_WINDOW to client 0x%x (clicked 0x%x)",
               [clientWindow window], [window window]);

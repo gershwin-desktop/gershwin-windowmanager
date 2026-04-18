@@ -424,7 +424,6 @@
         EWMHMoveresizeWindow,
         EWMHWMMoveresize,
         EWMHRestackWindow,
-        EWMHRequestFrameExtents,
         
         // Window Manager Protocols
         EWMHWMPing,
@@ -488,9 +487,6 @@
         EWMHWMActionClose,
         EWMHWMActionAbove,
         EWMHWMActionBelow,
-        
-        // Custom properties (for debugging/identification)
-        WindowId,
     };
 
     NSArray *rootAtoms = [NSArray arrayWithObjects:rootProperties count:sizeof(rootProperties)/sizeof(NSString*)];
@@ -1432,28 +1428,34 @@
         return;
 
     xcb_window_t windowId = [aWindow window];
-    
-    // Get or intern the _WINDOW_ID atom
-    xcb_intern_atom_cookie_t cookie = xcb_intern_atom([connection connection], 
-                                                       0, 
-                                                       11, 
-                                                       "_WINDOW_ID");
-    xcb_intern_atom_reply_t *reply = xcb_intern_atom_reply([connection connection], 
-                                                            cookie, 
-                                                            NULL);
-    
-    if (reply)
+    static xcb_atom_t windowIdAtom = XCB_ATOM_NONE;
+
+    if (windowIdAtom == XCB_ATOM_NONE)
     {
-        xcb_change_property([connection connection],
-                            XCB_PROP_MODE_REPLACE,
-                            windowId,
-                            reply->atom,
-                            XCB_ATOM_CARDINAL,
-                            32,
-                            1,
-                            &windowId);
+        static const char windowIdAtomName[] = "_WINDOW_ID";
+        xcb_intern_atom_cookie_t cookie = xcb_intern_atom([connection connection],
+                                                          0,
+                                                          sizeof(windowIdAtomName) - 1,
+                                                          windowIdAtomName);
+        xcb_intern_atom_reply_t *reply = xcb_intern_atom_reply([connection connection],
+                                                               cookie,
+                                                               NULL);
+
+        if (!reply)
+            return;
+
+        windowIdAtom = reply->atom;
         free(reply);
     }
+
+    xcb_change_property([connection connection],
+                        XCB_PROP_MODE_REPLACE,
+                        windowId,
+                        windowIdAtom,
+                        XCB_ATOM_CARDINAL,
+                        32,
+                        1,
+                        &windowId);
 }
 
 #pragma mark - Property Synchronization Between Client and Frame Windows
@@ -1469,6 +1471,7 @@
 - (BOOL) shouldExcludePropertyFromFrameSync:(xcb_atom_t)propertyAtom
                                propertyName:(NSString*)propertyNameStr
 {
+    (void)propertyAtom;
     // These properties should NOT be copied to frame window:
     // - We explicitly manage these ourselves
     // - These are client-window-specific

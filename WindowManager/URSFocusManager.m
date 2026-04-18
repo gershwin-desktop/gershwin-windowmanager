@@ -314,7 +314,7 @@
 
     NSDictionary *windowsMap = [self.connection windowsMap];
 
-    for (NSString *mapWindowId in windowsMap) {
+    for (NSNumber *mapWindowId in windowsMap) {
         XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
         if (!mapWindow) continue;
 
