@@ -1996,22 +1996,20 @@ static XCBConnection *sharedInstance;
     {
         frame = (XCBFrame *) [window parentWindow];
         clientWindow = [frame childWindowForKey:ClientWindow];
+    }
 
-        // Check if this is the resize handle - if so, use client window for active window
-        XCBWindow *resizeHandle = [frame childWindowForKey:ResizeHandle];
-        BOOL isResizeHandle = (resizeHandle && [resizeHandle window] == [window window]);
-
-        // Set expected focus to prevent handleFocusIn: from making a duplicate update
-        XCBWindow *targetWindow = isResizeHandle ? clientWindow : window;
-        self.expectedFocusWindow = [targetWindow window];
+    // Always update _NET_ACTIVE_WINDOW to the client window, regardless of which
+    // discovery block ran above (frame click, titlebar click, or frame-child click).
+    // Apps without WM_TAKE_FOCUS (e.g. Chrome) rely entirely on this update
+    // because focus() alone does not reach updateNetActiveWindow for those apps.
+    if (clientWindow) {
+        self.expectedFocusWindow = [clientWindow window];
         self.expectedFocusTimestamp = currentTime;
-
-        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
-        // Use client window for active window, not the resize handle
-        [ewmhService updateNetActiveWindow:targetWindow];
-        ewmhService = nil;
-        resizeHandle = nil;
-
+        EWMHService *ewmhActiveService = [EWMHService sharedInstanceWithConnection:self];
+        NSLog(@"[handleButtonPress] Setting _NET_ACTIVE_WINDOW to client 0x%x (clicked 0x%x)",
+              [clientWindow window], [window window]);
+        [ewmhActiveService updateNetActiveWindow:clientWindow];
+        ewmhActiveService = nil;
     }
 
     // Check if this is a menu-type window - don't change focus for menus

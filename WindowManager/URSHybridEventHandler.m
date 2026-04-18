@@ -769,7 +769,8 @@
             // This ensures dialogs, alerts, sheets and other special windows get focused too
             if ([self.focusManager isWindowFocusable:mappedClient allowDesktop:NO]) {
                 // Schedule focus after a brief delay to ensure the window is fully set up
-                [self performSelector:@selector(focusWindowAfterThemeApplied:)
+                // Use focusNewlyMappedWindow to ensure new windows always get focus
+                [self performSelector:@selector(focusNewlyMappedWindow:)
                            withObject:mappedClient
                            afterDelay:0.1];
             }
@@ -2147,6 +2148,11 @@
 - (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow
 {
     [self.focusManager focusWindowAfterThemeApplied:clientWindow];
+}
+
+- (void)focusNewlyMappedWindow:(XCBWindow *)clientWindow
+{
+    [self.focusManager focusNewlyMappedWindow:clientWindow];
 }
 
 - (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum

@@ -11,12 +11,30 @@
 #import "XCBScreen.h"
 #import "XCBAttributesReply.h"
 #import "EWMHService.h"
+#import <AppKit/AppKit.h>
 
 @interface URSFocusManager ()
 @property (strong, nonatomic) NSMutableSet *recentlyAutoFocusedWindowIds;
 @end
 
 @implementation URSFocusManager
+
+- (void)refreshAppKitActivationState
+{
+    if (!NSApp) {
+        return;
+    }
+
+    // Ensure AppKit global UI (including menu bar visuals) reflects the
+    // window that was just focused via X11 path.
+    [NSApp activateIgnoringOtherApps:YES];
+    [NSApp updateWindows];
+
+    NSMenu *menu = [NSApp mainMenu];
+    if (menu) {
+        [menu update];
+    }
+}
 
 - (instancetype)initWithConnection:(XCBConnection *)aConnection
                    selectionWindow:(XCBWindow *)aSelectionWindow
@@ -61,7 +79,12 @@
 
     xcb_window_t targetId = XCB_NONE;
 
-    if (self.previousFocusedWindowId != XCB_NONE &&
+    // First, try to find a focusable window from the same application (PID)
+    // This ensures that when a window closes, another window from the same app
+    // gets focus if available (and not minimized).
+    targetId = [self focusableWindowWithSamePidAs:removedClientId excluding:removedClientId];
+
+    if (targetId == XCB_NONE && self.previousFocusedWindowId != XCB_NONE &&
         self.previousFocusedWindowId != removedClientId) {
         XCBWindow *previousWindow = [self windowForClientWindowId:self.previousFocusedWindowId];
         if (previousWindow && [self isWindowFocusable:previousWindow allowDesktop:NO]) {
@@ -89,6 +112,7 @@
     }
 
     [targetWindow focus];
+    [self refreshAppKitActivationState];
 
     self.previousFocusedWindowId = self.lastFocusedWindowId;
     self.lastFocusedWindowId = targetId;
@@ -112,6 +136,7 @@
     NSLog(@"[Focus] Focusing window %u after theme applied", windowId);
     if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
         [clientWindow focus];
+        [self refreshAppKitActivationState];
         [self.recentlyAutoFocusedWindowIds addObject:windowIdNum];
         NSLog(@"[Focus] Successfully focused window %u", windowId);
 
@@ -126,6 +151,32 @@
 - (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow
 {
     [self focusWindowDelayed:clientWindow];
+}
+
+- (void)focusNewlyMappedWindow:(XCBWindow *)clientWindow
+{
+    if (!clientWindow) {
+        return;
+    }
+
+    xcb_window_t windowId = [clientWindow window];
+    NSNumber *windowIdNum = @(windowId);
+
+    NSLog(@"[Focus] Focusing newly mapped window %u", windowId);
+    if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
+        [clientWindow focus];
+        [self refreshAppKitActivationState];
+        [self.recentlyAutoFocusedWindowIds addObject:windowIdNum];
+        [self trackFocusGain:windowId];
+        NSLog(@"[Focus] Successfully focused newly mapped window %u", windowId);
+
+        // Remove from anti-spam set after 1 second to allow other windows to be focused
+        [self performSelector:@selector(removeWindowFromRecentlyFocused:)
+                   withObject:windowIdNum
+                   afterDelay:1.0];
+    } else {
+        NSLog(@"[Focus] Newly mapped window %u is not focusable, skipping focus", windowId);
+    }
 }
 
 - (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum
@@ -232,6 +283,59 @@
         xcb_window_t clientId = [clientWindow window];
         if (clientId == excludedId) continue;
 
+        if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
+            return clientId;
+        }
+    }
+
+    return XCB_NONE;
+}
+
+- (xcb_window_t)focusableWindowWithSamePidAs:(xcb_window_t)clientWindowId
+                                  excluding:(xcb_window_t)excludedId
+{
+    if (clientWindowId == XCB_NONE) {
+        return XCB_NONE;
+    }
+
+    XCBWindow *sourceWindow = [self windowForClientWindowId:clientWindowId];
+    if (!sourceWindow) {
+        return XCB_NONE;
+    }
+
+    // Get the PID of the source window
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
+    uint32_t sourcePid = [ewmhService netWMPidForWindow:sourceWindow];
+    
+    if (sourcePid == (uint32_t)-1) {
+        // No PID available, cannot find same-app windows
+        return XCB_NONE;
+    }
+
+    NSDictionary *windowsMap = [self.connection windowsMap];
+
+    for (NSString *mapWindowId in windowsMap) {
+        XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
+        if (!mapWindow) continue;
+
+        XCBWindow *clientWindow = [self clientWindowForWindow:mapWindow fallbackFrame:nil];
+        if (!clientWindow) continue;
+
+        xcb_window_t clientId = [clientWindow window];
+        
+        // Skip the excluded window (the one being closed)
+        if (clientId == excludedId) continue;
+        
+        // Skip if it's the same as source (shouldn't happen, but be safe)
+        if (clientId == clientWindowId) continue;
+
+        // Check if this window has the same PID
+        uint32_t windowPid = [ewmhService netWMPidForWindow:clientWindow];
+        if (windowPid != sourcePid) {
+            continue;
+        }
+
+        // Check if the window is focusable and not minimized
         if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
             return clientId;
         }

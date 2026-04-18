@@ -27,12 +27,15 @@
 - (void)ensureFocusAfterWindowRemoval:(xcb_window_t)removedClientId;
 - (void)focusWindowDelayed:(XCBWindow *)clientWindow;
 - (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow;
+- (void)focusNewlyMappedWindow:(XCBWindow *)clientWindow;
 - (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum;
 
 // Focusability queries
 - (BOOL)isWindowFocusable:(XCBWindow *)window allowDesktop:(BOOL)allowDesktop;
 - (xcb_window_t)anyFocusableWindowExcluding:(xcb_window_t)excludedId;
 - (xcb_window_t)desktopWindowCandidateExcluding:(xcb_window_t)excludedId;
+- (xcb_window_t)focusableWindowWithSamePidAs:(xcb_window_t)clientWindowId
+                                  excluding:(xcb_window_t)excludedId;
 
 // Window resolution utilities (frame/titlebar/client lookups)
 - (XCBWindow *)clientWindowForWindow:(XCBWindow *)window
