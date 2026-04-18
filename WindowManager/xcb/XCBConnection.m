@@ -235,13 +235,27 @@ static XCBConnection *sharedInstance;
         win = 0;
     }
 
+    BOOL isRootWindow = NO;
+    for (XCBScreen *screen in screens)
+    {
+        XCBWindow *screenRootWindow = [screen rootWindow];
+        if (screenRootWindow && [screenRootWindow window] == win)
+        {
+            isRootWindow = YES;
+            break;
+        }
+    }
+
     if (win != 0)
     {
         NSLog(@"[XCBConnection] Adding the window %u in the windowsMap", win);
         clientList[clientListIndex++] = win;
         
-        // Initialize standard EWMH atoms for client windows
-        [ewmhService initializeClientWindowAtomsForWindow:aWindow];
+        if (!isRootWindow)
+        {
+            // Initialize standard EWMH atoms for client windows
+            [ewmhService initializeClientWindowAtomsForWindow:aWindow];
+        }
     }
 
     [ewmhService updateNetClientList];
