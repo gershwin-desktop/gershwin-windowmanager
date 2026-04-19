@@ -896,9 +896,14 @@
     }
     [self updateAbsolutePositionForWindow:cw];
     
-    // Create damage object for the window
+    // Create damage object for the window.
+    // Use DELTA_RECTANGLES instead of NON_EMPTY so we keep receiving
+    // notifications for ongoing client redraws even if one notify is dropped.
+    // NON_EMPTY can stall forever when the empty->non-empty transition event is
+    // missed, which manifests as content only updating when unrelated events
+    // (for example titlebar hover redraws) force a repaint.
     cw.damage = xcb_generate_id(conn);
-    xcb_damage_create(conn, cw.damage, windowId, XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
+    xcb_damage_create(conn, cw.damage, windowId, XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
     
     self.cwindows[@(windowId)] = cw;
     
