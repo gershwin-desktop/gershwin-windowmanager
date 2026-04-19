@@ -2341,8 +2341,22 @@ static XCBConnection *sharedInstance;
                     targetWindow = clientWindow;
                 }
             }
-            // If this is a client window directly, use it
-            else if ([window decorated]) {
+            // If this is a titlebar or child of a frame, use the frame's client window
+            else if ([window isKindOfClass:[XCBTitleBar class]] ||
+                     ([window parentWindow] && [[window parentWindow] isKindOfClass:[XCBFrame class]])) {
+                XCBFrame *frame = [window isKindOfClass:[XCBTitleBar class]] ?
+                                (XCBFrame *)[window parentWindow] :
+                                (XCBFrame *)[window parentWindow];
+                if (frame) {
+                    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+                    if (clientWindow) {
+                        targetWindowId = [clientWindow window];
+                        targetWindow = clientWindow;
+                    }
+                }
+            }
+            // For undecorated client windows or direct focus targets, use the window itself
+            else {
                 targetWindowId = [window window];
                 targetWindow = window;
             }

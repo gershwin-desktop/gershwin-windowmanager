@@ -1043,6 +1043,7 @@
                 xcb_window_t clientId = [clientWindow window];
                 [self.focusManager trackFocusGain:clientId];
             }
+            [self.focusManager refreshAppKitActivationState];
         }
 
         // Re-render titlebar with GSTheme using the correct active/inactive state

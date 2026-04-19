@@ -28,6 +28,7 @@
 - (void)focusWindowDelayed:(XCBWindow *)clientWindow;
 - (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow;
 - (void)focusNewlyMappedWindow:(XCBWindow *)clientWindow;
+- (void)refreshAppKitActivationState;
 - (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum;
 
 // Focusability queries
