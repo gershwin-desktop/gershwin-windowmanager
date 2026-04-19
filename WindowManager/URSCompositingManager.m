@@ -895,6 +895,10 @@
 - (void)cleanupCompositeWindowGroup:(NSArray<NSNumber *> *)windowKeys
                       deleteDamage:(BOOL)deleteDamage
                       removeRecords:(BOOL)removeRecords {
+    // Atomically tear down the full logical window group, including the frame,
+    // client content, and any generated shadow resources. This avoids cases where
+    // decorations disappear before the client or shadow artifacts linger after
+    // the logical window has gone.
     for (NSNumber *key in windowKeys) {
         URSCompositeWindow *cw = self.cwindows[key];
         if (!cw) continue;
@@ -1084,6 +1088,9 @@
         cw.extents = XCB_NONE;
     }
     
+    // Free any shadow resources associated with this composite window.
+    // Shadow state is part of the logical window group, so it should disappear
+    // at the same time as the frame and client window content.
     if (cw.shadowPicture != XCB_NONE) {
         xcb_render_free_picture(conn, cw.shadowPicture);
         cw.shadowPicture = XCB_NONE;
@@ -2066,6 +2073,10 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     URS_PROFILE_BEGIN(paintAll);
     xcb_connection_t *conn = [self.connection connection];
     
+    // Paint all damaged windows/shadows into the offscreen rootBuffer first.
+    // Then copy the completed buffer to rootPicture in one composite operation.
+    // This double-buffering makes the visible update of content, frame and
+    // shadow happen together rather than in separate partial steps.
     if (self.rootBuffer == XCB_NONE) {
         return;
     }

@@ -781,7 +781,9 @@
             xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:unmapNotifyEvent->window];
             [connection handleUnMapNotify:unmapNotifyEvent];
 
-            // Notify compositor of unmap event
+            // Notify compositor of unmap event. The compositor will remove the
+            // entire logical window group atomically, including decorations,
+            // client content, and any shadows.
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager unmapWindow:unmapNotifyEvent->window];
             }
