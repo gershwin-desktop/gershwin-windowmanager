@@ -820,6 +820,105 @@
     return self.cwindows[@(windowId)];
 }
 
+- (xcb_window_t)topLevelFrameForWindow:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw) {
+        return windowId;
+    }
+
+    if (cw.parentWindowId != self.rootWindow && cw.parentWindowId != XCB_NONE) {
+        xcb_window_t parentFrame = [self findParentFrameWindow:windowId];
+        if (parentFrame != XCB_NONE) {
+            return parentFrame;
+        }
+    }
+
+    return windowId;
+}
+
+// Determine the full set of compositor-tracked windows that belong to the same
+// logical top-level window as the provided window id.
+//
+// This covers the frame, titlebar, client window, and any auxiliary child windows.
+// Using a single group allows unmap/destroy cleanup to remove all parts together
+// and repaint the whole window area atomically.
+- (NSArray<NSNumber *> *)trackedWindowGroupForWindow:(xcb_window_t)windowId {
+    xcb_window_t topLevel = [self topLevelFrameForWindow:windowId];
+    NSMutableArray<NSNumber *> *group = [[NSMutableArray alloc] init];
+
+    for (NSNumber *key in [self.cwindows allKeys]) {
+        URSCompositeWindow *cw = self.cwindows[key];
+        if (!cw) continue;
+
+        if (cw.windowId == topLevel) {
+            [group addObject:key];
+            continue;
+        }
+
+        xcb_window_t parentFrame = [self findParentFrameWindow:cw.windowId];
+        if (parentFrame == topLevel) {
+            [group addObject:key];
+        }
+    }
+
+    if ([group count] == 0 && [self findCWindow:windowId]) {
+        [group addObject:@(windowId)];
+    }
+
+    return group;
+}
+
+- (xcb_xfixes_region_t)unionExtentsForCompositeWindows:(NSArray<NSNumber *> *)windowKeys {
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_xfixes_region_t unionRegion = XCB_NONE;
+
+    for (NSNumber *key in windowKeys) {
+        URSCompositeWindow *cw = self.cwindows[key];
+        if (!cw) continue;
+
+        xcb_xfixes_region_t extents = [self windowExtents:cw];
+        if (extents == XCB_NONE) {
+            continue;
+        }
+
+        if (unionRegion == XCB_NONE) {
+            unionRegion = extents;
+        } else {
+            xcb_xfixes_union_region(conn, unionRegion, unionRegion, extents);
+            xcb_xfixes_destroy_region(conn, extents);
+        }
+    }
+
+    return unionRegion;
+}
+
+- (void)cleanupCompositeWindowGroup:(NSArray<NSNumber *> *)windowKeys
+                      deleteDamage:(BOOL)deleteDamage
+                      removeRecords:(BOOL)removeRecords {
+    for (NSNumber *key in windowKeys) {
+        URSCompositeWindow *cw = self.cwindows[key];
+        if (!cw) continue;
+
+        if (cw.viewable) {
+            cw.viewable = NO;
+        }
+
+        cw.damaged = NO;
+        cw.pictureValid = NO;
+        cw.needsPictureCreation = YES;
+
+        [self freeWindowData:cw delete:deleteDamage];
+
+        if (removeRecords) {
+            [self.cwindows removeObjectForKey:key];
+        }
+
+        [self.parentFrameCache removeObjectForKey:@(cw.windowId)];
+    }
+
+    self.stackingOrderDirty = YES;
+}
+
 - (void)addWindow:(xcb_window_t)windowId {
     if (!self.compositingActive) {
         return;
@@ -921,8 +1020,20 @@
     [self.parentFrameCache removeAllObjects];
 }
 
+// Destroy a logical window group when the client is gone.
+// This ensures the compositor removes the whole frame+content bundle in one pass,
+// instead of allowing decorations or client content to linger separately.
 - (void)unregisterWindow:(xcb_window_t)window {
-    [self removeWindow:window];
+    if (!self.compositingActive) {
+        return;
+    }
+
+    NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:window];
+    xcb_xfixes_region_t damage = [self unionExtentsForCompositeWindows:group];
+    if (damage != XCB_NONE) {
+        [self addDamage:damage];
+    }
+    [self cleanupCompositeWindowGroup:group deleteDamage:YES removeRecords:YES];
     [self.parentFrameCache removeAllObjects];
 }
 
@@ -1337,29 +1448,38 @@
     }
 }
 
+// Handle an unmap by clearing the entire logical window group.
+// This makes the window disappear atomically, with decorations and content
+// invalidated together rather than in separate repaint steps.
 - (void)unmapWindow:(xcb_window_t)windowId {
-    URSCompositeWindow *cw = [self findCWindow:windowId];
-    if (!cw) {
+    NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:windowId];
+    if ([group count] == 0) {
         return;
     }
-    
-    if (cw.viewable) {
-        [self damageWindowArea:cw];
-    }
-    
-    cw.viewable = NO;
-    cw.damaged = NO;
 
-    if (cw.animating) {
-        // Keep resources alive until animation completes
-        return;
+    xcb_xfixes_region_t damage = [self unionExtentsForCompositeWindows:group];
+    if (damage != XCB_NONE) {
+        [self addDamage:damage];
+    }
+
+    for (NSNumber *key in group) {
+        URSCompositeWindow *cw = self.cwindows[key];
+        if (!cw) continue;
+
+        cw.viewable = NO;
+        cw.damaged = NO;
+        cw.pictureValid = NO;
+        cw.needsPictureCreation = YES;
+
+        if (cw.animating) {
+            // Keep resources alive until animation completes
+            continue;
+        }
+
+        [self freeWindowData:cw delete:NO];
     }
 
     [self.parentFrameCache removeAllObjects];
-    
-    // Free window data but keep the damage object
-    [self freeWindowData:cw delete:NO];
-    // OPTIMIZATION: Window unmapping can change stacking order
     self.stackingOrderDirty = YES;
 }
 
