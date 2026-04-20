@@ -76,15 +76,9 @@
     self.titlebarController.workareaManager = self.workareaManager;
     self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
 
-    // Check if compositing was requested via command-line
-    self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
-                                  boolForKey:@"URSCompositingEnabled"];
-    
-    if (self.compositingRequested) {
-        NSLog(@"[WindowManager] Compositing requested - will attempt to initialize");
-    } else {
-        NSLog(@"[WindowManager] Compositing disabled - using direct rendering");
-    }
+    // Default to compositing enabled unless overridden by the caller
+    self.compositingRequested = YES;
+    NSLog(@"[WindowManager] Compositing default state set to %@", self.compositingRequested ? @"enabled" : @"disabled");
 
     return self;
 }

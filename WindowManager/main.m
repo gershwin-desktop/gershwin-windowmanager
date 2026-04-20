@@ -82,9 +82,10 @@ int main(int argc, const char * argv[])
             }
         }
         
-        // Store compositing preference in user defaults for access by event handler
-        [[NSUserDefaults standardUserDefaults] setBool:enableCompositing 
-                                                 forKey:@"URSCompositingEnabled"];
+        // Store compositing preference directly on the event handler
+        UROSWMApplication *app = [UROSWMApplication sharedApplication];
+        URSHybridEventHandler *hybridHandler = [[URSHybridEventHandler alloc] init];
+        hybridHandler.compositingRequested = enableCompositing;
 
         // Initialize TitleBar settings - height will be queried from GSTheme below (source: AppearanceMetrics.h)
         TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
@@ -109,9 +110,6 @@ int main(int argc, const char * argv[])
             [settings setHeight:themeHeight];
         }
 
-        // Create custom NSApplication and hybrid event handler
-        UROSWMApplication *app = [UROSWMApplication sharedApplication];
-        URSHybridEventHandler *hybridHandler = [[URSHybridEventHandler alloc] init];
         [app setDelegate:hybridHandler];
         
         // Store global reference for signal handlers
