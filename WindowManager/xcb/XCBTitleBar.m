@@ -7,6 +7,7 @@
 //
 
 #import "XCBTitleBar.h"
+#import "URSThemeIntegration.h"
 
 @implementation XCBTitleBar
 
@@ -299,13 +300,9 @@
 
 - (BOOL)isGSThemeActive
 {
-    // Check if GSTheme integration is enabled in the window manager
-    // We can detect this by checking for a specific environment variable or user default
-    // that the window manager sets when GSTheme is active
-
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    BOOL gsthemeEnabled = [defaults boolForKey:@"UROSWMGSThemeEnabled"];
-
+    // Check current runtime state of GSTheme integration instead of relying on persisted
+    // preferences. The window manager may not have a preferences file yet on first run.
+    BOOL gsthemeEnabled = [[URSThemeIntegration sharedInstance] enabled];
     return gsthemeEnabled;
 }
 
