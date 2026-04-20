@@ -37,12 +37,13 @@
 @end
 
 // Helper function to send synthetic ConfigureNotify to client during resize
-// Per ICCCM 4.1.5, reparented windows need synthetic ConfigureNotify events
-// This inline version avoids X server round-trips for better performance
+// Per ICCCM 4.1.5, reparented windows need synthetic ConfigureNotify events.
+// The x/y coordinates in ConfigureNotify are relative to the window's parent,
+// so child windows must receive parent-relative positions, not root coordinates.
 static void sendSyntheticConfigureNotify(xcb_connection_t *conn,
                                           XCBWindow *clientWindow,
-                                          int16_t rootX,
-                                          int16_t rootY,
+                                          int16_t relX,
+                                          int16_t relY,
                                           uint16_t width,
                                           uint16_t height)
 {
@@ -51,8 +52,8 @@ static void sendSyntheticConfigureNotify(xcb_connection_t *conn,
     event.response_type = XCB_CONFIGURE_NOTIFY;
     event.event = [clientWindow window];
     event.window = [clientWindow window];
-    event.x = rootX;
-    event.y = rootY;
+    event.x = relX;
+    event.y = relY;
     event.width = width;
     event.height = height;
     event.border_width = 0;
@@ -973,8 +974,8 @@ void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
 
     // Send synthetic ConfigureNotify to client
     sendSyntheticConfigureNotify(connection, clientWindow,
-                                  frameRect.position.x + cb,
-                                  frameRect.position.y + [frame titleHeight],
+                                  cb,
+                                  [frame titleHeight],
                                   clientRect.size.width,
                                   clientRect.size.height);
 
@@ -1467,8 +1468,8 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 
     // Send synthetic ConfigureNotify with the calculated dimensions
     sendSyntheticConfigureNotify(conn, clientWindow,
-                                  targetRect.position.x + 1,
-                                  targetRect.position.y + titleHgt,
+                                  clientRect.position.x,
+                                  clientRect.position.y,
                                   clientRect.size.width,
                                   clientRect.size.height);
 
