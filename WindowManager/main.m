@@ -55,6 +55,10 @@ static void setupSignalHandlers(void)
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGHUP, &sa, NULL);
+
+    // Ignore SIGPIPE so NSLog writes to a closed/missing stderr
+    // (e.g., when launched without a terminal) don't kill the process.
+    signal(SIGPIPE, SIG_IGN);
     
     NSLog(@"[WindowManager] Signal handlers installed for clean shutdown");
 }
@@ -110,6 +114,7 @@ int main(int argc, const char * argv[])
             [settings setHeight:themeHeight];
         }
 
+        // Create custom NSApplication and set the prepared hybrid event handler
         [app setDelegate:hybridHandler];
         
         // Store global reference for signal handlers
