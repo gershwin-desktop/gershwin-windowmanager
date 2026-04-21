@@ -1708,7 +1708,7 @@
     int16_t wh = cw.height + 2 * cw.borderWidth;
 
     // Compute bounding union of window + shadow so no pixel is missed.
-    if (cw.shadowPicture != XCB_NONE) {
+    if (cw.shadowPicture != XCB_NONE || (cw.shadowWidth > 0 && cw.shadowHeight > 0)) {
         int16_t sx = cw.x + cw.shadowOffsetX;
         int16_t sy = cw.y + cw.shadowOffsetY;
         int16_t sx2 = sx + (int16_t)cw.shadowWidth;

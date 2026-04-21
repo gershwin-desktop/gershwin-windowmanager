@@ -560,6 +560,33 @@ static XCBConnection *sharedInstance;
         ![frameWindow isMinimized] &&
         [frameWindow window] != [[scr rootWindow] window])
     {
+        // Damage the window and its decoration frame together so the client
+        // content, titlebar, and any remaining shadow are repainted atomically.
+        XCBRect frameRect = [frameWindow windowRect];
+        XCBRect clientRect = [window windowRect];
+
+        int16_t left = (frameRect.position.x < clientRect.position.x) ? frameRect.position.x : clientRect.position.x;
+        int16_t top = (frameRect.position.y < clientRect.position.y) ? frameRect.position.y : clientRect.position.y;
+        int16_t right = (frameRect.position.x + frameRect.size.width > clientRect.position.x + clientRect.size.width)
+                           ? frameRect.position.x + frameRect.size.width
+                           : clientRect.position.x + clientRect.size.width;
+        int16_t bottom = (frameRect.position.y + frameRect.size.height > clientRect.position.y + clientRect.size.height)
+                            ? frameRect.position.y + frameRect.size.height
+                            : clientRect.position.y + clientRect.size.height;
+
+        const int16_t padding = 10;
+        left -= padding;
+        top -= padding;
+        right += padding;
+        bottom += padding;
+
+        xcb_rectangle_t frameDamage = { left, top, (uint16_t)(right - left), (uint16_t)(bottom - top) };
+        XCBRegion *damageRegion = [[XCBRegion alloc] initWithConnection:self
+                                                               rectagles:&frameDamage
+                                                                   count:1];
+        [self addDamagedRegion:damageRegion];
+        damageRegion = nil;
+
         NSLog(@"Destroying window %u", [frameWindow window]);
 
         // Reparent using root-relative coordinates. windowRect is frame-relative
