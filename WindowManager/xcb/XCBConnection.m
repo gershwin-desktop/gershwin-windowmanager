@@ -224,18 +224,38 @@ static XCBConnection *sharedInstance;
         // Window already registered - skip duplicate registration
         window = nil;
         key = nil;
+        ewmhService = nil;
         return;
     }
     
     if ([aWindow isKindOfClass:[XCBFrame class]] ||
         [aWindow isKindOfClass:[XCBTitleBar class]] ||
         [aWindow isCloseButton] || [aWindow isMaximizeButton] || [aWindow isMinimizeButton])
+    {
         win = 0;
+    }
+
+    BOOL isRootWindow = NO;
+    for (XCBScreen *screen in screens)
+    {
+        XCBWindow *screenRootWindow = [screen rootWindow];
+        if (screenRootWindow && [screenRootWindow window] == win)
+        {
+            isRootWindow = YES;
+            break;
+        }
+    }
 
     if (win != 0)
     {
         NSLog(@"[XCBConnection] Adding the window %u in the windowsMap", win);
         clientList[clientListIndex++] = win;
+        
+        if (!isRootWindow)
+        {
+            // Initialize standard EWMH atoms for client windows
+            [ewmhService initializeClientWindowAtomsForWindow:aWindow];
+        }
     }
 
     [ewmhService updateNetClientList];
@@ -540,6 +560,33 @@ static XCBConnection *sharedInstance;
         ![frameWindow isMinimized] &&
         [frameWindow window] != [[scr rootWindow] window])
     {
+        // Damage the window and its decoration frame together so the client
+        // content, titlebar, and any remaining shadow are repainted atomically.
+        XCBRect frameRect = [frameWindow windowRect];
+        XCBRect clientRect = [window windowRect];
+
+        int16_t left = (frameRect.position.x < clientRect.position.x) ? frameRect.position.x : clientRect.position.x;
+        int16_t top = (frameRect.position.y < clientRect.position.y) ? frameRect.position.y : clientRect.position.y;
+        int16_t right = (frameRect.position.x + frameRect.size.width > clientRect.position.x + clientRect.size.width)
+                           ? frameRect.position.x + frameRect.size.width
+                           : clientRect.position.x + clientRect.size.width;
+        int16_t bottom = (frameRect.position.y + frameRect.size.height > clientRect.position.y + clientRect.size.height)
+                            ? frameRect.position.y + frameRect.size.height
+                            : clientRect.position.y + clientRect.size.height;
+
+        const int16_t padding = 10;
+        left -= padding;
+        top -= padding;
+        right += padding;
+        bottom += padding;
+
+        xcb_rectangle_t frameDamage = { left, top, (uint16_t)(right - left), (uint16_t)(bottom - top) };
+        XCBRegion *damageRegion = [[XCBRegion alloc] initWithConnection:self
+                                                               rectagles:&frameDamage
+                                                                   count:1];
+        [self addDamagedRegion:damageRegion];
+        damageRegion = nil;
+
         NSLog(@"Destroying window %u", [frameWindow window]);
 
         // Reparent using root-relative coordinates. windowRect is frame-relative
@@ -1996,22 +2043,20 @@ static XCBConnection *sharedInstance;
     {
         frame = (XCBFrame *) [window parentWindow];
         clientWindow = [frame childWindowForKey:ClientWindow];
+    }
 
-        // Check if this is the resize handle - if so, use client window for active window
-        XCBWindow *resizeHandle = [frame childWindowForKey:ResizeHandle];
-        BOOL isResizeHandle = (resizeHandle && [resizeHandle window] == [window window]);
-
-        // Set expected focus to prevent handleFocusIn: from making a duplicate update
-        XCBWindow *targetWindow = isResizeHandle ? clientWindow : window;
-        self.expectedFocusWindow = [targetWindow window];
-        self.expectedFocusTimestamp = currentTime;
-
-        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
-        // Use client window for active window, not the resize handle
-        [ewmhService updateNetActiveWindow:targetWindow];
-        ewmhService = nil;
-        resizeHandle = nil;
-
+    // Always update _NET_ACTIVE_WINDOW to the client window, regardless of which
+    // discovery block ran above (frame click, titlebar click, or frame-child click).
+    // Apps without WM_TAKE_FOCUS (e.g. Chrome) rely entirely on this update
+    // because focus() alone does not reach updateNetActiveWindow for those apps.
+    if (clientWindow) {
+        self.expectedFocusWindow = [clientWindow window];
+        self.expectedFocusTimestamp = anEvent->time;
+        EWMHService *ewmhActiveService = [EWMHService sharedInstanceWithConnection:self];
+        NSLog(@"[handleButtonPress] Setting _NET_ACTIVE_WINDOW to client 0x%x (clicked 0x%x)",
+              [clientWindow window], [window window]);
+        [ewmhActiveService updateNetActiveWindow:clientWindow];
+        ewmhActiveService = nil;
     }
 
     // Check if this is a menu-type window - don't change focus for menus
@@ -2323,8 +2368,22 @@ static XCBConnection *sharedInstance;
                     targetWindow = clientWindow;
                 }
             }
-            // If this is a client window directly, use it
-            else if ([window decorated]) {
+            // If this is a titlebar or child of a frame, use the frame's client window
+            else if ([window isKindOfClass:[XCBTitleBar class]] ||
+                     ([window parentWindow] && [[window parentWindow] isKindOfClass:[XCBFrame class]])) {
+                XCBFrame *frame = [window isKindOfClass:[XCBTitleBar class]] ?
+                                (XCBFrame *)[window parentWindow] :
+                                (XCBFrame *)[window parentWindow];
+                if (frame) {
+                    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+                    if (clientWindow) {
+                        targetWindowId = [clientWindow window];
+                        targetWindow = clientWindow;
+                    }
+                }
+            }
+            // For undecorated client windows or direct focus targets, use the window itself
+            else {
                 targetWindowId = [window window];
                 targetWindow = window;
             }

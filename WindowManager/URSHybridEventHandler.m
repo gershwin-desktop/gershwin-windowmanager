@@ -763,7 +763,8 @@
             // This ensures dialogs, alerts, sheets and other special windows get focused too
             if ([self.focusManager isWindowFocusable:mappedClient allowDesktop:NO]) {
                 // Schedule focus after a brief delay to ensure the window is fully set up
-                [self performSelector:@selector(focusWindowAfterThemeApplied:)
+                // Use focusNewlyMappedWindow to ensure new windows always get focus
+                [self performSelector:@selector(focusNewlyMappedWindow:)
                            withObject:mappedClient
                            afterDelay:0.1];
             }
@@ -774,7 +775,9 @@
             xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:unmapNotifyEvent->window];
             [connection handleUnMapNotify:unmapNotifyEvent];
 
-            // Notify compositor of unmap event
+            // Notify compositor of unmap event. The compositor will remove the
+            // entire logical window group atomically, including decorations,
+            // client content, and any shadows.
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager unmapWindow:unmapNotifyEvent->window];
             }
@@ -1034,6 +1037,7 @@
                 xcb_window_t clientId = [clientWindow window];
                 [self.focusManager trackFocusGain:clientId];
             }
+            [self.focusManager refreshAppKitActivationState];
         }
 
         // Re-render titlebar with GSTheme using the correct active/inactive state
@@ -2141,6 +2145,11 @@
 - (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow
 {
     [self.focusManager focusWindowAfterThemeApplied:clientWindow];
+}
+
+- (void)focusNewlyMappedWindow:(XCBWindow *)clientWindow
+{
+    [self.focusManager focusNewlyMappedWindow:clientWindow];
 }
 
 - (void)removeWindowFromRecentlyFocused:(NSNumber *)windowIdNum
