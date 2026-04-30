@@ -915,6 +915,12 @@
     // This ensures we can type in the window even if hints are incorrect
     [self setInputFocus:XCB_INPUT_FOCUS_PARENT time:[connection currentTime]];
 
+    // Always update _NET_ACTIVE_WINDOW to this window first.  For apps that don't
+    // support WM_TAKE_FOCUS (e.g. Chrome, Qt apps) this is the only place that
+    // sets the property to the client window — without it Menu.app never sees the
+    // correct active window after a titlebar or frame click.
+    [ewmhService updateNetActiveWindow:self];
+
     /*** check for the WMTakeFocus protocol ***/
 
     if ([icccmService hasProtocol:[icccmService WMTakeFocus] forWindow:self])
@@ -930,11 +936,7 @@
         event.sequence = 0;
 
         [connection sendEvent:(const char*) &event toClient:self propagate:NO];
-    } else {
-	return;
     }
-
-    [ewmhService updateNetActiveWindow:self];
 
     atomService = nil;
     icccmService = nil;
