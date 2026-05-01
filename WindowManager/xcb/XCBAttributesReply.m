@@ -33,7 +33,6 @@
     {
         // xcb returns NULL when the connection is in an error state or the
         // target window has been destroyed mid-request.
-        [self release];
         return nil;
     }
 
