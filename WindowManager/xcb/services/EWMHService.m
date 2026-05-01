@@ -600,14 +600,19 @@
         return NULL;
     }
 
-    if (reply->length == 0 && reply->format == 0 && reply->type == 0)
+    if (reply == NULL)
     {
-        // Property not present - this is normal for many windows
-        free(error);
+        // xcb returns NULL when the connection is in an error state
         return NULL;
     }
 
-    free(error);
+    if (reply->length == 0 && reply->format == 0 && reply->type == 0)
+    {
+        // Property not present - this is normal for many windows
+        free(reply);
+        return NULL;
+    }
+
     return reply;
 }
 
@@ -1218,19 +1223,25 @@
                           forWindow:aWindow
                              delete:NO
                              length:1];
-    
+
     if (!reply)
-        return -1;
-    
+        return (uint32_t)-1;
+
+    if (xcb_get_property_value_length((xcb_get_property_reply_t *)reply) < (int)sizeof(uint32_t))
+    {
+        free(reply);
+        return (uint32_t)-1;
+    }
+
     uint32_t *net = xcb_get_property_value(reply);
-    
+
     uint32_t pid = *net;
-    
+
     free(reply);
     net = NULL;
-    
+
     return pid;
-    
+
 }
 
 
