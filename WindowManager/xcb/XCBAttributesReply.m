@@ -29,6 +29,14 @@
 
 - (id) initWithAttributesReply:(xcb_get_window_attributes_reply_t*)aReply
 {
+    if (aReply == NULL)
+    {
+        // xcb returns NULL when the connection is in an error state or the
+        // target window has been destroyed mid-request.
+        [self release];
+        return nil;
+    }
+
     self = [super initWithReply:aReply];
 
     if (self == nil)

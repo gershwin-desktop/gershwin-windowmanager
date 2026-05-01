@@ -533,6 +533,13 @@
         return;
     }
 
+    if (attr == NULL)
+    {
+        // xcb returned no reply (connection in error state, or window
+        // already destroyed). Leave attributes nil; callers handle it.
+        return;
+    }
+
     attributes = [[XCBAttributesReply alloc] initWithAttributesReply:attr];
 }
 

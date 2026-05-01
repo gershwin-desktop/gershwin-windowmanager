@@ -63,6 +63,13 @@
 
 - (void)ensureFocusAfterWindowRemoval:(xcb_window_t)removedClientId
 {
+    // If the xcb connection is wedged, every xcb_*_reply we'd issue here
+    // returns NULL and trips an unguarded deref somewhere downstream. Bail
+    // early — there is no useful focus rebuild to do against a dead server.
+    if (xcb_connection_has_error([self.connection connection])) {
+        return;
+    }
+
     URS_PROFILE_BEGIN(focusResolve);
     if (removedClientId != self.lastFocusedWindowId) {
         if (self.lastFocusedWindowId == XCB_NONE) {
