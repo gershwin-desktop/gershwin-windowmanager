@@ -76,9 +76,15 @@
     self.titlebarController.workareaManager = self.workareaManager;
     self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
 
-    // Default to compositing enabled unless overridden by the caller
-    self.compositingRequested = YES;
-    NSLog(@"[WindowManager] Compositing default state set to %@", self.compositingRequested ? @"enabled" : @"disabled");
+    // Check if compositing was requested via command-line
+    self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
+                                  boolForKey:@"URSCompositingEnabled"];
+    
+    if (self.compositingRequested) {
+        NSLog(@"[WindowManager] Compositing requested - will attempt to initialize");
+    } else {
+        NSLog(@"[WindowManager] Compositing disabled - using direct rendering");
+    }
 
     return self;
 }
@@ -465,8 +471,9 @@
         [connection setNeedFlush:NO];
     }
     
-    // Only force immediate repair when the compositor actually has pending work.
-    // This keeps fast updates responsive while avoiding redundant repair calls.
+    // Immediate repair when the compositor has pending work.  The
+    // NameWindowPixmap snapshot + round-trips in getWindowPicture: ensure
+    // we capture a consistent frozen state even with immediate painting.
     if (self.compositingManager &&
         [self.compositingManager compositingActive] &&
         [self.compositingManager hasPendingDamage]) {
@@ -565,7 +572,7 @@
 
             // Trigger compositor update for the exposed window
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                // BUGFIX: Handle expose event to force NameWindowPixmap recreation.
+                // Handle expose event to force NameWindowPixmap recreation.
                 // This fixes corruption with fixed-size windows (like About dialogs)
                 // that don't redraw themselves when exposed after being obscured.
                 [self.compositingManager handleExposeEvent:exposeEvent->window];
@@ -1037,7 +1044,6 @@
                 xcb_window_t clientId = [clientWindow window];
                 [self.focusManager trackFocusGain:clientId];
             }
-            [self.focusManager refreshAppKitActivationState];
         }
 
         // Re-render titlebar with GSTheme using the correct active/inactive state
