@@ -383,6 +383,12 @@ static const CGFloat kSelectionPadding = 6.0;
     view.useRoundedCorners = [compositor compositingActive];
     
     [view setNeedsDisplay:YES];
+    // Force synchronous redraw so the highlight updates immediately.
+    // On GNUstep/X11 with the hybrid event loop, -setNeedsDisplay: is
+    // asynchronous and can be delayed until the next NSRunLoop iteration,
+    // which may not happen until after more XCB events are processed.
+    // A fast typist pressing Tab repeatedly can thus see a stale highlight.
+    [view displayIfNeeded];
     
     NSLog(@"[WindowSwitcherOverlay] Updated with %lu titles, selected: %ld, rounded corners: %d",
           (unsigned long)count, (long)index, view.useRoundedCorners);

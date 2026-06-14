@@ -24,6 +24,13 @@
 #import <xcb/xcb_icccm.h>
 #import "URSThemeIntegration.h"
 
+#pragma mark - Class Extension
+
+@interface URSWindowSwitcher ()
+@property (strong, nonatomic) NSTimer *showOverlayTimer;  // 250ms delay before showing switcher overlay
+@property (assign, nonatomic) BOOL overlayVisible;        // Whether the overlay is currently shown
+@end
+
 #pragma mark - URSWindowEntry Implementation
 
 @implementation URSWindowEntry
@@ -71,6 +78,8 @@
         self.windowEntries = [NSMutableArray array];
         self.currentIndex = -1;
         self.isSwitching = NO;
+        self.overlayVisible = NO;
+        self.showOverlayTimer = nil;
         self.overlay = [URSWindowSwitcherOverlay sharedOverlay];
     }
     return self;
@@ -605,136 +614,158 @@
         XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
         if (!clientWindow) return nil;
         
-        // Get WM_CLASS to identify the application
-        // First ensure wmClass is fetched (it may already be cached)
-        ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:self.connection];
-        [icccmService wmClassForWindow:clientWindow];
+        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
+        NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
         
-        NSMutableArray *windowClass = [clientWindow windowClass];
-        NSString *className = nil;
-        NSString *instanceName = nil;
-        
-        if (windowClass && [windowClass count] >= 2) {
-            className = [windowClass objectAtIndex:0];
-            instanceName = [windowClass objectAtIndex:1];
+        // --- APPROACH 1: Try _NET_WM_ICON from the client window (most accurate) ---
+        {
+            NSImage *icon = [self iconFromNetWmIconOfWindow:clientWindow
+                                                ewmhService:ewmhService];
+            if (icon) return icon;
         }
         
-        NSWorkspace *workspace = [NSWorkspace sharedWorkspace];
-        NSString *appPath = nil;
-        
-        // Try to find the application path if we have WM_CLASS
-        if (className && [className length] > 0) {
-            // First try the class name
-            appPath = [workspace fullPathForApplication:className];
-            
-            // If that fails, try the instance name
-            if (!appPath || [appPath length] == 0) {
-                if (instanceName && [instanceName length] > 0) {
-                    appPath = [workspace fullPathForApplication:instanceName];
+        // --- APPROACH 2: Walk client window's children to find _NET_WM_ICON ---
+        // Some X11 apps (e.g. GTK apps with client-side decorations) set
+        // _NET_WM_ICON on a child window rather than the top-level client window.
+        {
+            xcb_connection_t *conn = [self.connection connection];
+            xcb_query_tree_cookie_t treeCookie = xcb_query_tree(conn, [clientWindow window]);
+            xcb_query_tree_reply_t *treeReply = xcb_query_tree_reply(conn, treeCookie, NULL);
+            if (treeReply) {
+                xcb_window_t *children = xcb_query_tree_children(treeReply);
+                int numChildren = xcb_query_tree_children_length(treeReply);
+                for (int i = 0; i < numChildren; i++) {
+                    XCBWindow *child = [[XCBWindow alloc] initWithXCBWindow:children[i]
+                                                              andConnection:self.connection];
+                    if (child) {
+                        NSImage *icon = [self iconFromNetWmIconOfWindow:child
+                                                            ewmhService:ewmhService];
+                        if (icon) {
+                            free(treeReply);
+                            return icon;
+                        }
+                    }
                 }
+                free(treeReply);
             }
-            
-            // For non-GNUstep apps, try common paths
-            if (!appPath || [appPath length] == 0) {
-                NSArray *searchPaths = @[
-                    @"/usr/share/applications",
-                    @"/usr/local/share/applications",
-                    @"/System/Applications"
-                ];
+        }
+        
+        // --- APPROACH 3: Use _NET_WM_PID to find the application via NSWorkspace ---
+        // For non-GNUstep X11 apps, _NET_WM_PID identifies the owning process.
+        // We can look it up in NSWorkspace's launchedApplications to get the
+        // application bundle path and its icon.
+        {
+            uint32_t pid = [ewmhService netWMPidForWindow:clientWindow];
+            if (pid != (uint32_t)-1 && pid > 0) {
+                NSArray *launchedApps = [workspace launchedApplications];
+                for (NSDictionary *appInfo in launchedApps) {
+                    NSNumber *appPID = [appInfo objectForKey:@"NSApplicationProcessIdentifier"];
+                    if (appPID && [appPID intValue] == (int)pid) {
+                        NSString *appPath = [appInfo objectForKey:@"NSApplicationPath"];
+                        if (appPath && [appPath length] > 0) {
+                            NSImage *icon = [workspace iconForFile:appPath];
+                            if (icon) {
+                                [icon setSize:NSMakeSize(48.0, 48.0)];
+                                return icon;
+                            }
+                        }
+                    }
+                }
                 
-                for (NSString *searchPath in searchPaths) {
-                    // Try .desktop file approach for non-GNUstep apps
-                    NSString *desktopPath = [NSString stringWithFormat:@"%@/%@.desktop", searchPath, [className lowercaseString]];
-                    if ([[NSFileManager defaultManager] fileExistsAtPath:desktopPath]) {
-                        // Read Icon= line from .desktop file
-                        NSString *desktopContent = [NSString stringWithContentsOfFile:desktopPath encoding:NSUTF8StringEncoding error:nil];
-                        if (desktopContent) {
-                            NSArray *lines = [desktopContent componentsSeparatedByString:@"\n"];
-                            for (NSString *line in lines) {
-                                if ([line hasPrefix:@"Icon="]) {
-                                    NSString *iconName = [[line substringFromIndex:5] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                                    // Try as absolute path first
-                                    if ([iconName hasPrefix:@"/"]) {
-                                        if ([[NSFileManager defaultManager] fileExistsAtPath:iconName]) {
-                                            appPath = iconName;
-                                            break;
+                // Also try to find a .desktop file or app by scanning /proc/PID/cmdline
+                // This catches non-GNUstep apps not registered with NSWorkspace
+                {
+                    char cmdline[4096];
+                    char procPath[64];
+                    snprintf(procPath, sizeof(procPath), "/proc/%u/cmdline", pid);
+                    FILE *fp = fopen(procPath, "r");
+                    if (fp) {
+                        size_t nread = fread(cmdline, 1, sizeof(cmdline) - 1, fp);
+                        fclose(fp);
+                        if (nread > 0) {
+                            cmdline[nread] = '\0';
+                            // cmdline is NUL-separated; first entry is the executable path
+                            NSString *execPath = [NSString stringWithUTF8String:cmdline];
+                            if (execPath && [execPath length] > 0) {
+                                NSString *appPath = execPath;
+                                // Try iconForFile on the executable itself
+                                NSImage *icon = [workspace iconForFile:appPath];
+                                if (icon) {
+                                    [icon setSize:NSMakeSize(48.0, 48.0)];
+                                    return icon;
+                                }
+                                // Try to find an associated .desktop file from the binary name
+                                NSString *binaryName = [[appPath lastPathComponent] stringByDeletingPathExtension];
+                                if ([binaryName length] > 0) {
+                                    appPath = [self iconFromDesktopFileForName:binaryName
+                                                                     workspace:workspace];
+                                    if (appPath) {
+                                        NSImage *icon = [workspace iconForFile:appPath];
+                                        if (icon) {
+                                            [icon setSize:NSMakeSize(48.0, 48.0)];
+                                            return icon;
                                         }
-                                    } else {
-                                        // Search in icon theme paths
-                                        NSArray *iconPaths = @[
-                                            [NSString stringWithFormat:@"/usr/share/pixmaps/%@.png", iconName],
-                                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/48x48/apps/%@.png", iconName],
-                                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/scalable/apps/%@.svg", iconName]
-                                        ];
-                                        for (NSString *iconPath in iconPaths) {
-                                            if ([[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
-                                                appPath = iconPath;
-                                                break;
-                                            }
-                                        }
-                                        if (appPath) break;
                                     }
                                 }
                             }
                         }
-                        if (appPath) break;
                     }
-                }
-            }
-            
-            if (appPath && [appPath length] > 0) {
-                // Get the application icon - use iconForFile which works for both .app bundles and icon files
-                NSImage *icon = [workspace iconForFile:appPath];
-                if (icon) {
-                    // Resize icon to 48x48 like the Dock uses
-                    [icon setSize:NSMakeSize(48.0, 48.0)];
-                    return icon;
                 }
             }
         }
         
-        // FALLBACK 1: Try to get icon from X11 _NET_WM_ICON property
-        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
-        xcb_get_property_reply_t *reply = [ewmhService netWmIconFromWindow:clientWindow];
-
-        if (reply) {
-            // _NET_WM_ICON format: [width, height, ARGB32_pixels...] repeated per size
-            if (reply->type == XCB_ATOM_CARDINAL && reply->format == 32 && reply->length >= 2) {
-                uint32_t *data = (uint32_t *)xcb_get_property_value(reply);
-                uint32_t *end  = data + reply->length;
-
-                // Find the icon size closest to 48x48
-                uint32_t *bestData = NULL;
-                int bestWidth = 0, bestHeight = 0, bestDiff = INT_MAX;
-                uint32_t *p = data;
-                while (end - p >= 2) {
-                    uint32_t w = p[0], h = p[1];
-                    uint64_t npix = (uint64_t)w * h;
-                    if (w < 1 || h < 1 || npix > (uint64_t)(end - p) - 2) break;
-                    int diff = abs((int)w - 48) + abs((int)h - 48);
-                    if (diff < bestDiff) {
-                        bestDiff = diff;
-                        bestWidth = (int)w;
-                        bestHeight = (int)h;
-                        bestData = p + 2;
+        // --- APPROACH 4: Try _NET_WM_ICON from the frame window itself ---
+        // Some window managers copy _NET_WM_ICON to the frame; try it here
+        // as a last resort before going to WM_CLASS resolution.
+        {
+            NSImage *icon = [self iconFromNetWmIconOfWindow:(XCBWindow *)frame
+                                                ewmhService:ewmhService];
+            if (icon) return icon;
+        }
+        
+        // --- APPROACH 5: WM_CLASS / .desktop file resolution ---
+        {
+            ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:self.connection];
+            [icccmService wmClassForWindow:clientWindow];
+            
+            NSMutableArray *windowClass = [clientWindow windowClass];
+            NSString *className = nil;
+            NSString *instanceName = nil;
+            
+            if (windowClass && [windowClass count] >= 2) {
+                className = [windowClass objectAtIndex:0];
+                instanceName = [windowClass objectAtIndex:1];
+            }
+            
+            // Try to find the application path from WM_CLASS
+            if (className && [className length] > 0) {
+                NSString *appPath = [workspace fullPathForApplication:className];
+                
+                if (!appPath || [appPath length] == 0) {
+                    if (instanceName && [instanceName length] > 0) {
+                        appPath = [workspace fullPathForApplication:instanceName];
                     }
-                    p += 2 + npix;
                 }
-
-                if (bestData) {
-                    NSImage *icon = [self convertNetWmIconData:bestData width:bestWidth height:bestHeight];
+                
+                if (!appPath || [appPath length] == 0) {
+                    // Try .desktop file lookup with both class and instance names
+                    appPath = [self iconFromDesktopFileForName:className workspace:workspace];
+                    if (!appPath && instanceName && [instanceName length] > 0) {
+                        appPath = [self iconFromDesktopFileForName:instanceName workspace:workspace];
+                    }
+                }
+                
+                if (appPath && [appPath length] > 0) {
+                    NSImage *icon = [workspace iconForFile:appPath];
                     if (icon) {
                         [icon setSize:NSMakeSize(48.0, 48.0)];
-                        free(reply);
                         return icon;
                     }
                 }
             }
-            free(reply);
         }
         
-        // FALLBACK 2: Use generic application icon
-        // Try to get the generic application icon from the workspace
+        // --- FALLBACK: Generic application icon ---
         NSString *genericAppPath = [workspace fullPathForApplication:@"GNUstep"];
         if (genericAppPath) {
             NSImage *genericAppIcon = [workspace iconForFile:genericAppPath];
@@ -750,6 +781,120 @@
         NSLog(@"[WindowSwitcher] Exception getting icon for frame: %@", exception.reason);
         return nil;
     }
+}
+
+/// Extract the best _NET_WM_ICON (closest to 48x48) from a window as an NSImage.
+- (NSImage *)iconFromNetWmIconOfWindow:(XCBWindow *)window
+                           ewmhService:(EWMHService *)ewmhService
+{
+    if (!window || !ewmhService) return nil;
+    
+    xcb_get_property_reply_t *reply = [ewmhService netWmIconFromWindow:window];
+    if (!reply) return nil;
+    
+    NSImage *result = nil;
+    
+    if (reply->type == XCB_ATOM_CARDINAL && reply->format == 32 && reply->length >= 2) {
+        uint32_t *data = (uint32_t *)xcb_get_property_value(reply);
+        uint32_t *end  = data + reply->length;
+        
+        uint32_t *bestData = NULL;
+        int bestWidth = 0, bestHeight = 0, bestDiff = INT_MAX;
+        uint32_t *p = data;
+        while (end - p >= 2) {
+            uint32_t w = p[0], h = p[1];
+            uint64_t npix = (uint64_t)w * h;
+            if (w < 1 || h < 1 || npix > (uint64_t)(end - p) - 2) break;
+            int diff = abs((int)w - 48) + abs((int)h - 48);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                bestWidth = (int)w;
+                bestHeight = (int)h;
+                bestData = p + 2;
+            }
+            p += 2 + npix;
+        }
+        
+        if (bestData) {
+            result = [self convertNetWmIconData:bestData width:bestWidth height:bestHeight];
+            if (result) {
+                [result setSize:NSMakeSize(48.0, 48.0)];
+            }
+        }
+    }
+    
+    free(reply);
+    return result;
+}
+
+/// Look up the icon path for an app name via .desktop files and icon theme.
+/// Returns the path to the icon file, or nil if not found.
+- (NSString *)iconFromDesktopFileForName:(NSString *)name
+                               workspace:(NSWorkspace *)workspace
+{
+    if (!name || [name length] == 0) return nil;
+    
+    NSString *lowerName = [name lowercaseString];
+    NSArray *searchPaths = @[
+        @"/usr/share/applications",
+        @"/usr/local/share/applications",
+        @"/System/Applications"
+    ];
+    
+    for (NSString *searchPath in searchPaths) {
+        // Try both lowercased and original name for the .desktop file
+        NSArray *desktopCandidates = @[
+            [NSString stringWithFormat:@"%@/%@.desktop", searchPath, lowerName],
+            [NSString stringWithFormat:@"%@/%@.desktop", searchPath, name]
+        ];
+        
+        for (NSString *desktopPath in desktopCandidates) {
+            if ([[NSFileManager defaultManager] fileExistsAtPath:desktopPath]) {
+                NSString *desktopContent = [NSString stringWithContentsOfFile:desktopPath
+                                                                     encoding:NSUTF8StringEncoding
+                                                                        error:nil];
+                if (!desktopContent) continue;
+                
+                NSArray *lines = [desktopContent componentsSeparatedByString:@"\n"];
+                for (NSString *line in lines) {
+                    if ([line hasPrefix:@"Icon="]) {
+                        NSString *iconName = [[line substringFromIndex:5]
+                            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                        if ([iconName length] == 0) continue;
+                        
+                        // Absolute path
+                        if ([iconName hasPrefix:@"/"]) {
+                            if ([[NSFileManager defaultManager] fileExistsAtPath:iconName]) {
+                                return iconName;
+                            }
+                            continue;
+                        }
+                        
+                        // Search icon theme paths more thoroughly
+                        NSArray *iconPaths = @[
+                            [NSString stringWithFormat:@"/usr/share/pixmaps/%@.png", iconName],
+                            [NSString stringWithFormat:@"/usr/share/pixmaps/%@.xpm", iconName],
+                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/48x48/apps/%@.png", iconName],
+                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/32x32/apps/%@.png", iconName],
+                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/64x64/apps/%@.png", iconName],
+                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/128x128/apps/%@.png", iconName],
+                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/256x256/apps/%@.png", iconName],
+                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/scalable/apps/%@.svg", iconName],
+                            [NSString stringWithFormat:@"/usr/share/icons/gnome/48x48/apps/%@.png", iconName],
+                            [NSString stringWithFormat:@"/usr/share/icons/gnome/scalable/apps/%@.svg", iconName]
+                        ];
+                        for (NSString *iconPath in iconPaths) {
+                            if ([[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
+                                return iconPath;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return nil;
 }
 
 #pragma mark - Switching Operations
@@ -790,14 +935,14 @@
     // Internal index starts at 0 (currently focused window or first minimized window)
     self.currentIndex = 0;
     self.isSwitching = YES;
+    self.overlayVisible = NO;
     
-    // Build title and icon arrays for overlay showing ALL windows (current first, then others)
+    // Build title and icon arrays for the overlay (saved for when the timer fires)
     // The overlay shows: [Current, Next, Third, ...]
     NSMutableArray *titles = [NSMutableArray array];
     NSMutableArray *icons = [NSMutableArray array];
     for (URSWindowEntry *entry in self.windowEntries) {
         [titles addObject:entry.title];
-        // Add icon or NSNull placeholder if no icon available
         if (entry.icon) {
             [icons addObject:entry.icon];
         } else {
@@ -805,16 +950,19 @@
         }
     }
     
-    // Show overlay centered on screen
-    [self.overlay showCenteredOnScreen];
-    
-    // For single window case, highlight index 0
-    // For multiple windows, start with index 1 highlighted (the next window to switch to)
-    NSInteger initialHighlight = ([self.windowEntries count] == 1) ? 0 : 1;
-    [self.overlay updateWithTitles:titles icons:icons currentIndex:initialHighlight];
+    // Defer overlay appearance: only show the switcher window if Alt is held
+    // for at least 100ms. Quick Alt-Tab taps complete silently without an overlay.
+    self.showOverlayTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                             target:self
+                                                           selector:@selector(showOverlayTimerFired:)
+                                                           userInfo:@{
+                                                               @"titles": titles,
+                                                               @"icons": icons
+                                                           }
+                                                            repeats:NO];
     
     // If there's more than one window, immediately cycle to next window
-    // If there's only one window, just stay at index 0 (it will be unminimized on completeSwitching)
+    // (the overlay will catch up when the timer fires)
     if ([self.windowEntries count] > 1) {
         [self cycleForward];
     }
@@ -851,6 +999,28 @@
     [self showWindowAtCurrentIndex];
 }
 
+#pragma mark - Overlay Show Timer
+
+/// Called after the 250ms delay: shows the switcher overlay with current state.
+- (void)showOverlayTimerFired:(NSTimer *)timer {
+    self.showOverlayTimer = nil;
+    if (!self.isSwitching) return;
+    
+    NSDictionary *userInfo = [timer userInfo];
+    NSArray *titles = [userInfo objectForKey:@"titles"];
+    NSArray *icons = [userInfo objectForKey:@"icons"];
+    
+    if (!titles || [titles count] == 0) return;
+    
+    // Show the overlay centered on screen
+    [self.overlay showCenteredOnScreen];
+    [self.overlay updateWithTitles:titles icons:icons currentIndex:self.currentIndex];
+    self.overlayVisible = YES;
+    
+    NSLog(@"[WindowSwitcher] Overlay shown after 250ms delay, selected index: %ld",
+          (long)self.currentIndex);
+}
+
 - (void)showWindowAtCurrentIndex {
     if (self.currentIndex < 0 || self.currentIndex >= [self.windowEntries count]) {
         return;
@@ -863,22 +1033,21 @@
     // The actual window switching will happen in completeSwitching when Alt is released
     // This ensures the user can cycle through options before committing to a switch
     
-    // Update overlay display with new selection
-    // Build full titles and icons arrays showing all windows
-    NSMutableArray *titles = [NSMutableArray array];
-    NSMutableArray *icons = [NSMutableArray array];
-    for (URSWindowEntry *e in self.windowEntries) {
-        [titles addObject:e.title];
-        // Add icon or NSNull placeholder if no icon available
-        if (e.icon) {
-            [icons addObject:e.icon];
-        } else {
-            [icons addObject:[NSNull null]];
+    // Update overlay display with new selection (only if overlay is already visible)
+    if (self.overlayVisible) {
+        NSMutableArray *titles = [NSMutableArray array];
+        NSMutableArray *icons = [NSMutableArray array];
+        for (URSWindowEntry *e in self.windowEntries) {
+            [titles addObject:e.title];
+            if (e.icon) {
+                [icons addObject:e.icon];
+            } else {
+                [icons addObject:[NSNull null]];
+            }
         }
+        
+        [self.overlay updateWithTitles:titles icons:icons currentIndex:self.currentIndex];
     }
-    
-    // Overlay index matches internal index (current window at 0, next at 1, etc.)
-    [self.overlay updateWithTitles:titles icons:icons currentIndex:self.currentIndex];
 }
 
 - (void)completeSwitching {
@@ -887,64 +1056,87 @@
     NSLog(@"[WindowSwitcher] ========== COMPLETING WINDOW SWITCH ==========");
     NSLog(@"[WindowSwitcher] Current index: %ld", (long)self.currentIndex);
     
-    // NOW perform the actual window switching when Alt is released
-    if (self.currentIndex >= 0 && self.currentIndex < [self.windowEntries count]) {
-        URSWindowEntry *entry = [self.windowEntries objectAtIndex:self.currentIndex];
-        NSLog(@"[WindowSwitcher] Switching to: %@", entry.title);
-        
-        // If this window was minimized, unminimize it now
-        if (entry.wasMinimized) {
-            NSLog(@"[WindowSwitcher] Window was minimized, unminimizing...");
-            [self unminimizeWindow:entry.frame];
-        }
-        
-        // CRITICAL: Use the EXACT same code path as handleButtonPress
-        // This ensures window activation works identically to clicking the titlebar
-        XCBWindow *clientWindow = [entry.frame childWindowForKey:ClientWindow];
-        XCBTitleBar *titleBar = (XCBTitleBar *)[entry.frame childWindowForKey:TitleBar];
-        
-        if (clientWindow && entry.frame) {
-            NSLog(@"[WindowSwitcher] Focusing client window %u and raising frame %u", 
-                  [clientWindow window], [entry.frame window]);
+    // CRITICAL: Wrap in @try/@catch to guarantee state is always reset.
+    // If any of the called methods (unminimizeWindow, focus, stackAbove,
+    // drawTitleBarComponents, drawAllTitleBarsExcept) throws an exception,
+    // self.isSwitching stays YES forever and the switcher is stuck.
+    @try {
+        // NOW perform the actual window switching when Alt is released
+        if (self.currentIndex >= 0 && self.currentIndex < [self.windowEntries count]) {
+            URSWindowEntry *entry = [self.windowEntries objectAtIndex:self.currentIndex];
+            NSLog(@"[WindowSwitcher] Switching to: %@", entry.title);
             
-            // Step 1: Focus the client window (same as handleButtonPress)
-            [clientWindow focus];
-            
-            // Step 2: Raise the frame (same as handleButtonPress)
-            [entry.frame stackAbove];
-            
-            // Step 3: Update titlebar state and redraw all titlebars (same as handleButtonPress)
-            if (titleBar) {
-                [titleBar setIsAbove:YES];
-                [titleBar setButtonsAbove:YES];
-                [titleBar drawTitleBarComponents];
-                
-                // CRITICAL: This is what makes all OTHER windows appear inactive
-                [self.connection drawAllTitleBarsExcept:titleBar];
+            // If this window was minimized, unminimize it now
+            if (entry.wasMinimized) {
+                NSLog(@"[WindowSwitcher] Window was minimized, unminimizing...");
+                [self unminimizeWindow:entry.frame];
             }
             
-            NSLog(@"[WindowSwitcher] Window activation complete using XCBKit standard path");
-        } else {
-            NSLog(@"[WindowSwitcher] WARNING: Could not get client window or frame!");
+            // CRITICAL: Use the EXACT same code path as handleButtonPress
+            // This ensures window activation works identically to clicking the titlebar
+            XCBWindow *clientWindow = [entry.frame childWindowForKey:ClientWindow];
+            XCBTitleBar *titleBar = (XCBTitleBar *)[entry.frame childWindowForKey:TitleBar];
+            
+            if (clientWindow && entry.frame) {
+                NSLog(@"[WindowSwitcher] Focusing client window %u and raising frame %u", 
+                      [clientWindow window], [entry.frame window]);
+                
+                // Step 1: Focus the client window (same as handleButtonPress)
+                [clientWindow focus];
+                
+                // Step 2: Raise the frame (same as handleButtonPress)
+                [entry.frame stackAbove];
+                
+                // Step 3: Update titlebar state and redraw all titlebars (same as handleButtonPress)
+                if (titleBar) {
+                    [titleBar setIsAbove:YES];
+                    [titleBar setButtonsAbove:YES];
+                    [titleBar drawTitleBarComponents];
+                    
+                    // CRITICAL: This is what makes all OTHER windows appear inactive
+                    [self.connection drawAllTitleBarsExcept:titleBar];
+                }
+                
+                NSLog(@"[WindowSwitcher] Window activation complete using XCBKit standard path");
+            } else {
+                NSLog(@"[WindowSwitcher] WARNING: Could not get client window or frame!");
+            }
         }
-    }
-    
-    // Re-minimize any other windows that were temporarily shown (none in current implementation)
-    for (NSInteger i = 0; i < [self.windowEntries count]; i++) {
-        if (i == self.currentIndex) continue;
         
-        URSWindowEntry *entry = [self.windowEntries objectAtIndex:i];
-        if (entry.temporarilyShown && entry.frame) {
-            [self minimizeWindow:entry.frame];
-            entry.temporarilyShown = NO;
+        // Re-minimize any other windows that were temporarily shown (none in current implementation)
+        for (NSInteger i = 0; i < [self.windowEntries count]; i++) {
+            if (i == self.currentIndex) continue;
+            
+            URSWindowEntry *entry = [self.windowEntries objectAtIndex:i];
+            if (entry.temporarilyShown && entry.frame) {
+                [self minimizeWindow:entry.frame];
+                entry.temporarilyShown = NO;
+            }
         }
+    } @catch (NSException *exception) {
+        NSLog(@"[WindowSwitcher] EXCEPTION in completeSwitching: %@", exception.reason);
+        NSLog(@"[WindowSwitcher] Stack trace: %@", exception.callStackSymbols);
     }
     
-    // Hide overlay
-    [self.overlay hide];
+    // Hide overlay (only if it was shown) — do this OUTSIDE the @try
+    // so the screen gets redrawn even if the activation logic failed.
+    if (self.overlayVisible) {
+        [self.overlay hide];
+    }
     
-    // Reset state
+    // Force screen redraw after overlay is hidden so the area that was
+    // covered by the switcher overlay gets repaired.
+    [self forceScreenRedraw];
+    
+    // Cancel the show timer if it hasn't fired yet
+    if (self.showOverlayTimer) {
+        [self.showOverlayTimer invalidate];
+        self.showOverlayTimer = nil;
+    }
+    
+    // Reset state — ALWAYS reached even if @try block threw.
     self.isSwitching = NO;
+    self.overlayVisible = NO;
     self.currentIndex = -1;
     
     NSLog(@"[WindowSwitcher] ========== WINDOW SWITCH COMPLETED ==========");
@@ -955,20 +1147,96 @@
     
     NSLog(@"[WindowSwitcher] Cancelling window switch");
     
-    // Restore all temporarily shown windows to minimized state
-    for (URSWindowEntry *entry in self.windowEntries) {
-        if (entry.temporarilyShown && entry.frame) {
-            [self minimizeWindow:entry.frame];
-            entry.temporarilyShown = NO;
+    @try {
+        // Restore all temporarily shown windows to minimized state
+        for (URSWindowEntry *entry in self.windowEntries) {
+            if (entry.temporarilyShown && entry.frame) {
+                [self minimizeWindow:entry.frame];
+                entry.temporarilyShown = NO;
+            }
         }
+    } @catch (NSException *exception) {
+        NSLog(@"[WindowSwitcher] EXCEPTION in cancelSwitching: %@", exception.reason);
     }
     
-    // Hide overlay
-    [self.overlay hide];
+    // Cancel the show timer if it hasn't fired yet
+    if (self.showOverlayTimer) {
+        [self.showOverlayTimer invalidate];
+        self.showOverlayTimer = nil;
+    }
+    
+    // Hide overlay (only if it was shown)
+    if (self.overlayVisible) {
+        [self.overlay hide];
+    }
+    
+    // Force screen redraw after overlay is hidden.
+    [self forceScreenRedraw];
     
     // Reset state
     self.isSwitching = NO;
+    self.overlayVisible = NO;
     self.currentIndex = -1;
+}
+
+#pragma mark - Screen Redraw After Switcher Closes
+
+/// Force the compositor or X server to redraw the area that was covered
+/// by the switcher overlay.  The overlay is a separate NSWindow — when it
+/// is hidden via orderOut: neither the compositor nor the X server knows
+/// that region needs repainting, leaving a "ghost" of the overlay on screen.
+- (void)forceScreenRedraw {
+    @try {
+        // If compositing is active, damage the overlay area and repair.
+        // The overlay is a native NSWindow; we damage the full screen to be safe.
+        Class compositorClass = NSClassFromString(@"URSCompositingManager");
+        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+            id compositor = [compositorClass performSelector:@selector(sharedManager)];
+            if (compositor && [compositor respondsToSelector:@selector(compositingActive)]) {
+                BOOL active = (BOOL)(uintptr_t)[compositor performSelector:@selector(compositingActive)];
+                if (active) {
+                    if ([compositor respondsToSelector:@selector(damageScreen)]) {
+                        [compositor performSelector:@selector(damageScreen)];
+                    }
+                    if ([compositor respondsToSelector:@selector(performRepairNow)]) {
+                        [compositor performSelector:@selector(performRepairNow)];
+                    }
+                    NSLog(@"[WindowSwitcher] Forced compositor screen redraw after overlay hide");
+                    return;
+                }
+            }
+        }
+        
+        // Non-compositing fallback: send a synthetic expose event to the root
+        // window so the area behind the overlay is redrawn.
+        xcb_connection_t *conn = [self.connection connection];
+        XCBWindow *rootWindow = [self.connection rootWindowForScreenNumber:0];
+        if (conn && rootWindow) {
+            xcb_expose_event_t expose;
+            memset(&expose, 0, sizeof(expose));
+            expose.response_type = XCB_EXPOSE;
+            expose.window = [rootWindow window];
+            expose.x = 0;
+            expose.y = 0;
+            // Full screen — conservative but reliable.
+            XCBScreen *screen = [[self.connection screens] firstObject];
+            if (screen) {
+                expose.width = [screen screen]->width_in_pixels;
+                expose.height = [screen screen]->height_in_pixels;
+            } else {
+                expose.width = 65535;
+                expose.height = 65535;
+            }
+            expose.count = 0;
+            xcb_send_event(conn, 0, [rootWindow window],
+                          XCB_EVENT_MASK_EXPOSURE,
+                          (const char *)&expose);
+            [self.connection flush];
+            NSLog(@"[WindowSwitcher] Sent synthetic expose to root window after overlay hide");
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[WindowSwitcher] Exception in forceScreenRedraw: %@", exception.reason);
+    }
 }
 
 @end

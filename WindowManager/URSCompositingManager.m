@@ -1513,9 +1513,28 @@
 
     URSCompositeWindow *cw = [self findCWindow:windowId];
 
-    // If the damaged window is not directly tracked, it might be a child window
-    // (like a titlebar). Find its parent frame window.
-    if (!cw) {
+    // Always resolve to the top-level frame window for damage routing.
+    // Child windows (titlebar, resize zones) that are tracked separately in
+    // cwindows have their own damage objects and can be found directly.  When
+    // we operate on a child's cw we only damage that child's extents (a thin
+    // strip), which means paintWindow composites the frame's IncludeInferiors
+    // picture clipped to just the child's area.  This is correct in theory but
+    // fragile: if the child's absolute position is even slightly stale the
+    // clip rectangle will be offset and produce a "half-rendered" title bar.
+    //
+    // Safer approach: always resolve to the parent frame so the full window
+    // extents (frame + shadow) are damaged and the entire window is repainted.
+    if (cw) {
+        if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) {
+            xcb_window_t parentFrame = [self findParentFrameWindow:windowId];
+            if (parentFrame != XCB_NONE) {
+                URSCompositeWindow *parentCW = [self findCWindow:parentFrame];
+                if (parentCW) {
+                    cw = parentCW;
+                }
+            }
+        }
+    } else {
         xcb_window_t parentFrame = [self findParentFrameWindow:windowId];
         if (parentFrame != XCB_NONE) {
             cw = [self findCWindow:parentFrame];
@@ -1532,6 +1551,18 @@
     // Keep root-relative coordinates current for damage calculations
     [self updateAbsolutePositionForWindow:cw];
 
+    // DIAGNOSTIC: Log window position vs damage extents
+    {
+        int16_t diagW = cw.width + 2 * cw.borderWidth;
+        int16_t diagH = cw.height + 2 * cw.borderWidth;
+        static int diagCounter = 0;
+        if ((diagCounter++ % 60) == 0) {  // ~every 60 damage events
+            NSLog(@"[Compositor] DAMAGE: win=%u pos=(%d,%d) size=(%d,%d) parent=0x%x",
+                  cw.windowId, cw.x, cw.y, diagW, diagH,
+                  (unsigned int)cw.parentWindowId);
+        }
+    }
+
     [self repairWindow:cw];
     URS_PROFILE_END(damageNotify);
 }
@@ -1543,9 +1574,20 @@
 
     URSCompositeWindow *cw = [self findCWindow:windowId];
 
-    // If the exposed window is not directly tracked, it might be a child window
-    // (like a titlebar or client). Find its parent frame window.
-    if (!cw) {
+    // Always resolve to the top-level frame window for expose handling,
+    // for the same reasons as handleDamageNotify — partial child extents
+    // can produce half-rendered content if the child's position is off.
+    if (cw) {
+        if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) {
+            xcb_window_t parentFrame = [self findParentFrameWindow:windowId];
+            if (parentFrame != XCB_NONE) {
+                URSCompositeWindow *parentCW = [self findCWindow:parentFrame];
+                if (parentCW) {
+                    cw = parentCW;
+                }
+            }
+        }
+    } else {
         xcb_window_t parentFrame = [self findParentFrameWindow:windowId];
         if (parentFrame != XCB_NONE) {
             cw = [self findCWindow:parentFrame];
@@ -1780,8 +1822,16 @@
     
     // Schedule repair on next run loop iteration (immediate)
     // This ensures damage is painted as soon as possible while still
-    // allowing multiple damage events to accumulate
-    [self performSelector:@selector(performRepair) withObject:nil afterDelay:0.0];
+    // allowing multiple damage events to accumulate.
+    //
+    // Use NSRunLoopCommonModes so the repair fires even during menu
+    // tracking, where the default-mode timer would otherwise be
+    // deferred indefinitely and leave the menu bar appearing to
+    // "lag" behind highlight changes.
+    [self performSelector:@selector(performRepair)
+               withObject:nil
+               afterDelay:0.0
+                  inModes:@[NSRunLoopCommonModes]];
 }
 
 - (void)performRepair {
@@ -1830,12 +1880,15 @@
         // Throttle to ~60fps during drag (allow paint if >= 16ms since last paint)
         // This prevents ghost artifacts that occurred with frame-skipping
         if (elapsed < 0.016 && self.lastRepairTime > 0) {
-            // Too soon - schedule a deferred repair to ensure we don't miss this damage
+            // Too soon - schedule a deferred repair to ensure we don't miss this damage.
+            // Use NSRunLoopCommonModes so the deferred repair fires even if the
+            // runloop is in a tracking mode (drag/resize).
             if (!self.repairScheduled) {
                 self.repairScheduled = YES;
                 [self performSelector:@selector(performRepair)
                            withObject:nil
-                           afterDelay:0.016 - elapsed];
+                           afterDelay:0.016 - elapsed
+                              inModes:@[NSRunLoopCommonModes]];
             }
             return;
         }
@@ -2606,6 +2659,16 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         int16_t destYInt = (int16_t)llround(destY);
         uint16_t destWInt = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
         uint16_t destHInt = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
+
+        // DIAGNOSTIC: Log composite position every ~120 frames
+        {
+            static int paintCounter = 0;
+            if ((paintCounter++ % 120) == 0) {
+                NSLog(@"[Compositor] PAINT: win=%u dest=(%d,%d) size=(%hu,%hu) anim=%d",
+                      cw.windowId, destXInt, destYInt, destWInt, destHInt, (int)animating);
+            }
+        }
+
         xcb_render_picture_t alphaMask = XCB_NONE;
 
         // During live resize the picture may have been captured at a different size

@@ -15,6 +15,7 @@
 @property (strong, nonatomic) NSMutableArray *altKeycodes;
 @property (strong, nonatomic) NSTimer *altReleasePollTimer;
 @property (assign, nonatomic) xcb_keycode_t tabKeycode;
+@property (assign, nonatomic) xcb_keycode_t escapeKeycode;
 @end
 
 @implementation URSKeyboardManager
@@ -32,6 +33,7 @@
     _altKeycodes = [[NSMutableArray alloc] init];
     _altReleasePollTimer = nil;
     _tabKeycode = 23; /* fallback; overwritten by setupKeyboardGrabbing */
+    _escapeKeycode = 0; /* 0 = XCB_NONE / not found; set by setupKeyboardGrabbing */
 
     return self;
 }
@@ -110,6 +112,23 @@
                 }
 
                 tabFound = YES;
+            }
+            
+            if (keysyms[i] == XK_Escape) {
+                xcb_keycode_t keycode =
+                    setup->min_keycode + (i / reply->keysyms_per_keycode);
+
+                NSLog(@"[Alt-Tab] Found Escape key at keycode %d", keycode);
+
+                self.escapeKeycode = keycode;
+
+                // Grab Escape alone (no modifiers) — this lets the user cancel
+                // switching if it gets stuck or if they want to abort.
+                xcb_grab_key(conn, 0, root,
+                             0,  // no modifiers — always receive Escape
+                             keycode,
+                             XCB_GRAB_MODE_ASYNC,
+                             XCB_GRAB_MODE_ASYNC);
             }
         }
 
@@ -215,6 +234,11 @@
             }
         }
 
+        // Ungrab Escape key
+        if (self.escapeKeycode > 0) {
+            xcb_ungrab_key(conn, self.escapeKeycode, root, XCB_MOD_MASK_ANY);
+        }
+
         if (!tabFound) {
             NSLog(@"[Alt-Tab] Using fallback keycode 23 for ungrab");
             uint16_t fbLockMasks2[] = {
@@ -295,6 +319,20 @@
             }
 
             [self startAltReleasePoll];
+        }
+
+        // Handle Escape key — cancel the window switcher if it's active.
+        // The Escape key is grabbed with no modifiers (see setupKeyboardGrabbing),
+        // so it reaches us even while the keyboard is grabbed during Alt-Tab.
+        if (event->detail == self.escapeKeycode && self.windowSwitcher.isSwitching) {
+            NSLog(@"[Alt-Tab] Escape pressed during switching - cancelling");
+
+            xcb_connection_t *conn = [self.connection connection];
+            xcb_ungrab_keyboard(conn, XCB_CURRENT_TIME);
+            [self.connection flush];
+
+            [self.windowSwitcher cancelSwitching];
+            [self stopAltReleasePoll];
         }
 
     } @catch (NSException *exception) {
