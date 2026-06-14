@@ -109,27 +109,77 @@
             }
         }
         
-        // Second pass: sort by stacking order from clientList (bottom to top)
-        // The clientList is in stacking order where last entry is topmost (most recently used)
-        xcb_window_t *clientList = [self.connection clientList];
-        NSInteger clientListCount = [self.connection clientListIndex];
+        // Second pass: sort by actual stacking order from X server
+        //
+        // On most systems, the Alt-Tab switcher orders windows by
+        // Most Recently Used (MRU): the currently focused window first, then
+        // the previously focused window, then the one before that, etc.
+        //
+        // Since focusing a window raises it to the top of the Z-order, the X
+        // server's actual stacking order (from xcb_query_tree) naturally gives
+        // us the MRU order: top of stack = most recently used.
+        //
+        // The original code used clientList which is in *registration* order
+        // (the order windows were added to the WM), which has no relation to
+        // recency of use. This caused the switcher to show a seemingly random
+        // order instead of the expected MRU sequence.
+        
+        xcb_connection_t *conn = [self.connection connection];
+        XCBWindow *rootWindow = [self.connection rootWindowForScreenNumber:0];
         
         NSMutableArray *sortedEntries = [NSMutableArray array];
         
-        // Add windows in reverse order of clientList (topmost first)
-        for (NSInteger i = clientListCount - 1; i >= 0; i--) {
-            xcb_window_t windowId = clientList[i];
+        if (rootWindow) {
+            // Query the X server for root window children (bottom-to-top stacking order)
+            xcb_query_tree_cookie_t treeCookie = xcb_query_tree(conn, [rootWindow window]);
+            xcb_query_tree_reply_t *treeReply = xcb_query_tree_reply(conn, treeCookie, NULL);
             
-            // Find the matching entry
-            for (URSWindowEntry *entry in validEntries) {
-                if ([entry.frame window] == windowId) {
-                    [sortedEntries addObject:entry];
-                    break;
+            if (treeReply) {
+                xcb_window_t *children = xcb_query_tree_children(treeReply);
+                int numChildren = xcb_query_tree_children_length(treeReply);
+                
+                // Build a set of valid frame window IDs for fast lookup
+                NSMutableSet *validFrameIdSet = [NSMutableSet setWithCapacity:[validEntries count]];
+                for (URSWindowEntry *entry in validEntries) {
+                    [validFrameIdSet addObject:@([entry.frame window])];
+                }
+                
+                // Query tree returns children bottom-to-top (bottom = oldest stacking,
+                // top = most recent). We iterate in reverse to get top-to-bottom,
+                // which is Most Recently Used (MRU) order.
+                for (int i = numChildren - 1; i >= 0; i--) {
+                    NSNumber *childId = @(children[i]);
+                    if ([validFrameIdSet containsObject:childId]) {
+                        for (URSWindowEntry *entry in validEntries) {
+                            if ([entry.frame window] == (xcb_window_t)[childId unsignedLongValue]) {
+                                [sortedEntries addObject:entry];
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                free(treeReply);
+            }
+        }
+        
+        // Fallback: if query tree failed, use clientList (registration order)
+        if ([sortedEntries count] == 0) {
+            xcb_window_t *clientList = [self.connection clientList];
+            NSInteger clientListCount = [self.connection clientListIndex];
+            
+            for (NSInteger i = clientListCount - 1; i >= 0; i--) {
+                xcb_window_t windowId = clientList[i];
+                for (URSWindowEntry *entry in validEntries) {
+                    if ([entry.frame window] == windowId) {
+                        [sortedEntries addObject:entry];
+                        break;
+                    }
                 }
             }
         }
         
-        // Add any entries that weren't in the clientList (shouldn't happen, but be safe)
+        // Add any entries that weren't in the query tree or clientList (safety net)
         for (URSWindowEntry *entry in validEntries) {
             BOOL found = NO;
             for (URSWindowEntry *sortedEntry in sortedEntries) {
@@ -150,7 +200,7 @@
         
         self.windowEntries = sortedEntries;
         
-        NSLog(@"[WindowSwitcher] Updated window stack with %lu windows (ordered by focus + stacking)", 
+        NSLog(@"[WindowSwitcher] Updated window stack with %lu windows (MRU order from X stacking)", 
               (unsigned long)[self.windowEntries count]);
         
     } @catch (NSException *exception) {
