@@ -1036,6 +1036,13 @@
     xcb_xfixes_region_t damage = [self unionExtentsForCompositeWindows:group];
     if (damage != XCB_NONE) {
         [self addDamage:damage];
+    } else {
+        // If the window group is empty (cw already removed by an earlier
+        // cleanup — common for menus that are unmapped then destroyed in quick
+        // succession), fall back to damaging the full screen.  Without this the
+        // compositor never clears the area where the window was, leaving a ghost
+        // image on screen indefinitely.
+        [self damageScreen];
     }
     [self cleanupCompositeWindowGroup:group deleteDamage:YES removeRecords:YES];
     [self.parentFrameCache removeAllObjects];
@@ -1461,6 +1468,11 @@
 - (void)unmapWindow:(xcb_window_t)windowId {
     NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:windowId];
     if ([group count] == 0) {
+        // Window not tracked (cw may already have been cleaned up).
+        // Damage the full screen to prevent ghost images persisting.
+        [self damageScreen];
+        [self.parentFrameCache removeAllObjects];
+        self.stackingOrderDirty = YES;
         return;
     }
 
@@ -1544,7 +1556,7 @@
         return;
     }
 
-    // BUGFIX: When a window is exposed (becomes visible after being obscured),
+    // When a window is exposed (becomes visible after being obscured),
     // the NameWindowPixmap may be stale because fixed-size windows don't redraw
     // themselves - they expect the X server to preserve their contents.
     // With compositing, we must force recreation of the pixmap to get fresh content.
@@ -1629,36 +1641,44 @@
     xcb_connection_t *conn = [self.connection connection];
     xcb_xfixes_region_t parts;
     
-    // NOTE: We do NOT free the picture on damage - the underlying NameWindowPixmap
-    // is automatically updated by the X server, and Pictures created from it
-    // will reflect the updated content.
-    // (Picture is only freed when window size changes or window is removed)
-    
     if (cw.damaged) {
-        // Window was already damaged before, get the damaged parts
-        parts = xcb_generate_id(conn);
-        xcb_xfixes_create_region(conn, parts, 0, NULL);
+        // Always use full window extents instead of the delta from
+        // xcb_damage_subtract.  The X Damage extension may report a sub-rect
+        // that is smaller than the visual area needing update (e.g. just the
+        // text background of a menu item).  The clip region in paintAll:
+        // restricts the final composite to this damage region, so a partial
+        // rectangle results in only part of the window being refreshed
+        // visible as "half-height" highlights during fast motion.
+        parts = [self windowExtents:cw];
         
-        // Subtract damage from window, copying to parts region
-        xcb_damage_subtract(conn, cw.damage, XCB_NONE, parts);
-        
-        // Translate to screen coordinates
-        xcb_xfixes_translate_region(conn, parts, 
-                                    cw.x + cw.borderWidth,
-                                    cw.y + cw.borderWidth);
+        // Drain all accumulated damage so the X damage object starts fresh.
+        xcb_damage_subtract(conn, cw.damage, XCB_NONE, XCB_NONE);
     } else {
-        // First damage on this window - use full extents
+        // First damage on this window - use full extents.
+        // windowExtents always produces at least a 1x1 rectangle, so no
+        // emptiness check is needed here.
         parts = [self windowExtents:cw];
         
         // Clear all damage
         xcb_damage_subtract(conn, cw.damage, XCB_NONE, XCB_NONE);
     }
-    
+
+    // Invalidate the picture so paintWindow: creates a fresh
+    // XRender picture from the window drawable on the next paint cycle.
+    // The new picture always reads the latest backing-pixmap content
+    // at composite time, avoiding stale snapshots from the NameWindowPixmap.
+    if (cw.picture != XCB_NONE) {
+        xcb_render_free_picture(conn, cw.picture);
+        cw.picture = XCB_NONE;
+    }
+    cw.pictureValid = NO;
+    cw.needsPictureCreation = YES;
+
     if (parts != XCB_NONE) {
         [self addDamage:parts];
         cw.damaged = YES;
     }
-    
+
     // Flush to ensure damage events are processed
     [self.connection flush];
 }
@@ -1727,7 +1747,7 @@
         return region;
     }
 
-    xcb_rectangle_t r = { wx, wy, (uint16_t)ww, (uint16_t)wh };
+    xcb_rectangle_t r = { wx, (uint16_t)wy, (uint16_t)ww, (uint16_t)wh };
     xcb_xfixes_region_t region = xcb_generate_id(conn);
     xcb_xfixes_create_region(conn, region, 1, &r);
     return region;
@@ -1778,6 +1798,12 @@
         URS_PROFILE_END(performRepair);
         return;
     }
+    
+    // Update lastRepairTime here so that the drag/resize throttle works
+    // correctly after a deferred performRepair fires. Without this, the next
+    // performRepairNow call would see a stale lastRepairTime and might skip the
+    // throttle, causing a burst of paints.
+    self.lastRepairTime = [NSDate timeIntervalSinceReferenceDate];
     
     xcb_xfixes_region_t damage = self.allDamage;
     self.allDamage = XCB_NONE;
@@ -2088,11 +2114,6 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     
     NSUInteger num_windows = [self.windowStackingOrder count];
     
-    // Create a copy of the region for painting
-    xcb_xfixes_region_t paint_region = xcb_generate_id(conn);
-    xcb_xfixes_create_region(conn, paint_region, 0, NULL);
-    xcb_xfixes_copy_region(conn, region, paint_region);
-    
     // Paint background ONLY in damaged areas (performance optimization)
     xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, region, 0, 0);
     xcb_render_color_t bg_color = {0x8000, 0x8000, 0x8000, 0xFFFF}; // Mid grey background
@@ -2125,13 +2146,15 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
             continue;
         }
         
-        // Paint the window - clip region is set inside paintWindow
-        [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:paint_region];
+        [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:region];
     }
-    
-    xcb_xfixes_destroy_region(conn, paint_region);
 
-    // BUGFIX: Flush all window painting commands before copying to screen.
+    // Reset the clip region on rootBuffer so no stale clip affects
+    // subsequent XRender operations (e.g., createSolidPicture or shadow
+    // uploads) between paint cycles.
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, XCB_NONE, 0, 0);
+
+    // Flush all window painting commands before copying to screen.
     // This ensures all render operations on rootBuffer are complete before
     // we read from it, preventing partially-rendered content from appearing.
     xcb_flush(conn);
@@ -2659,34 +2682,14 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 
 - (xcb_render_picture_t)getWindowPicture:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];
+
+    // Use the window drawable directly instead of the NameWindowPixmap.
+    // For manually-redirected windows the window drawable IS the live backing
+    // pixmap — reading from it at composite time always yields the latest
+    // content.  The NameWindowPixmap may be a static snapshot that goes stale
+    // and produces half-height artifacts when sub-regions are redrawn.
     xcb_drawable_t draw = cw.windowId;
 
-    // Use NameWindowPixmap (the redirected offscreen storage) for proper content capture
-    // Try to get the name_window_pixmap first
-    if (cw.nameWindowPixmap == XCB_NONE) {
-        // During resize, skip the flush — the event-loop batch flush has already
-        // sent all pending configure commands in order.  Outside resize, flush
-        // to ensure the X server has processed any outstanding drawing before we
-        // snapshot the window.
-        if (![self.connection resizeState]) {
-            xcb_flush(conn);
-        }
-
-        cw.nameWindowPixmap = xcb_generate_id(conn);
-        xcb_void_cookie_t cookie = xcb_composite_name_window_pixmap_checked(conn, cw.windowId, cw.nameWindowPixmap);
-        xcb_generic_error_t *error = xcb_request_check(conn, cookie);
-        if (error) {
-            // Failed to get named pixmap, use window directly
-            cw.nameWindowPixmap = XCB_NONE;
-            free(error);
-        }
-    }
-    
-    // Use the named pixmap if available, otherwise fall back to window drawable
-    if (cw.nameWindowPixmap != XCB_NONE) {
-        draw = cw.nameWindowPixmap;
-    }
-    
     // Find appropriate format for this window's visual
     xcb_render_pictformat_t format = [self findVisualFormat:cw.visual];
     if (format == XCB_NONE) {
