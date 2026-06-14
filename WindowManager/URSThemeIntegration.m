@@ -670,7 +670,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             }
 
             // Top highlight across title area (connecting button highlights)
-            CGFloat highlightLeft = titlebarSize.height;
+            CGFloat highlightLeft = (styleMask & NSClosableWindowMask) ? titlebarSize.height : 0;
             CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarSize.width - 2 * titlebarSize.height) :
                                      (hasMaximize || hasMinimize) ? (titlebarSize.width - titlebarSize.height) : titlebarSize.width;
             NSColor *titleBaseColor = isActive
@@ -1387,7 +1387,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             }
 
             // Top highlight across title area (connecting button highlights)
-            CGFloat highlightLeft = buttonHeight;
+            CGFloat highlightLeft = (styleMask & NSClosableWindowMask) ? buttonHeight : 0;
             CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarWidth - 2 * buttonHeight) :
                                      (hasMaximize || hasMinimize) ? (titlebarWidth - buttonHeight) : titlebarWidth;
             NSColor *titleBaseColor = isActive
