@@ -11,6 +11,13 @@
 
 #import "URSHybridEventHandler.h"
 #import "URSProfiler.h"
+
+/* Class extension for private ivars */
+@interface URSHybridEventHandler () {
+@public
+  xcb_window_t _spatialPathClientWindow;
+}
+@end
 #import "XCBScreen.h"
 #import "XCBQueryTreeReply.h"
 #import "XCBAttributesReply.h"
@@ -62,6 +69,9 @@
 
     // Initialize XCB connection
     connection = [XCBConnection sharedConnectionAsWindowManager:YES];
+    
+    // Initialize spatial path tracking
+    _spatialPathClientWindow = XCB_NONE;
 
     // Initialize window switcher
     self.windowSwitcher = [URSWindowSwitcher sharedSwitcherWithConnection:connection];
@@ -642,13 +652,18 @@
             }
 
             // Check if this is a button click on a GSThemeTitleBar
-            if (![self.titlebarController handleTitlebarButtonPress:pressEvent]) {
-                // Not a titlebar button, let xcbkit handle normally
-                // This follows the complete XCBKit activation path:
-                // 1. Focus the client window (WM_TAKE_FOCUS, _NET_ACTIVE_WINDOW, ungrab keyboard)
-                // 2. Raise the frame
-                // 3. Update titlebar states (active/inactive for all windows)
-                [connection handleButtonPress:pressEvent];
+            BOOL wasButtonPress = [self.titlebarController handleTitlebarButtonPress:pressEvent];
+            if (!wasButtonPress) {
+                // Not a titlebar button. Check for modifier+click on titlebar
+                // with _GW_SPATIAL_PATH atom (spatial path popup).
+                if (![self handleSpatialPathTitleClick:pressEvent]) {
+                    // Not a spatial path click either; let xcbkit handle normally
+                    // This follows the complete XCBKit activation path:
+                    // 1. Focus the client window (WM_TAKE_FOCUS, _NET_ACTIVE_WINDOW, ungrab keyboard)
+                    // 2. Raise the frame
+                    // 3. Update titlebar states (active/inactive for all windows)
+                    [connection handleButtonPress:pressEvent];
+                }
             }
             
             // Button press typically raises the window (changes stacking order)
@@ -1626,6 +1641,193 @@
     } @catch (NSException *exception) {
         NSLog(@"Exception in periodic window check: %@", exception.reason);
     }
+}
+
+#pragma mark - Spatial Path Popup (modifier+click on titlebar)
+
+/* Read a UTF-8 string property from an X11 window */
+- (NSString *)readStringProperty:(xcb_atom_t)propertyAtom
+                        forWindow:(xcb_window_t)windowId
+{
+    if (!propertyAtom || !windowId) return nil;
+
+    xcb_connection_t *c = [self.connection connection];
+    xcb_atom_t utf8Atom = [[XCBAtomService sharedInstanceWithConnection:self.connection]
+                           atomFromCachedAtomsWithKey:@"UTF8_STRING"];
+    if (!utf8Atom) {
+        utf8Atom = [[XCBAtomService sharedInstanceWithConnection:self.connection]
+                    cacheAtom:@"UTF8_STRING"];
+    }
+
+    xcb_get_property_cookie_t cookie = xcb_get_property(c, 0, windowId,
+                                                         propertyAtom, utf8Atom,
+                                                         0, 4096);
+    xcb_generic_error_t *err = NULL;
+    xcb_get_property_reply_t *reply = xcb_get_property_reply(c, cookie, &err);
+    if (err) { free(err); return nil; }
+    if (!reply) return nil;
+
+    int len = xcb_get_property_value_length(reply);
+    NSString *value = nil;
+    if (len > 0) {
+        value = [[NSString alloc] initWithBytes:xcb_get_property_value(reply)
+                                         length:(NSUInteger)len
+                                       encoding:NSUTF8StringEncoding];
+    }
+    free(reply);
+    return value;
+}
+
+/* Handle a modifier+click on a titlebar that has _GW_SPATIAL_PATH set.
+ * Returns YES if the event was consumed (popup shown). */
+- (BOOL)handleSpatialPathTitleClick:(xcb_button_press_event_t *)pressEvent
+{
+    if (!pressEvent) return NO;
+
+    /* Only left-click (button 1) with Control or Alt modifier */
+    if (pressEvent->detail != XCB_BUTTON_INDEX_1)
+        return NO;
+
+    BOOL hasCtrl = (pressEvent->state & XCB_MOD_MASK_CONTROL) != 0;
+    BOOL hasAlt  = (pressEvent->state & XCB_KEY_BUT_MASK_MOD_1) != 0;
+    if (!hasCtrl && !hasAlt)
+        return NO;
+
+    /* Find the titlebar window */
+    XCBWindow *window = [self.connection windowForXCBId:pressEvent->event];
+    if (!window || ![window isKindOfClass:[XCBTitleBar class]])
+        return NO;
+
+    XCBTitleBar *titlebar = (XCBTitleBar *)window;
+    XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
+    if (!frame || ![frame isKindOfClass:[XCBFrame class]])
+        return NO;
+
+    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+    if (!clientWindow)
+        return NO;
+
+    xcb_window_t clientId = [clientWindow window];
+
+    /* Read _GW_SPATIAL_PATH atom from the client window */
+    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self.connection];
+    xcb_atom_t spatialPathAtom = [atomService atomFromCachedAtomsWithKey:@"_GW_SPATIAL_PATH"];
+    if (spatialPathAtom == XCB_ATOM_NONE) {
+        spatialPathAtom = [atomService cacheAtom:@"_GW_SPATIAL_PATH"];
+    }
+
+    NSString *spatialPath = [self readStringProperty:spatialPathAtom
+                                           forWindow:clientId];
+    if (!spatialPath || [spatialPath length] == 0)
+        return NO;
+
+    NSLog(@"[SpatialPath] Modifier+click on titlebar for client %u, path='%@'",
+          clientId, spatialPath);
+
+    /* Release the implicit grab so the menu can track */
+    xcb_allow_events([self.connection connection],
+                     XCB_ALLOW_ASYNC_POINTER, pressEvent->time);
+
+    /* Build path components matching GWViewerPathsPopUp's behavior.
+     * NSString's -pathComponents returns the root "/" as a proper component,
+     * unlike componentsSeparatedByString:@"/" which drops it to an empty string. */
+    NSArray *components = [spatialPath pathComponents];
+    NSString *progPath = nil;
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+
+    for (NSString *comp in components) {
+        if ([comp isEqualToString:@"/"]) {
+            progPath = @"/";
+        } else if (progPath == nil) {
+            progPath = comp;
+        } else if ([progPath isEqualToString:@"/"]) {
+            progPath = [progPath stringByAppendingPathComponent:comp];
+        } else {
+            progPath = [progPath stringByAppendingPathComponent:comp];
+        }
+
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:comp
+                                                       action:@selector(spatialPathMenuItemSelected:)
+                                                keyEquivalent:@""];
+        [item setTarget:self];
+        [item setRepresentedObject:progPath];
+        [menu addItem:item];
+    }
+
+    if ([menu numberOfItems] == 0) {
+        return NO;
+    }
+
+    /* Show the menu centered on the titlebar */
+    XCBRect titlebarRect = [titlebar windowRect];
+    XCBRect frameRect = [frame windowRect];
+    XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
+    uint16_t screenHeight = [screen height];
+
+    /* Position at center of the titlebar, in GNUstep Y-flipped coordinates */
+    CGFloat centerX = frameRect.position.x + (titlebarRect.size.width / 2.0);
+    CGFloat centerY = screenHeight - frameRect.position.y - (titlebarRect.size.height / 2.0);
+    NSPoint menuLocation = NSMakePoint(centerX, centerY);
+
+    NSEvent *menuEvent = [NSEvent mouseEventWithType:NSLeftMouseDown
+                                            location:menuLocation
+                                       modifierFlags:0
+                                           timestamp:0
+                                        windowNumber:0
+                                             context:nil
+                                         eventNumber:0
+                                          clickCount:1
+                                            pressure:0];
+
+    /* Store reference to the client window for the menu action */
+    _spatialPathClientWindow = clientId;
+
+    NSLog(@"[SpatialPath] Showing path popup at (%.0f, %.0f) for '%@'",
+          menuLocation.x, menuLocation.y, spatialPath);
+
+    [NSMenu popUpContextMenu:menu withEvent:menuEvent forView:nil];
+
+    return YES;
+}
+
+/* Called when the user selects a path from the spatial path popup */
+- (void)spatialPathMenuItemSelected:(NSMenuItem *)sender
+{
+    NSString *targetPath = [sender representedObject];
+    if (!targetPath || _spatialPathClientWindow == XCB_NONE) {
+        return;
+    }
+
+    NSLog(@"[SpatialPath] User selected path '%@' for client window %u",
+          targetPath, _spatialPathClientWindow);
+
+    /* Write the target path to _GW_SPATIAL_NAVIGATE on the client window */
+    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self.connection];
+    xcb_atom_t navAtom = [atomService atomFromCachedAtomsWithKey:@"_GW_SPATIAL_NAVIGATE"];
+    if (navAtom == XCB_ATOM_NONE) {
+        navAtom = [atomService cacheAtom:@"_GW_SPATIAL_NAVIGATE"];
+    }
+
+    xcb_atom_t utf8Atom = [atomService atomFromCachedAtomsWithKey:@"UTF8_STRING"];
+    if (utf8Atom == XCB_ATOM_NONE) {
+        utf8Atom = [atomService cacheAtom:@"UTF8_STRING"];
+    }
+
+    const char *cpath = [targetPath UTF8String];
+    xcb_change_property([self.connection connection],
+                        XCB_PROP_MODE_REPLACE,
+                        _spatialPathClientWindow,
+                        navAtom,
+                        utf8Atom,
+                        8,  /* 8-bit data */
+                        (uint32_t)strlen(cpath),
+                        cpath);
+    [self.connection flush];
+
+    NSLog(@"[SpatialPath] Wrote '%@' to _GW_SPATIAL_NAVIGATE on window %u",
+          targetPath, _spatialPathClientWindow);
+
+    _spatialPathClientWindow = XCB_NONE;
 }
 
 // Handle compositor updates during window drag or resize

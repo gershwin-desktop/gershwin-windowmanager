@@ -62,6 +62,10 @@
 - (void)handleWindowFocusChanged:(XCBTitleBar *)titlebar isActive:(BOOL)active;
 - (void)refreshAllManagedWindows;
 
+// Spatial path popup (modifier+click on titlebar with _GW_SPATIAL_PATH)
+- (BOOL)handleSpatialPathTitleClick:(xcb_button_press_event_t *)pressEvent;
+- (void)spatialPathMenuItemSelected:(NSMenuItem *)sender;
+
 // Cleanup
 - (void)cleanupBeforeExit;
 
@@ -69,3 +73,4 @@
 - (void)handleSelectionClear:(xcb_selection_clear_event_t *)event;
 
 @end
+

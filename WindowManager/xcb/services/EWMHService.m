@@ -149,6 +149,8 @@
 
 // Custom window properties
 @synthesize WindowId;
+@synthesize GWSpatialPath;
+@synthesize GWSpatialNavigate;
 
 - (id) initWithConnection:(XCBConnection*)aConnection
 {
@@ -280,6 +282,10 @@
     
     // Custom window property to display window ID
     WindowId = @"_WINDOW_ID";
+
+    // Gershwin spatial path atoms
+    GWSpatialPath = @"_GW_SPATIAL_PATH";
+    GWSpatialNavigate = @"_GW_SPATIAL_NAVIGATE";
 
     //Array iitialization
     NSString* atomStrings[] =

@@ -166,6 +166,10 @@
 // Custom window properties for debugging
 @property (strong, nonatomic)NSString *WindowId;
 
+// Gershwin spatial path atoms (Workspace <-> WM communication)
+@property (strong, nonatomic)NSString *GWSpatialPath;
+@property (strong, nonatomic)NSString *GWSpatialNavigate;
+
 
 + (id) sharedInstanceWithConnection:(XCBConnection*)aConnection;
 
