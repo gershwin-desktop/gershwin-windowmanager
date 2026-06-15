@@ -122,13 +122,9 @@
 
                 self.escapeKeycode = keycode;
 
-                // Grab Escape alone (no modifiers) — this lets the user cancel
-                // switching if it gets stuck or if they want to abort.
-                xcb_grab_key(conn, 0, root,
-                             0,  // no modifiers — always receive Escape
-                             keycode,
-                             XCB_GRAB_MODE_ASYNC,
-                             XCB_GRAB_MODE_ASYNC);
+                // Note: We do NOT grab Escape here — it passes through to the
+                // focused application normally. During Alt-Tab switching, the
+                // keyboard grab (xcb_grab_keyboard) captures it for us.
             }
         }
 
@@ -234,11 +230,6 @@
             }
         }
 
-        // Ungrab Escape key
-        if (self.escapeKeycode > 0) {
-            xcb_ungrab_key(conn, self.escapeKeycode, root, XCB_MOD_MASK_ANY);
-        }
-
         if (!tabFound) {
             NSLog(@"[Alt-Tab] Using fallback keycode 23 for ungrab");
             uint16_t fbLockMasks2[] = {
@@ -322,8 +313,9 @@
         }
 
         // Handle Escape key — cancel the window switcher if it's active.
-        // The Escape key is grabbed with no modifiers (see setupKeyboardGrabbing),
-        // so it reaches us even while the keyboard is grabbed during Alt-Tab.
+        // The Escape key reaches us during switching because the keyboard
+        // is grabbed by xcb_grab_keyboard. Outside of switching, Escape is
+        // not grabbed by us and passes through to the focused application.
         if (event->detail == self.escapeKeycode && self.windowSwitcher.isSwitching) {
             NSLog(@"[Alt-Tab] Escape pressed during switching - cancelling");
 

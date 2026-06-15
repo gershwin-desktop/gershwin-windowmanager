@@ -1336,33 +1336,57 @@ static XCBConnection *sharedInstance;
     BOOL useGoldenRatio = NO;
 
     if (!self.adoptingExistingWindows) {
-        BOOL isAtDefaultPos = NO;
-        if (screen) {
-            int16_t screenHeight = [screen screen]->height_in_pixels;
-            if (reqY < 64) {
-                isAtDefaultPos = YES;
-            } else if (abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100) {
-                isAtDefaultPos = YES;
+        // Check _GNUSTEP_WM_ATTR: GNUstep apps set this on all their windows.
+        // If present, the app manages its own positioning (including centering
+        // of alert/modal panels) and the WM must not override it.
+        BOOL isGNUstepApp = NO;
+        if (ewmhService != nil) {
+            xcb_get_property_cookie_t gsCookie =
+                xcb_get_property([self connection], 0, [window window],
+                                 [[ewmhService atomService]
+                                    atomFromCachedAtomsWithKey: [ewmhService GNUStepWmAttr]],
+                                 XCB_GET_PROPERTY_TYPE_ANY, 0, sizeof(uint32_t) * 4);
+            xcb_generic_error_t *gsErr = NULL;
+            xcb_get_property_reply_t *gsReply =
+                xcb_get_property_reply([self connection], gsCookie, &gsErr);
+            if (gsReply != NULL) {
+                isGNUstepApp = (xcb_get_property_value_length(gsReply) > 0);
+                free(gsReply);
             }
+            if (gsErr) free(gsErr);
         }
 
-        if (isAtDefaultPos) {
-            BOOL isFullWidth = NO;
-            if (screen && reqW >= [screen screen]->width_in_pixels) {
-                isFullWidth = YES;
-            }
-
-            if (!isFullWidth) {
-                xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
-                if (hints) {
-                    if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
-                        useGoldenRatio = YES;
-                    }
-                    free(hints);
-                } else {
-                    useGoldenRatio = YES;
+        if (!isGNUstepApp) {
+            BOOL isAtDefaultPos = NO;
+            if (screen) {
+                int16_t screenHeight = [screen screen]->height_in_pixels;
+                if (reqY < 64) {
+                    isAtDefaultPos = YES;
+                } else if (abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100) {
+                    isAtDefaultPos = YES;
                 }
             }
+
+            if (isAtDefaultPos) {
+                BOOL isFullWidth = NO;
+                if (screen && reqW >= [screen screen]->width_in_pixels) {
+                    isFullWidth = YES;
+                }
+
+                if (!isFullWidth) {
+                    xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
+                    if (hints) {
+                        if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
+                            useGoldenRatio = YES;
+                        }
+                        free(hints);
+                    } else {
+                        useGoldenRatio = YES;
+                    }
+                }
+            }
+        } else {
+            NSLog(@"[MapRequest] GNUstep window %u — skipping golden-ratio placement", [window window]);
         }
     } else {
         NSLog(@"[MapRequest] Skipping golden-ratio placement for adopted window %u", [window window]);

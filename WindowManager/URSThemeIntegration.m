@@ -871,12 +871,17 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 
     // Zero out corner pixels for rounded top corners directly in the pixel buffer.
+    // Both corners use the same convention: dx ranges -(cr-1)...0 for the left,
+    // 0...cr-1 for the right, and dy ranges -(cr-1)...0. This ensures the arc
+    // shape is perfectly symmetric left-to-right (previously the left corner
+    // used dx∈{-cr,...,-1} while the right used dx∈{0,...,cr-1}, creating a
+    // 1-pixel offset that made the radius appear different in x vs y).
     if (topR > 0) {
         int cr = (int)ceil((double)topR);
         for (int y = 0; y < cr && y < height; y++) {
             uint32_t *row = (uint32_t *)(bitmapData + y * bytesPerRow);
             for (int x = 0; x < cr && x < width; x++) {
-                int dx = x - cr, dy = y - cr;
+                int dx = x - (cr - 1), dy = y - cr;
                 if (dx * dx + dy * dy > cr * cr)
                     row[x] = 0;
             }
