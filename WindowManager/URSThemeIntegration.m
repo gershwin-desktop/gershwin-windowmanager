@@ -268,13 +268,13 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 break;
         }
     } else if (active) {
-        // Active window - #C2C2C2 average (0.76) with subtle gradient
-        gradientColor1 = [NSColor colorWithCalibratedRed:0.82 green:0.82 blue:0.82 alpha:1];  // #D1D1D1
-        gradientColor2 = [NSColor colorWithCalibratedRed:0.70 green:0.70 blue:0.70 alpha:1];  // #B3B3B3
+        // Match active titlebar gradient (0.83→0.63)
+        gradientColor1 = [NSColor colorWithCalibratedRed:0.83 green:0.83 blue:0.83 alpha:1];
+        gradientColor2 = [NSColor colorWithCalibratedRed:0.63 green:0.63 blue:0.63 alpha:1];
     } else {
-        // Inactive window - slightly lighter/washed out
-        gradientColor1 = [NSColor colorWithCalibratedRed:0.85 green:0.85 blue:0.85 alpha:1];
-        gradientColor2 = [NSColor colorWithCalibratedRed:0.75 green:0.75 blue:0.75 alpha:1];
+        // Match inactive titlebar gradient (0.92→0.83)
+        gradientColor1 = [NSColor colorWithCalibratedRed:0.92 green:0.92 blue:0.92 alpha:1];
+        gradientColor2 = [NSColor colorWithCalibratedRed:0.83 green:0.83 blue:0.83 alpha:1];
     }
 
     NSGradient *gradient = [[NSGradient alloc] initWithStartingColor:gradientColor1
@@ -609,27 +609,35 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // (orb buttons, background, title text). Skip the WM's edge button overlay.
         if (![self isOrbButtonStyle]) {
             // Draw buttons: Close (X) on left | title | Minimize (-) | Maximize (+) on right
-            NSColor *iconColor = [URSThemeIntegration iconColorForActive:isActive highlighted:NO];
+            // Icons show on active windows always, and on inactive windows when hovered.
+            xcb_window_t tbId = [titlebar window];
+            BOOL isTitlebarHovered = (tbId == hoveredTitlebarWindow);
+            NSInteger hovIdx = isTitlebarHovered ? hoveredButtonIndex : -1;
             BOOL hasMaximize = (styleMask & NSResizableWindowMask) != 0;
             BOOL hasMinimize = (styleMask & NSMiniaturizableWindowMask) != 0;
 
             // Close button at left edge, square (width == height)
             if (styleMask & NSClosableWindowMask) {
                 NSRect closeFrame = NSMakeRect(0, 0, titlebarSize.height, titlebarSize.height);
+                BOOL closeHovered = (hovIdx == 0);
                 [URSThemeIntegration drawEdgeButtonInRect:closeFrame
                                                  position:TitleBarButtonPositionLeft
                                                buttonType:0
                                                    active:isActive
-                                                  hovered:NO];
-                NSRect iconRect = NSInsetRect(closeFrame, ICON_INSET, ICON_INSET);
-                [URSThemeIntegration drawCloseIconInRect:iconRect withColor:iconColor];
-                NSDebugLog(@"Drew close button at: %@", NSStringFromRect(closeFrame));
+                                                  hovered:closeHovered];
+                if (isActive || closeHovered) {
+                    NSColor *ic = [URSThemeIntegration iconColorForActive:isActive highlighted:closeHovered];
+                    NSRect iconRect = NSInsetRect(closeFrame, ICON_INSET, ICON_INSET);
+                    [URSThemeIntegration drawCloseIconInRect:iconRect withColor:ic];
+                }
+                NSDebugLog(@"Drew close button at: %@ hovered:%d", NSStringFromRect(closeFrame), closeHovered);
             }
 
             // Side-by-side buttons on right: Minimize (-) inner, Maximize (+) outer
             if (hasMinimize) {
                 NSRect miniFrame;
                 TitleBarButtonPosition miniPosition;
+                BOOL miniHovered = (hovIdx == 1);
                 if (hasMaximize) {
                     miniFrame = NSMakeRect(titlebarSize.width - 2 * titlebarSize.height,
                                            0,
@@ -647,10 +655,13 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                                                  position:miniPosition
                                                buttonType:1
                                                    active:isActive
-                                                  hovered:NO];
-                NSRect miniIconRect = NSInsetRect(miniFrame, ICON_INSET, ICON_INSET);
-                [URSThemeIntegration drawMinimizeIconInRect:miniIconRect withColor:iconColor];
-                NSDebugLog(@"Drew miniaturize button at: %@", NSStringFromRect(miniFrame));
+                                                  hovered:miniHovered];
+                if (isActive || miniHovered) {
+                    NSColor *ic = [URSThemeIntegration iconColorForActive:isActive highlighted:miniHovered];
+                    NSRect miniIconRect = NSInsetRect(miniFrame, ICON_INSET, ICON_INSET);
+                    [URSThemeIntegration drawMinimizeIconInRect:miniIconRect withColor:ic];
+                }
+                NSDebugLog(@"Drew miniaturize button at: %@ hovered:%d", NSStringFromRect(miniFrame), miniHovered);
             }
 
             if (hasMaximize) {
@@ -659,14 +670,18 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                                               0,
                                               titlebarSize.height,
                                               titlebarSize.height);
+                BOOL zoomHovered = (hovIdx == 2);
                 [URSThemeIntegration drawEdgeButtonInRect:zoomFrame
                                                  position:zoomPosition
                                                buttonType:2
                                                    active:isActive
-                                                  hovered:NO];
-                NSRect zoomIconRect = NSInsetRect(zoomFrame, ICON_INSET, ICON_INSET);
-                [URSThemeIntegration drawMaximizeIconInRect:zoomIconRect withColor:iconColor];
-                NSDebugLog(@"Drew zoom button at: %@", NSStringFromRect(zoomFrame));
+                                                  hovered:zoomHovered];
+                if (isActive || zoomHovered) {
+                    NSColor *ic = [URSThemeIntegration iconColorForActive:isActive highlighted:zoomHovered];
+                    NSRect zoomIconRect = NSInsetRect(zoomFrame, ICON_INSET, ICON_INSET);
+                    [URSThemeIntegration drawMaximizeIconInRect:zoomIconRect withColor:ic];
+                }
+                NSDebugLog(@"Drew zoom button at: %@ hovered:%d", NSStringFromRect(zoomFrame), zoomHovered);
             }
 
             // Top highlight across title area (connecting button highlights)
@@ -674,8 +689,8 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarSize.width - 2 * titlebarSize.height) :
                                      (hasMaximize || hasMinimize) ? (titlebarSize.width - titlebarSize.height) : titlebarSize.width;
             NSColor *titleBaseColor = isActive
-                ? [NSColor colorWithCalibratedWhite:0.82 alpha:1.0]
-                : [NSColor colorWithCalibratedWhite:0.85 alpha:1.0];
+                ? [NSColor colorWithCalibratedWhite:0.75 alpha:1.0]
+                : [NSColor colorWithCalibratedWhite:0.88 alpha:1.0];
             [titleBaseColor setStroke];
             NSBezierPath *titleBase = [NSBezierPath bezierPath];
             [titleBase moveToPoint:NSMakePoint(highlightLeft, titlebarSize.height - 0.5)];
@@ -686,21 +701,14 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSColor *titleHighlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
             [titleHighlightColor setStroke];
             NSBezierPath *titleHighlight = [NSBezierPath bezierPath];
-            [titleHighlight moveToPoint:NSMakePoint(highlightLeft, titlebarSize.height - 0.5)];
-            [titleHighlight lineToPoint:NSMakePoint(highlightRight, titlebarSize.height - 0.5)];
+            [titleHighlight moveToPoint:NSMakePoint(0, titlebarSize.height - 0.5)];
+            [titleHighlight lineToPoint:NSMakePoint(titlebarSize.width, titlebarSize.height - 0.5)];
             [titleHighlight setLineWidth:1.0];
             [titleHighlight stroke];
 
-            // Bottom edge and button dividers (#979797)
-            NSColor *separatorColor = [NSColor colorWithCalibratedWhite:0.592 alpha:1.0];
+            // Button dividers — lightened to blend with inactive gradient
+            NSColor *separatorColor = [NSColor colorWithCalibratedWhite:0.75 alpha:1.0];
             [separatorColor setStroke];
-
-            // Full-width bottom edge
-            NSBezierPath *bottomEdge = [NSBezierPath bezierPath];
-            [bottomEdge moveToPoint:NSMakePoint(0, 0.5)];
-            [bottomEdge lineToPoint:NSMakePoint(titlebarSize.width, 0.5)];
-            [bottomEdge setLineWidth:1.0];
-            [bottomEdge stroke];
 
             // Vertical dividers at button boundaries
             NSBezierPath *dividers = [NSBezierPath bezierPath];
@@ -724,7 +732,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         [titlebarImage unlockFocus];
 
         // Convert NSImage to pixel buffer and apply to titlebar
-        BOOL success = [self transferImage:titlebarImage toTitlebar:titlebar];
+        BOOL success = [self transferImage:titlebarImage toPixmap:[titlebar pixmap] onTitlebar:titlebar];
 
         if (success) {
             NSDebugLog(@"GSTheme titlebar rendered successfully for: %@", title);
@@ -767,7 +775,8 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     return dimmedImage;
 }
 
-+ (BOOL)transferImage:(NSImage*)image toTitlebar:(XCBTitleBar*)titlebar {
+// Transfer rendered image to a specific pixmap (pixmap or dPixmap)
++ (BOOL)transferImage:(NSImage*)image toPixmap:(xcb_pixmap_t)targetPixmap onTitlebar:(XCBTitleBar*)titlebar {
     // Convert NSImage to bitmap representation
     NSBitmapImageRep *bitmap = nil;
     for (NSImageRep *rep in [image representations]) {
@@ -903,9 +912,9 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             if (screen) depth = [screen screen]->root_depth;
         }
         xcb_gcontext_t gc = xcb_generate_id(conn);
-        xcb_create_gc(conn, gc, titlebar.pixmap, 0, NULL);
+        xcb_create_gc(conn, gc, targetPixmap, 0, NULL);
         xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP,
-                      titlebar.pixmap, gc,
+                      targetPixmap, gc,
                       (uint16_t)width, (uint16_t)height,
                       0, 0, 0, depth,
                       (uint32_t)((size_t)height * (size_t)bytesPerRow),
@@ -913,72 +922,26 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         xcb_free_gc(conn, gc);
     }
 
-    // Paint DIMMED version to dPixmap (inactive pixmap) for unfocused windows.
-    // Generate dimmed pixels directly from already-converted active pixels
-    // instead of creating a separate NSImage, extracting bitmap (TIFF roundtrip),
-    // and doing a second full pixel format conversion.
+    // Copy pixmap content to dPixmap unchanged.  Both pixmaps always have the
+    // same content — no brightening or dimming — so there can never be a
+    // mismatch between the gradient and button symbols.  The active/inactive
+    // distinction comes from the THEME drawing differently for each state
+    // (via drawTitleBarBackground:active:), and the window manager always
+    // re-renders on focus changes.
     xcb_pixmap_t dPixmap = [titlebar dPixmap];
-    if (dPixmap != 0) {
-        size_t bufSize = (size_t)height * (size_t)bytesPerRow;
-        unsigned char *dimmedPixels = malloc(bufSize);
-        if (dimmedPixels) {
-            memcpy(dimmedPixels, bitmapData, bufSize);
-
-            // Apply dimming in premultiplied ARGB32 space.
-            // Equivalent to NSCompositeSourceAtop overlay of (0.5, 0.5, 0.5, 0.35):
-            //   Cp' = Cp * 0.65 + 45 * (A/255)
-            for (int dy = 0; dy < height; dy++) {
-                uint32_t *rowPtr = (uint32_t *)(dimmedPixels + dy * bytesPerRow);
-                for (int dx = 0; dx < width; dx++) {
-                    uint32_t pixel = rowPtr[dx];
-                    uint32_t b_pm = (pixel >> 0)  & 0xFF;
-                    uint32_t g_pm = (pixel >> 8)  & 0xFF;
-                    uint32_t r_pm = (pixel >> 16) & 0xFF;
-                    uint32_t a     = (pixel >> 24) & 0xFF;
-
-                    r_pm = (r_pm * 166 + a * 45) >> 8;
-                    g_pm = (g_pm * 166 + a * 45) >> 8;
-                    b_pm = (b_pm * 166 + a * 45) >> 8;
-
-                    rowPtr[dx] = b_pm | (g_pm << 8) | (r_pm << 16) | (a << 24);
-                }
-            }
-
-            if (topR > 0) {
-                int cr = (int)ceil((double)topR);
-                for (int y = 0; y < cr && y < height; y++) {
-                    uint32_t *row = (uint32_t *)(dimmedPixels + y * bytesPerRow);
-                    for (int x = 0; x < cr && x < width; x++) {
-                        int dx = x - cr, dy = y - cr;
-                        if (dx * dx + dy * dy > cr * cr)
-                            row[x] = 0;
-                    }
-                    for (int x = width - cr; x < width; x++) {
-                        int dx = x - (width - cr), dy = y - cr;
-                        if (dx * dx + dy * dy > cr * cr)
-                            row[x] = 0;
-                    }
-                }
-            }
-
-            xcb_connection_t *conn = [titlebar.connection connection];
-            uint8_t dDepth = 32;
-            if (!titlebar.use32BitDepth) {
-                XCBScreen *screen = [titlebar onScreen];
-                if (!screen) screen = [titlebar screen];
-                if (screen) dDepth = [screen screen]->root_depth;
-            }
-            xcb_gcontext_t dGc = xcb_generate_id(conn);
-            xcb_create_gc(conn, dGc, dPixmap, 0, NULL);
-            xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP,
-                          dPixmap, dGc,
-                          (uint16_t)width, (uint16_t)height,
-                          0, 0, 0, dDepth,
-                          (uint32_t)((size_t)height * (size_t)bytesPerRow),
-                          dimmedPixels);
-            xcb_free_gc(conn, dGc);
-            free(dimmedPixels);
-        }
+    if (dPixmap != 0 && [titlebar pixmap] != 0) {
+        xcb_connection_t *conn = [titlebar.connection connection];
+        xcb_gcontext_t copyGc = xcb_generate_id(conn);
+        xcb_create_gc(conn, copyGc, dPixmap, 0, NULL);
+        xcb_copy_area(conn,
+                      [titlebar pixmap],
+                      dPixmap,
+                      copyGc,
+                      0, 0,      // src x, y
+                      0, 0,      // dst x, y
+                      (uint16_t)width,
+                      (uint16_t)height);
+        xcb_free_gc(conn, copyGc);
     }
 
     [titlebar.connection flush];
@@ -1314,8 +1277,6 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             // Edge mode: draw buttons, highlights, dividers
             NSDebugLog(@"Drawing side-by-side edge buttons for theme: %@", [theme name]);
 
-            NSColor *iconColor = [self iconColorForActive:isActive highlighted:NO];
-
             // Close button at left edge, square (width == height)
             if (styleMask & NSClosableWindowMask) {
                 NSRect closeFrame = NSMakeRect(0, 0, buttonHeight, buttonHeight);
@@ -1327,9 +1288,11 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                                     active:isActive
                                    hovered:closeHovered];
 
-                if (iconColor) {
+                // Show icon on active, or when hovering this button on inactive
+                if (isActive || closeHovered) {
+                    NSColor *ic = [self iconColorForActive:isActive highlighted:closeHovered];
                     NSRect iconRect = NSInsetRect(closeFrame, ICON_INSET, ICON_INSET);
-                    [self drawCloseIconInRect:iconRect withColor:iconColor];
+                    [self drawCloseIconInRect:iconRect withColor:ic];
                 }
 
                 NSDebugLog(@"Drew close button at: %@ hovered:%d", NSStringFromRect(closeFrame), closeHovered);
@@ -1361,9 +1324,10 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                                     active:isActive
                                    hovered:miniHovered];
 
-                if (iconColor) {
+                if (isActive || miniHovered) {
+                    NSColor *ic = [self iconColorForActive:isActive highlighted:miniHovered];
                     NSRect iconRect = NSInsetRect(miniFrame, ICON_INSET, ICON_INSET);
-                    [self drawMinimizeIconInRect:iconRect withColor:iconColor];
+                    [self drawMinimizeIconInRect:iconRect withColor:ic];
                 }
 
                 NSDebugLog(@"Drew miniaturize button at: %@ hovered:%d", NSStringFromRect(miniFrame), miniHovered);
@@ -1383,9 +1347,10 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                                     active:isActive
                                    hovered:zoomHovered];
 
-                if (iconColor) {
+                if (isActive || zoomHovered) {
+                    NSColor *ic = [self iconColorForActive:isActive highlighted:zoomHovered];
                     NSRect iconRect = NSInsetRect(zoomFrame, ICON_INSET, ICON_INSET);
-                    [self drawMaximizeIconInRect:iconRect withColor:iconColor];
+                    [self drawMaximizeIconInRect:iconRect withColor:ic];
                 }
 
                 NSDebugLog(@"Drew zoom button at: %@ hovered:%d", NSStringFromRect(zoomFrame), zoomHovered);
@@ -1396,8 +1361,8 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             CGFloat highlightRight = (hasMaximize && hasMinimize) ? (titlebarWidth - 2 * buttonHeight) :
                                      (hasMaximize || hasMinimize) ? (titlebarWidth - buttonHeight) : titlebarWidth;
             NSColor *titleBaseColor = isActive
-                ? [NSColor colorWithCalibratedWhite:0.82 alpha:1.0]
-                : [NSColor colorWithCalibratedWhite:0.85 alpha:1.0];
+                ? [NSColor colorWithCalibratedWhite:0.75 alpha:1.0]
+                : [NSColor colorWithCalibratedWhite:0.88 alpha:1.0];
             [titleBaseColor setStroke];
             NSBezierPath *titleBase = [NSBezierPath bezierPath];
             [titleBase moveToPoint:NSMakePoint(highlightLeft, buttonHeight - 0.5)];
@@ -1408,21 +1373,14 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSColor *titleHighlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
             [titleHighlightColor setStroke];
             NSBezierPath *titleHighlight = [NSBezierPath bezierPath];
-            [titleHighlight moveToPoint:NSMakePoint(highlightLeft, buttonHeight - 0.5)];
-            [titleHighlight lineToPoint:NSMakePoint(highlightRight, buttonHeight - 0.5)];
+            [titleHighlight moveToPoint:NSMakePoint(0, buttonHeight - 0.5)];
+            [titleHighlight lineToPoint:NSMakePoint(titlebarWidth, buttonHeight - 0.5)];
             [titleHighlight setLineWidth:1.0];
             [titleHighlight stroke];
 
-            // Bottom edge and button dividers (#979797)
-            NSColor *separatorColor = [NSColor colorWithCalibratedWhite:0.592 alpha:1.0];
+            // Button dividers — lightened to blend with inactive gradient
+            NSColor *separatorColor = [NSColor colorWithCalibratedWhite:0.75 alpha:1.0];
             [separatorColor setStroke];
-
-            // Full-width bottom edge
-            NSBezierPath *bottomEdge = [NSBezierPath bezierPath];
-            [bottomEdge moveToPoint:NSMakePoint(0, 0.5)];
-            [bottomEdge lineToPoint:NSMakePoint(titlebarWidth, 0.5)];
-            [bottomEdge setLineWidth:1.0];
-            [bottomEdge stroke];
 
             // Vertical dividers at button boundaries
             NSBezierPath *dividers = [NSBezierPath bezierPath];
@@ -1446,7 +1404,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         [titlebarImage unlockFocus];
 
         // Transfer the image to the titlebar
-        BOOL success = [self transferImage:titlebarImage toTitlebar:titlebar];
+        BOOL success = [self transferImage:titlebarImage toPixmap:[titlebar pixmap] onTitlebar:titlebar];
 
         if (success) {
             NSDebugLog(@"Standalone GSTheme titlebar rendered successfully for: %@", title);

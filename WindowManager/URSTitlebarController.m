@@ -10,6 +10,7 @@
 #import "URSProfiler.h"
 #import "URSThemeIntegration.h"
 #import "URSCompositingManager.h"
+#import "URSFocusManager.h"
 
 @implementation URSTitlebarController
 
@@ -370,7 +371,21 @@
 
     XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
     NSString *title = [titlebar windowTitle];
-    BOOL isActive = [titlebar isAbove];
+
+    // Determine active state from the focus manager, not from stacking order.
+    // Stacking order (isAbove) can differ from keyboard focus; the titlebar
+    // MUST always reflect which window actually has keyboard input.
+    BOOL isActive = NO;
+    if (self.focusManager) {
+        xcb_window_t focusedClientId = self.focusManager.lastFocusedWindowId;
+        if (focusedClientId != XCB_NONE && clientWindow) {
+            isActive = ([clientWindow window] == focusedClientId);
+        }
+    }
+    // Fallback to isAbove if no focus manager is available (should not happen)
+    if (!self.focusManager) {
+        isActive = [titlebar isAbove];
+    }
 
     [URSThemeIntegration renderGSThemeToWindow:clientWindow
                                          frame:frame
@@ -380,6 +395,12 @@
     XCBRect rect = [titlebar windowRect];
     [titlebar drawArea:rect];
     [self.connection flush];
+
+    // Notify compositor that the titlebar content changed so it invalidates
+    // its picture cache and picks up the new rendering on the next paint.
+    if (self.compositingManager && [self.compositingManager compositingActive]) {
+        [self.compositingManager invalidateWindowPixmap:[frame window]];
+    }
 }
 
 - (void)redrawTitlebarById:(xcb_window_t)titlebarId
@@ -415,6 +436,13 @@
         [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
         [titlebar drawArea:[titlebar windowRect]];
         [self.connection flush];
+
+        // Force compositor to invalidate its picture cache so it picks up
+        // the freshly rendered titlebar content on the next paint cycle.
+        if (self.compositingManager && [self.compositingManager compositingActive]) {
+            [self.compositingManager invalidateWindowPixmap:[frame window]];
+            [self.compositingManager markStackingOrderDirty];
+        }
 
     } @catch (NSException *exception) {
         NSLog(@"Exception in rerenderTitlebarForFrame: %@", exception.reason);

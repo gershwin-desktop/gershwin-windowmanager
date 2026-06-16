@@ -84,6 +84,7 @@
     self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
     self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
     self.titlebarController.workareaManager = self.workareaManager;
+    self.titlebarController.focusManager = self.focusManager;
     self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
 
     // Check if compositing was requested via command-line
@@ -1021,7 +1022,33 @@
                     }
                 }
             }
+            // Second pass: check if windowId matches any frame directly
             if (!window) {
+                for (NSString *mapWindowId in windowsMap) {
+                    XCBWindow *mapWindow = [windowsMap objectForKey:mapWindowId];
+                    if (mapWindow && [mapWindow isKindOfClass:[XCBFrame class]] &&
+                        [mapWindow window] == windowId) {
+                        window = mapWindow;
+                        break;
+                    }
+                }
+            }
+            if (!window) {
+                // Last resort: try to resolve via the focus manager which
+                // maintains client→frame mappings
+                xcb_window_t resolvedFrameId = XCB_NONE;
+                XCBWindow *clientWin = [self.focusManager windowForClientWindowId:windowId];
+                if (clientWin) {
+                    if ([[clientWin parentWindow] isKindOfClass:[XCBFrame class]]) {
+                        resolvedFrameId = [[clientWin parentWindow] window];
+                    }
+                    if (resolvedFrameId != XCB_NONE) {
+                        window = [connection windowForXCBId:resolvedFrameId];
+                    }
+                }
+            }
+            if (!window) {
+                NSLog(@"handleFocusChange: Could not resolve window %u for focus event", windowId);
                 return;
             }
         }
@@ -1072,10 +1099,12 @@
         [titlebar drawArea:[titlebar windowRect]];
         [connection flush];
         
-        // Notify compositor about the titlebar content change
+        // Notify compositor about the titlebar content change.
+        // Explicitly invalidate the compositor's picture cache so the next
+        // paint cycle reads fresh backing-pixmap content rather than stale
+        // cached pixels.
         if (self.compositingManager && [self.compositingManager compositingActive]) {
-            [self.compositingManager updateWindow:[frame window]];
-            // Mark stacking order dirty since focused windows are typically raised
+            [self.compositingManager invalidateWindowPixmap:[frame window]];
             [self.compositingManager markStackingOrderDirty];
         }
 
@@ -1105,15 +1134,16 @@
     [URSThemeIntegration refreshAllTitlebars];
 }
 
-// Simple periodic check for new windows that need GSTheme
+// Periodic maintenance: check for new windows AND verify titlebar focus state
 - (void)setupPeriodicThemeIntegration {
-    // Use a timer to periodically check for new windows (less frequent)
-    [NSTimer scheduledTimerWithTimeInterval:5.0
+    // Use a timer to periodically check for new windows and verify
+    // that the focused window's titlebar state matches the actual focus.
+    [NSTimer scheduledTimerWithTimeInterval:3.0
                                      target:self
-                                   selector:@selector(checkForNewWindows)
+                                   selector:@selector(periodicThemeCheck)
                                    userInfo:nil
                                     repeats:YES];
-    NSLog(@"Periodic GSTheme integration timer started (5 second interval)");
+    NSLog(@"Periodic GSTheme integration timer started (3 second interval)");
 }
 
 - (void)handleMapRequestWithGSTheme:(xcb_map_request_event_t*)mapRequestEvent {
@@ -1590,7 +1620,7 @@
     }
 }
 
-- (void)checkForNewWindows {
+- (void)periodicThemeCheck {
     @try {
         // Check if GSTheme integration is enabled
         URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
@@ -1598,9 +1628,11 @@
             return; // Skip if disabled
         }
 
-        // Check all windows in the connection for new frames/titlebars
         NSDictionary *windowsMap = [self.connection windowsMap];
         NSUInteger newTitlebarsFound = 0;
+
+        // Determine the currently focused client window ID
+        xcb_window_t focusedClientId = self.focusManager.lastFocusedWindowId;
 
         for (NSString *windowId in windowsMap) {
             XCBWindow *window = [windowsMap objectForKey:windowId];
@@ -1613,6 +1645,14 @@
                 if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
                     XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
 
+                    // Determine whether this titlebar should be active:
+                    // it's active if its client window matches the focus manager's
+                    // lastFocusedWindowId.
+                    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+                    BOOL shouldBeActive = (focusedClientId != XCB_NONE &&
+                                           clientWindow != nil &&
+                                           [clientWindow window] == focusedClientId);
+
                     // Check if we've already processed this titlebar
                     if (![integration.managedTitlebars containsObject:titlebar]) {
                         newTitlebarsFound++;
@@ -1621,25 +1661,41 @@
                         BOOL success = [URSThemeIntegration renderGSThemeToWindow:window
                                                                              frame:frame
                                                                              title:titlebar.windowTitle
-                                                                            active:YES];
-
+                                                                            active:shouldBeActive];
                         if (success) {
                             // Add to managed list only if successful
                             [integration.managedTitlebars addObject:titlebar];
                             NSLog(@"Applied GSTheme to new titlebar: %@", titlebar.windowTitle ?: @"(untitled)");
+                        }
+                    } else if (shouldBeActive) {
+                        // SAFETY NET: Periodically re-render the focused window's
+                        // titlebar to guarantee it matches the actual keyboard focus
+                        // state, in case a FocusIn event was missed or the compositor
+                        // captured stale content.
+                        [URSThemeIntegration renderGSThemeToWindow:window
+                                                             frame:frame
+                                                             title:titlebar.windowTitle
+                                                            active:YES];
+                        [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+                        [titlebar drawArea:[titlebar windowRect]];
+
+                        if (self.compositingManager &&
+                            [self.compositingManager compositingActive]) {
+                            [self.compositingManager invalidateWindowPixmap:[frame window]];
                         }
                     }
                 }
             }
         }
 
-        // Only log if we found new titlebars
         if (newTitlebarsFound > 0) {
             NSLog(@"GSTheme periodic check: processed %lu new titlebars", (unsigned long)newTitlebarsFound);
         }
 
+        [self.connection flush];
+
     } @catch (NSException *exception) {
-        NSLog(@"Exception in periodic window check: %@", exception.reason);
+        NSLog(@"Exception in periodic theme check: %@", exception.reason);
     }
 }
 

@@ -14,11 +14,13 @@
 #import "URSWorkareaManager.h"
 
 @class URSCompositingManager;
+@class URSFocusManager;
 
 @interface URSTitlebarController : NSObject
 
 @property (weak, nonatomic) XCBConnection *connection;
 @property (weak, nonatomic) URSCompositingManager *compositingManager;
+@property (weak, nonatomic) URSFocusManager *focusManager;
 @property (weak, nonatomic) URSWorkareaManager *workareaManager;
 
 - (instancetype)initWithConnection:(XCBConnection *)connection;
