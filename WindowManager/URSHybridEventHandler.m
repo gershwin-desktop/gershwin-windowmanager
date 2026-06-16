@@ -990,17 +990,12 @@
     // Register with theme integration
     [[URSThemeIntegration sharedInstance] handleWindowCreated:titlebar];
 
-    // Determine whether this new window actually has keyboard focus
-    XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
-    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-    BOOL isActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
-                     clientWindow != nil &&
-                     [clientWindow window] == self.focusManager.lastFocusedWindowId);
-
-    // Apply GSTheme rendering
+    // Newly mapped windows almost always become the active (focused) window,
+    // so render them as active immediately.  If they don't actually get focus,
+    // the next FocusIn event will correct them.
     BOOL success = [URSThemeIntegration renderGSThemeTitlebar:titlebar
                                                         title:titlebar.windowTitle
-                                                       active:isActive];
+                                                       active:YES];
 
     if (!success) {
         NSLog(@"GSTheme rendering failed for titlebar, falling back to default titlebar path");
@@ -1237,17 +1232,12 @@
         if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
             XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
 
-            // Determine whether this window actually has keyboard focus
-            XCBWindow *clientWin = [frame childWindowForKey:ClientWindow];
-            BOOL isActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
-                             clientWin != nil &&
-                             [clientWin window] == self.focusManager.lastFocusedWindowId);
-
-            // Apply ONLY GSTheme rendering (no legacy/XCBKit drawing)
+            // Apply ONLY GSTheme rendering (no legacy/XCBKit drawing).
+            // Newly mapped windows almost always get focus, so default active.
             BOOL success = [URSThemeIntegration renderGSThemeToWindow:frame
                                                                 frame:frame
                                                                 title:titlebar.windowTitle
-                                                               active:isActive];
+                                                               active:YES];
 
             if (success) {
                 NSLog(@"GSTheme-only decoration applied successfully");
@@ -1555,16 +1545,12 @@
 
                         NSLog(@"Found frame for client window %u, applying GSTheme to titlebar", windowId);
 
-                        // Determine whether this window actually has keyboard focus
-                        BOOL mappedIsActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
-                                               clientWindow != nil &&
-                                               [clientWindow window] == self.focusManager.lastFocusedWindowId);
-
-                        // Apply GSTheme rendering (this will override XCBKit's decoration)
+                        // Apply GSTheme rendering (this will override XCBKit's decoration).
+                        // Newly mapped windows almost always get focus, so default active.
                         BOOL success = [URSThemeIntegration renderGSThemeToWindow:window
                                                                              frame:frame
                                                                              title:titlebar.windowTitle
-                                                                            active:mappedIsActive];
+                                                                            active:YES];
 
                         if (success) {
                             // Add to managed list so we can handle expose events

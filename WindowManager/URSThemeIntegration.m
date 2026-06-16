@@ -1473,12 +1473,12 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         NSLog(@"Added titlebar to GSTheme management: %@", titlebar.windowTitle);
     }
 
-    // Render GSTheme decoration — the caller (URSHybridEventHandler) will
-    // immediately re-render with the correct active state, but default to
-    // inactive so there's no brief flash of active decoration.
+    // Newly mapped windows almost always become the active (focused) window,
+    // so render them as active.  The focus manager will correct them later
+    // via handleFocusChange: if needed.
     [URSThemeIntegration renderGSThemeTitlebar:titlebar
                                          title:titlebar.windowTitle
-                                        active:NO];
+                                        active:YES];
 }
 
 - (void)handleWindowFocusChanged:(XCBTitleBar*)titlebar isActive:(BOOL)active {
