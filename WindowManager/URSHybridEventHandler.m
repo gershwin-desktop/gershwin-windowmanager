@@ -618,11 +618,12 @@
         case XCB_FOCUS_OUT: {
             xcb_focus_out_event_t *focusOutEvent = (xcb_focus_out_event_t *)event;
             [connection handleFocusOut:focusOutEvent];
-            // Skip inferior focus changes - focus moved to a child window
-            // within the same managed window (e.g., frame -> client)
-            if (focusOutEvent->detail != XCB_NOTIFY_DETAIL_INFERIOR) {
-                [self handleFocusChange:focusOutEvent->event isActive:NO];
-            }
+            // Titlebar active/inactive state is driven entirely by FocusIn.
+            // Processing FocusOut here would cause a momentary inactive flash
+            // when focus moves between child windows of the same application
+            // (e.g. Chrome swapping rendering surfaces during page load).
+            // The previously-focused window's titlebar is marked inactive by
+            // handleFocusChange:isActive:YES when the next FocusIn arrives.
             break;
         }
         case XCB_BUTTON_PRESS: {
@@ -1009,6 +1010,18 @@
 
 - (void)handleFocusChange:(xcb_window_t)windowId isActive:(BOOL)isActive {
     @try {
+        // When any window gains focus, IMMEDIATELY mark the previously-focused
+        // window's titlebar as inactive — before we try to resolve the incoming
+        // window.  If the incoming FocusIn targets a window the WM doesn't track
+        // (e.g. an undecorated popup), the resolution below fails and we'd return
+        // early, leaving the old window stuck with active decorations forever.
+        if (isActive) {
+            xcb_window_t prevFocusedId = self.focusManager.lastFocusedWindowId;
+            if (prevFocusedId != XCB_NONE && prevFocusedId != windowId) {
+                [self handleFocusChange:prevFocusedId isActive:NO];
+            }
+        }
+
         // Find the window that received focus change
         XCBWindow *window = [connection windowForXCBId:windowId];
         if (!window) {
@@ -1052,6 +1065,13 @@
             }
             if (!window) {
                 NSLog(@"handleFocusChange: Could not resolve window %u for focus event", windowId);
+
+                // If we deactivated the previous window above (isActive == YES)
+                // but can't find the new one, clear lastFocusedWindowId so stale
+                // focus doesn't linger.
+                if (isActive) {
+                    self.focusManager.lastFocusedWindowId = XCB_NONE;
+                }
                 return;
             }
         }
@@ -1078,6 +1098,11 @@
 
         if (!titlebar) {
             NSLog(@"handleFocusChange: No titlebar found for window %u", windowId);
+            // If we deactivated the previous window above (isActive == YES)
+            // but the current window has no titlebar, still clear stale focus.
+            if (isActive) {
+                self.focusManager.lastFocusedWindowId = XCB_NONE;
+            }
             return;
         }
 
@@ -1107,13 +1132,18 @@
         // paint cycle reads fresh backing-pixmap content rather than stale
         // cached pixels.
         if (self.compositingManager && [self.compositingManager compositingActive]) {
-            // Invalidate the titlebar window (the decorations), not the frame,
-            // so the compositor specifically updates the decorations area.
-            [self.compositingManager invalidateWindowPixmap:[titlebar window]];
+            // Invalidate ALL frames in the compositor so every window's
+            // decorations are re-snapshotted.  When the active window
+            // changes, one titlebar becomes active and another inactive;
+            // the compositor must re-read every frame to reflect this.
+            NSDictionary *allWindows = [connection windowsMap];
+            for (NSString *wid in allWindows) {
+                XCBWindow *win = [allWindows objectForKey:wid];
+                if (win && [win isKindOfClass:[XCBFrame class]]) {
+                    [self.compositingManager invalidateWindowPixmap:[win window]];
+                }
+            }
             [self.compositingManager markStackingOrderDirty];
-            // Force an immediate compositor repaint so the titlebar focus
-            // change is visible right away rather than waiting for the next
-            // scheduled paint cycle.
             [self.compositingManager performRepairNow];
         }
 
@@ -2307,7 +2337,12 @@
     [titlebar setInternalTitle:newTitle];
 
     if ([titlebar isGSThemeActive] && [[URSThemeIntegration sharedInstance] enabled]) {
-        BOOL isActive = frame ? frame.isFocused : NO;
+        // Use the focus manager to determine active state — frame.isFocused
+        // is never actually set anywhere, so it's always NO.
+        XCBWindow *titleClient = [frame childWindowForKey:ClientWindow];
+        BOOL isActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
+                         titleClient != nil &&
+                         [titleClient window] == self.focusManager.lastFocusedWindowId);
         [URSThemeIntegration renderGSThemeToWindow:frame
                                              frame:frame
                                              title:newTitle

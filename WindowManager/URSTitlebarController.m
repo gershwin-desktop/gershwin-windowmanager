@@ -409,10 +409,17 @@
     [titlebar drawArea:rect];
     [self.connection flush];
 
-    // Notify compositor that the titlebar content changed so it invalidates
-    // its picture cache for the decorations area and repaints immediately.
+    // Invalidate ALL frames in the compositor so every window's decorations
+    // are re-snapshotted — any titlebar change (hover, active state, etc.)
+    // affects the visual relationship between all windows.
     if (self.compositingManager && [self.compositingManager compositingActive]) {
-        [self.compositingManager invalidateWindowPixmap:[titlebar window]];
+        NSDictionary *allWindows = [self.connection windowsMap];
+        for (NSString *wid in allWindows) {
+            XCBWindow *win = [allWindows objectForKey:wid];
+            if (win && [win isKindOfClass:[XCBFrame class]]) {
+                [self.compositingManager invalidateWindowPixmap:[win window]];
+            }
+        }
         [self.compositingManager markStackingOrderDirty];
         [self.compositingManager performRepairNow];
     }
@@ -452,11 +459,17 @@
         [titlebar drawArea:[titlebar windowRect]];
         [self.connection flush];
 
-        // Force compositor to invalidate its picture cache for the titlebar
-        // (the decorations area) and repaint immediately so the titlebar
-        // focus change is visible right away.
+        // Invalidate ALL frames in the compositor so every window's
+        // decorations are re-snapshotted — active state changes affect
+        // every titlebar's appearance.
         if (self.compositingManager && [self.compositingManager compositingActive]) {
-            [self.compositingManager invalidateWindowPixmap:[titlebar window]];
+            NSDictionary *allWindows = [self.connection windowsMap];
+            for (NSString *wid in allWindows) {
+                XCBWindow *win = [allWindows objectForKey:wid];
+                if (win && [win isKindOfClass:[XCBFrame class]]) {
+                    [self.compositingManager invalidateWindowPixmap:[win window]];
+                }
+            }
             [self.compositingManager markStackingOrderDirty];
             [self.compositingManager performRepairNow];
         }
