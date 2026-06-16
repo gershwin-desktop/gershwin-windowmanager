@@ -36,8 +36,9 @@
                         title:(NSString*)title
                        active:(BOOL)isActive;
 
-// Refresh all titlebars with current theme
-+ (void)refreshAllTitlebars;
+// Refresh all titlebars with current theme, using the given focused client window
+// to determine which titlebar should appear active.
++ (void)refreshAllTitlebarsWithFocusedWindow:(xcb_window_t)focusedClientId;
 
 // Event handlers
 - (void)handleWindowCreated:(XCBTitleBar*)titlebar;

@@ -1407,6 +1407,18 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         BOOL success = [self transferImage:titlebarImage toPixmap:[titlebar pixmap] onTitlebar:titlebar];
 
         if (success) {
+            // Keep dPixmap in sync so drawArea: (which picks pixmap or dPixmap
+            // based on isAbove) always shows the GSTheme-rendered content
+            // regardless of the window's stacking-order state.
+            xcb_connection_t *c = [[titlebar connection] connection];
+            xcb_copy_area(c,
+                          [titlebar pixmap],
+                          [titlebar dPixmap],
+                          [titlebar graphicContextId],
+                          0, 0,
+                          0, 0,
+                          titlebarSize.width, titlebarSize.height);
+
             NSDebugLog(@"Standalone GSTheme titlebar rendered successfully for: %@", title);
         } else {
             NSLog(@"Failed to transfer standalone GSTheme titlebar for: %@", title);
@@ -1424,7 +1436,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
 #pragma mark - Titlebar Management
 
-+ (void)refreshAllTitlebars {
++ (void)refreshAllTitlebarsWithFocusedWindow:(xcb_window_t)focusedClientId {
     URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
 
     if (!integration.enabled) {
@@ -1432,8 +1444,13 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 
     for (XCBTitleBar *titlebar in integration.managedTitlebars) {
-        // Determine if window is active (simplified for now)
-        BOOL isActive = YES; // TODO: Implement proper active window detection
+        // Determine if window has keyboard focus by comparing its client
+        // window against the focus manager's lastFocusedWindowId.
+        XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
+        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+        BOOL isActive = (focusedClientId != XCB_NONE &&
+                         clientWindow != nil &&
+                         [clientWindow window] == focusedClientId);
 
         [self renderGSThemeTitlebar:titlebar
                               title:titlebar.windowTitle
@@ -1456,10 +1473,12 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         NSLog(@"Added titlebar to GSTheme management: %@", titlebar.windowTitle);
     }
 
-    // Render GSTheme decoration
+    // Render GSTheme decoration — the caller (URSHybridEventHandler) will
+    // immediately re-render with the correct active state, but default to
+    // inactive so there's no brief flash of active decoration.
     [URSThemeIntegration renderGSThemeTitlebar:titlebar
                                          title:titlebar.windowTitle
-                                        active:YES];
+                                        active:NO];
 }
 
 - (void)handleWindowFocusChanged:(XCBTitleBar*)titlebar isActive:(BOOL)active {

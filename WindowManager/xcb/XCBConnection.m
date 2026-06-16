@@ -3196,6 +3196,15 @@ static XCBConnection *sharedInstance;
 
 - (void)drawAllTitleBarsExcept:(XCBTitleBar *)aTitileBar
 {
+    // When GSTheme is active, titlebars are rendered exclusively through
+    // focus events (handleFocusChange:) — stacking order must NOT determine
+    // which titlebar appears active.  Short-circuit here so that isAbove
+    // (set to NO on all non-clicked windows below) never overrides the
+    // focus-driven GSTheme pixmap content.
+    if ([aTitileBar isGSThemeActive]) {
+        return;
+    }
+
     NSArray *windows = [windowsMap allValues];
     NSUInteger size = [windows count];
 

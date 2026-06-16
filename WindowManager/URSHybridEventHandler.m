@@ -134,10 +134,6 @@
     // Setup XCB event integration with NSRunLoop
     [self setupXCBEventIntegration];
 
-    // Setup simple timer-based theme integration
-    [self setupPeriodicThemeIntegration];
-    NSLog(@"GSTheme integration initialized with periodic checking enabled");
-    
     // Setup keyboard grabbing for Alt-Tab
     [self.keyboardManager setupKeyboardGrabbing];
 }
@@ -993,10 +989,17 @@
     // Register with theme integration
     [[URSThemeIntegration sharedInstance] handleWindowCreated:titlebar];
 
+    // Determine whether this new window actually has keyboard focus
+    XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
+    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+    BOOL isActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
+                     clientWindow != nil &&
+                     [clientWindow window] == self.focusManager.lastFocusedWindowId);
+
     // Apply GSTheme rendering
     BOOL success = [URSThemeIntegration renderGSThemeTitlebar:titlebar
                                                         title:titlebar.windowTitle
-                                                       active:YES]; // Assume new windows are active
+                                                       active:isActive];
 
     if (!success) {
         NSLog(@"GSTheme rendering failed for titlebar, falling back to default titlebar path");
@@ -1104,8 +1107,14 @@
         // paint cycle reads fresh backing-pixmap content rather than stale
         // cached pixels.
         if (self.compositingManager && [self.compositingManager compositingActive]) {
-            [self.compositingManager invalidateWindowPixmap:[frame window]];
+            // Invalidate the titlebar window (the decorations), not the frame,
+            // so the compositor specifically updates the decorations area.
+            [self.compositingManager invalidateWindowPixmap:[titlebar window]];
             [self.compositingManager markStackingOrderDirty];
+            // Force an immediate compositor repaint so the titlebar focus
+            // change is visible right away rather than waiting for the next
+            // scheduled paint cycle.
+            [self.compositingManager performRepairNow];
         }
 
     } @catch (NSException *exception) {
@@ -1131,19 +1140,8 @@
 
 - (void)refreshAllManagedWindows {
     NSLog(@"GSTheme: Refreshing all managed windows with current theme");
-    [URSThemeIntegration refreshAllTitlebars];
-}
-
-// Periodic maintenance: check for new windows AND verify titlebar focus state
-- (void)setupPeriodicThemeIntegration {
-    // Use a timer to periodically check for new windows and verify
-    // that the focused window's titlebar state matches the actual focus.
-    [NSTimer scheduledTimerWithTimeInterval:3.0
-                                     target:self
-                                   selector:@selector(periodicThemeCheck)
-                                   userInfo:nil
-                                    repeats:YES];
-    NSLog(@"Periodic GSTheme integration timer started (3 second interval)");
+    xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
+    [URSThemeIntegration refreshAllTitlebarsWithFocusedWindow:focusedId];
 }
 
 - (void)handleMapRequestWithGSTheme:(xcb_map_request_event_t*)mapRequestEvent {
@@ -1209,11 +1207,17 @@
         if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
             XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
 
+            // Determine whether this window actually has keyboard focus
+            XCBWindow *clientWin = [frame childWindowForKey:ClientWindow];
+            BOOL isActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
+                             clientWin != nil &&
+                             [clientWin window] == self.focusManager.lastFocusedWindowId);
+
             // Apply ONLY GSTheme rendering (no legacy/XCBKit drawing)
             BOOL success = [URSThemeIntegration renderGSThemeToWindow:frame
                                                                 frame:frame
                                                                 title:titlebar.windowTitle
-                                                               active:YES];
+                                                               active:isActive];
 
             if (success) {
                 NSLog(@"GSTheme-only decoration applied successfully");
@@ -1259,11 +1263,17 @@
                 if (frame) {
                     NSLog(@"Titlebar %u exposed, re-applying GSTheme", exposedWindow);
 
+                    // Determine whether this window actually has keyboard focus
+                    XCBWindow *exposeClient = [frame childWindowForKey:ClientWindow];
+                    BOOL exposeIsActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
+                                           exposeClient != nil &&
+                                           [exposeClient window] == self.focusManager.lastFocusedWindowId);
+
                     // Re-apply GSTheme rendering to override the expose redraw
                     BOOL exposeSuccess = [URSThemeIntegration renderGSThemeToWindow:frame
                                                                              frame:frame
                                                                              title:titlebar.windowTitle
-                                                                            active:YES];
+                                                                            active:exposeIsActive];
 
                     // Draw the updated pixmap into the window backing store so the
                     // compositor captures themed content (not blank) on its next paint.
@@ -1515,11 +1525,16 @@
 
                         NSLog(@"Found frame for client window %u, applying GSTheme to titlebar", windowId);
 
+                        // Determine whether this window actually has keyboard focus
+                        BOOL mappedIsActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
+                                               clientWindow != nil &&
+                                               [clientWindow window] == self.focusManager.lastFocusedWindowId);
+
                         // Apply GSTheme rendering (this will override XCBKit's decoration)
                         BOOL success = [URSThemeIntegration renderGSThemeToWindow:window
                                                                              frame:frame
                                                                              title:titlebar.windowTitle
-                                                                            active:YES];
+                                                                            active:mappedIsActive];
 
                         if (success) {
                             // Add to managed list so we can handle expose events
@@ -1597,11 +1612,17 @@
                 XCBWindow *frameTitle = [frame childWindowForKey:TitleBar];
 
                 if (frameTitle && frameTitle == titlebar) {
+                    // Determine whether this window actually has keyboard focus
+                    XCBWindow *reapplyClient = [frame childWindowForKey:ClientWindow];
+                    BOOL reapplyIsActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
+                                            reapplyClient != nil &&
+                                            [reapplyClient window] == self.focusManager.lastFocusedWindowId);
+
                     // Reapply GSTheme rendering
                     [URSThemeIntegration renderGSThemeToWindow:window
                                                          frame:frame
                                                          title:titlebar.windowTitle
-                                                        active:YES];
+                                                        active:reapplyIsActive];
                     NSLog(@"GSTheme reapplied to titlebar: %@", titlebar.windowTitle);
                     
                     // Notify compositor about the content change
@@ -1617,85 +1638,6 @@
 
     } @catch (NSException *exception) {
         NSLog(@"Exception in GSTheme reapplication: %@", exception.reason);
-    }
-}
-
-- (void)periodicThemeCheck {
-    @try {
-        // Check if GSTheme integration is enabled
-        URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
-        if (!integration.enabled) {
-            return; // Skip if disabled
-        }
-
-        NSDictionary *windowsMap = [self.connection windowsMap];
-        NSUInteger newTitlebarsFound = 0;
-
-        // Determine the currently focused client window ID
-        xcb_window_t focusedClientId = self.focusManager.lastFocusedWindowId;
-
-        for (NSString *windowId in windowsMap) {
-            XCBWindow *window = [windowsMap objectForKey:windowId];
-
-            // Look for XCBFrame objects (which contain titlebars)
-            if (window && [window isKindOfClass:[XCBFrame class]]) {
-                XCBFrame *frame = (XCBFrame*)window;
-                XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
-
-                if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
-                    XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
-
-                    // Determine whether this titlebar should be active:
-                    // it's active if its client window matches the focus manager's
-                    // lastFocusedWindowId.
-                    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-                    BOOL shouldBeActive = (focusedClientId != XCB_NONE &&
-                                           clientWindow != nil &&
-                                           [clientWindow window] == focusedClientId);
-
-                    // Check if we've already processed this titlebar
-                    if (![integration.managedTitlebars containsObject:titlebar]) {
-                        newTitlebarsFound++;
-
-                        // Apply standalone GSTheme rendering
-                        BOOL success = [URSThemeIntegration renderGSThemeToWindow:window
-                                                                             frame:frame
-                                                                             title:titlebar.windowTitle
-                                                                            active:shouldBeActive];
-                        if (success) {
-                            // Add to managed list only if successful
-                            [integration.managedTitlebars addObject:titlebar];
-                            NSLog(@"Applied GSTheme to new titlebar: %@", titlebar.windowTitle ?: @"(untitled)");
-                        }
-                    } else if (shouldBeActive) {
-                        // SAFETY NET: Periodically re-render the focused window's
-                        // titlebar to guarantee it matches the actual keyboard focus
-                        // state, in case a FocusIn event was missed or the compositor
-                        // captured stale content.
-                        [URSThemeIntegration renderGSThemeToWindow:window
-                                                             frame:frame
-                                                             title:titlebar.windowTitle
-                                                            active:YES];
-                        [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
-                        [titlebar drawArea:[titlebar windowRect]];
-
-                        if (self.compositingManager &&
-                            [self.compositingManager compositingActive]) {
-                            [self.compositingManager invalidateWindowPixmap:[frame window]];
-                        }
-                    }
-                }
-            }
-        }
-
-        if (newTitlebarsFound > 0) {
-            NSLog(@"GSTheme periodic check: processed %lu new titlebars", (unsigned long)newTitlebarsFound);
-        }
-
-        [self.connection flush];
-
-    } @catch (NSException *exception) {
-        NSLog(@"Exception in periodic theme check: %@", exception.reason);
     }
 }
 

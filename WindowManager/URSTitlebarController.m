@@ -195,10 +195,12 @@
         [titlebar destroyPixmap];
         [titlebar createPixmap];
 
+        BOOL restoreIsActive = [self titlebarIsActiveForFrame:frame
+                                                  clientWindow:clientWindow];
         [URSThemeIntegration renderGSThemeToWindow:frame
                                              frame:frame
                                              title:[titlebar windowTitle]
-                                            active:YES];
+                                            active:restoreIsActive];
 
         [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
         [titlebar drawArea:[titlebar windowRect]];
@@ -240,10 +242,12 @@
         [titlebar destroyPixmap];
         [titlebar createPixmap];
 
+        BOOL maximizeIsActive = [self titlebarIsActiveForFrame:frame
+                                                  clientWindow:clientWindow];
         [URSThemeIntegration renderGSThemeToWindow:frame
                                              frame:frame
                                              title:[titlebar windowTitle]
-                                            active:YES];
+                                            active:maximizeIsActive];
 
         [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
         [titlebar drawArea:[titlebar windowRect]];
@@ -257,6 +261,15 @@
 
         NSLog(@"GSTheme: Maximize complete, titlebar redrawn at new size");
     }
+}
+
+- (BOOL)titlebarIsActiveForFrame:(XCBFrame *)frame clientWindow:(XCBWindow *)clientWindow
+{
+    if (!self.focusManager || self.focusManager.lastFocusedWindowId == XCB_NONE) {
+        return NO;
+    }
+    return (clientWindow != nil &&
+            [clientWindow window] == self.focusManager.lastFocusedWindowId);
 }
 
 - (void)animateTransition:(XCBFrame *)frame
@@ -397,9 +410,11 @@
     [self.connection flush];
 
     // Notify compositor that the titlebar content changed so it invalidates
-    // its picture cache and picks up the new rendering on the next paint.
+    // its picture cache for the decorations area and repaints immediately.
     if (self.compositingManager && [self.compositingManager compositingActive]) {
-        [self.compositingManager invalidateWindowPixmap:[frame window]];
+        [self.compositingManager invalidateWindowPixmap:[titlebar window]];
+        [self.compositingManager markStackingOrderDirty];
+        [self.compositingManager performRepairNow];
     }
 }
 
@@ -437,11 +452,13 @@
         [titlebar drawArea:[titlebar windowRect]];
         [self.connection flush];
 
-        // Force compositor to invalidate its picture cache so it picks up
-        // the freshly rendered titlebar content on the next paint cycle.
+        // Force compositor to invalidate its picture cache for the titlebar
+        // (the decorations area) and repaint immediately so the titlebar
+        // focus change is visible right away.
         if (self.compositingManager && [self.compositingManager compositingActive]) {
-            [self.compositingManager invalidateWindowPixmap:[frame window]];
+            [self.compositingManager invalidateWindowPixmap:[titlebar window]];
             [self.compositingManager markStackingOrderDirty];
+            [self.compositingManager performRepairNow];
         }
 
     } @catch (NSException *exception) {
@@ -480,10 +497,13 @@
 
             [titlebar createPixmap];
 
+            XCBWindow *resizeClient = [frame childWindowForKey:ClientWindow];
+            BOOL resizeIsActive = [self titlebarIsActiveForFrame:frame
+                                                    clientWindow:resizeClient];
             [URSThemeIntegration renderGSThemeToWindow:frame
                                                  frame:frame
                                                  title:[titlebar windowTitle]
-                                                active:YES];
+                                                active:resizeIsActive];
 
             [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
 
@@ -544,10 +564,13 @@
             [titlebar destroyPixmap];
             [titlebar createPixmap];
 
+            XCBWindow *resizeClient = [frame childWindowForKey:ClientWindow];
+            BOOL resizeIsActive = [self titlebarIsActiveForFrame:frame
+                                                    clientWindow:resizeClient];
             [URSThemeIntegration renderGSThemeToWindow:frame
                                                  frame:frame
                                                  title:[titlebar windowTitle]
-                                                active:YES];
+                                                active:resizeIsActive];
 
             [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
             [titlebar drawArea:[titlebar windowRect]];
