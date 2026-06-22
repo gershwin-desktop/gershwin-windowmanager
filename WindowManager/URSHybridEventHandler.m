@@ -1423,10 +1423,17 @@
                                                       length:1];
             
             BOOL isDesktopWindow = NO;
+            BOOL isDialogWindow = NO;
             if (windowTypeReply) {
                 xcb_atom_t *atom = (xcb_atom_t *) xcb_get_property_value(windowTypeReply);
-                if (atom && *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDesktop]]) {
-                    isDesktopWindow = YES;
+                if (atom) {
+                    xcb_atom_t desktopAtom = [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDesktop]];
+                    xcb_atom_t dialogAtom = [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDialog]];
+                    if (*atom == desktopAtom) {
+                        isDesktopWindow = YES;
+                    } else if (*atom == dialogAtom) {
+                        isDialogWindow = YES;
+                    }
                 }
                 free(windowTypeReply);
             }
@@ -1466,24 +1473,26 @@
 
                 // Per HIG: place resized windows toward top-left so desktop status affordances
                 // (such as volume icons) remain visible and unobstructed.
-                uint32_t sizeValues[] = {goldenPosX, goldenPosY, clampedWidth, clampedHeight};
+                uint16_t defaultX = isDialogWindow ? goldenPosX : 22;
+                uint16_t defaultY = isDialogWindow ? goldenPosY : 44;
+                uint32_t sizeValues[] = {defaultX, defaultY, clampedWidth, clampedHeight};
                 xcb_configure_window([connection connection],
                                      clientWindowId,
                              XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
                              XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
                                      sizeValues);
                 [connection flush];
-                NSLog(@"Window %u exceeds 90%% of screen (%ux%u). Clamped to 80%% (%ux%u) and placed at golden ratio (%u,%u) before map.",
+                NSLog(@"Window %u exceeds 90%% of screen (%ux%u). Clamped to 80%% (%ux%u) and placed at (%u,%u) before map.",
                       clientWindowId,
                       geom_reply->width,
                       geom_reply->height,
                       clampedWidth,
                     clampedHeight,
-                    goldenPosX,
-                    goldenPosY);
+                    defaultX,
+                    defaultY);
             }
 
-            // Only apply WM golden-ratio placement if:
+            // Only apply WM default placement if:
             // 1. Window is positioned at (0,0) - indicates no app positioning
             // 2. AND window is not a desktop window
             // 3. AND window is not explicitly requesting fullscreen
@@ -1492,12 +1501,14 @@
             
             if (isAtOrigin && (geom_reply->width < screenWidth) && !isDesktopWindow && !isFullscreenState) {
                 // Window starts at (0,0) but is NOT full-width. This is usually a fallback position
-                // for apps that don't specify geometry. Move it to the golden ratio position
-                // which matches where a newly created window of the same type would get mapped.
-                NSLog(@"Window %u starts at origin (0,0) but is not full-width (%u). Applying golden ratio placement to avoid x=0 default.",
-                      clientWindowId, geom_reply->width);
+                // for apps that don't specify geometry. Move it to a suitable default position:
+                // dialogs get centered (golden ratio), other windows get 22,44 offset.
+                uint16_t defaultX = isDialogWindow ? goldenPosX : 22;
+                uint16_t defaultY = isDialogWindow ? goldenPosY : 44;
+                NSLog(@"Window %u starts at origin (0,0) but is not full-width (%u). Applying default placement (%u,%u) to avoid x=0 default.",
+                      clientWindowId, geom_reply->width, defaultX, defaultY);
                 
-                uint32_t configValues[] = {goldenPosX, goldenPosY};
+                uint32_t configValues[] = {defaultX, defaultY};
                 xcb_configure_window([connection connection],
                                      clientWindowId,
                                      XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y,

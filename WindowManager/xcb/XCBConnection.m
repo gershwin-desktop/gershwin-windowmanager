@@ -940,26 +940,54 @@ static XCBConnection *sharedInstance;
                 if (reqX < 64 && abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100 && reqW < screenWidth) {
                     xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
                     if (hints) {
-                        // Respect user specified position (USPosition). If not present, apply golden ratio.
+                        // Respect user specified position (USPosition). If not present, apply placement.
                         if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
-                            int16_t xPos = (screenWidth - reqW) / 2;
-                            int16_t yPos = (screenHeight - reqH) * 0.381966; // Golden ratio from top
+                            BOOL isDialog = NO;
+                            if ([window windowType] != nil && ewmhService != nil) {
+                                isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
+                            }
+
+                            int16_t xPos, yPos;
+                            if (isDialog) {
+                                // Dialogs: centered horizontally, golden ratio vertically
+                                xPos = (screenWidth - reqW) / 2;
+                                yPos = (screenHeight - reqH) * 0.381966;
+                                NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
+                            } else {
+                                // Other windows: 22 px from left, 44 px from top
+                                xPos = 22;
+                                yPos = 44;
+                                NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
+                            }
                             XCBRect newRect = winRect;
                             newRect.position.x = xPos;
                             newRect.position.y = yPos;
                             [window setWindowRect:newRect];
-                            NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
                         }
                         free(hints);
                     } else {
-                        // No hints: assume default -> apply golden ratio
-                        int16_t xPos = (screenWidth - reqW) / 2;
-                        int16_t yPos = (screenHeight - reqH) * 0.381966; // Golden ratio from top
+                        // No hints: assume default -> apply placement
+                        BOOL isDialog = NO;
+                        if ([window windowType] != nil && ewmhService != nil) {
+                            isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
+                        }
+
+                        int16_t xPos, yPos;
+                        if (isDialog) {
+                            // Dialogs: centered horizontally, golden ratio vertically
+                            xPos = (screenWidth - reqW) / 2;
+                            yPos = (screenHeight - reqH) * 0.381966;
+                            NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
+                        } else {
+                            // Other windows: 22 px from left, 44 px from top
+                            xPos = 22;
+                            yPos = 44;
+                            NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
+                        }
                         XCBRect newRect = winRect;
                         newRect.position.x = xPos;
                         newRect.position.y = yPos;
                         [window setWindowRect:newRect];
-                        NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
                     }
                 }
             }
@@ -1330,10 +1358,13 @@ static XCBConnection *sharedInstance;
     uint16_t reqW = [window windowRect].size.width;
     uint16_t reqH = [window windowRect].size.height;
 
-    // Determine if we should use golden ratio placement.
+    // Determine if we should reposition the window.
     // When adopting pre-existing windows at startup, never reposition them.
-    // Otherwise, use golden ratio if the app hasn't explicitly specified a position.
-    BOOL useGoldenRatio = NO;
+    // Otherwise, reposition if the app hasn't explicitly specified a position.
+    // Dialogs get centered (golden ratio) placement; other windows get a
+    // top-left offset (22 px from left, 44 px from top).
+    BOOL shouldReposition = NO;
+    BOOL isDialog = NO;
 
     if (!self.adoptingExistingWindows) {
         // Check _GNUSTEP_WM_ATTR: GNUstep apps set this on all their windows.
@@ -1377,19 +1408,24 @@ static XCBConnection *sharedInstance;
                     xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
                     if (hints) {
                         if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
-                            useGoldenRatio = YES;
+                            shouldReposition = YES;
                         }
                         free(hints);
                     } else {
-                        useGoldenRatio = YES;
+                        shouldReposition = YES;
                     }
                 }
             }
         } else {
-            NSLog(@"[MapRequest] GNUstep window %u — skipping golden-ratio placement", [window window]);
+            NSLog(@"[MapRequest] GNUstep window %u — skipping WM placement override", [window window]);
         }
     } else {
-        NSLog(@"[MapRequest] Skipping golden-ratio placement for adopted window %u", [window window]);
+        NSLog(@"[MapRequest] Skipping WM placement override for adopted window %u", [window window]);
+    }
+
+    // Determine if this window is a dialog via _NET_WM_WINDOW_TYPE.
+    if (shouldReposition && [window windowType] != nil && ewmhService != nil) {
+        isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
     }
 
     // In compositor mode (drop shadows), the client sits flush inside the frame
@@ -1405,15 +1441,22 @@ static XCBConnection *sharedInstance;
 
     NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
-    if (useGoldenRatio && screen) {
+    if (shouldReposition && screen) {
         uint16_t screenWidth = [screen screen]->width_in_pixels;
         uint16_t screenHeight = [screen screen]->height_in_pixels;
-        
-        xPos = (screenWidth - winWidth) / 2;
-        yPos = (screenHeight - winHeight) * 0.381966; // Golden ratio from top
-        
-        NSLog(@"[MapRequest] Applying golden ratio placement for window %u: %d, %d", [window window], xPos, yPos);
-        
+
+        if (isDialog) {
+            // Dialogs: centered horizontally, golden ratio vertically
+            xPos = (screenWidth - winWidth) / 2;
+            yPos = (screenHeight - winHeight) * 0.381966; // Golden ratio from top
+            NSLog(@"[MapRequest] Applying golden ratio placement for dialog window %u: %d, %d", [window window], xPos, yPos);
+        } else {
+            // Other windows: 22 px from left, 44 px from top
+            xPos = 22;
+            yPos = 44;
+            NSLog(@"[MapRequest] Applying default placement for window %u: %d, %d", [window window], xPos, yPos);
+        }
+
         // Keep the client rect in root coordinates while frame uses xPos/yPos.
         XCBRect newRect = [window windowRect];
         newRect.position.x = xPos + cb;

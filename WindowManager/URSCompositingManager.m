@@ -156,6 +156,7 @@
 @property (assign, nonatomic) xcb_window_t rootWindow;
 @property (assign, nonatomic) xcb_render_pictformat_t rootFormat;
 @property (assign, nonatomic) xcb_render_pictformat_t argbFormat;
+@property (assign, nonatomic) xcb_atom_t bypassCompositorAtom;
 
 // OPTIMIZATION: Cached visual-to-format mappings (avoids repeated xcb_render_query_pict_formats)
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSNumber *> *visualFormatCache;
@@ -174,6 +175,9 @@
 @property (assign, nonatomic) int shmId;
 @property (assign, nonatomic) void *shmAddr;
 @property (assign, nonatomic) size_t shmSize;
+
+// Windows that should not have drop shadows rendered (e.g. snap preview overlay)
+@property (strong, nonatomic) NSMutableSet<NSNumber *> *noShadowWindows;
 
 // Animation timer
 @property (strong, nonatomic) NSTimer *animationTimer;
@@ -247,6 +251,9 @@
 
         _parentFrameCache = [[NSMutableDictionary alloc] init];
         
+        // Initialize no-shadow windows set
+        _noShadowWindows = [[NSMutableSet alloc] init];
+
         // OPTIMIZATION: Initialize MIT-SHM (will be checked during extension query)
         _shmAvailable = NO;
         _shmSeg = XCB_NONE;
@@ -303,6 +310,22 @@
         return NO;
     }
     
+    // Intern the _NET_WM_BYPASS_COMPOSITOR atom for window redirection control
+    {
+      xcb_connection_t *conn = [self.connection connection];
+      xcb_intern_atom_cookie_t atom_cookie =
+          xcb_intern_atom(conn, 0, strlen("_NET_WM_BYPASS_COMPOSITOR"),
+                          "_NET_WM_BYPASS_COMPOSITOR");
+      xcb_intern_atom_reply_t *atom_reply =
+          xcb_intern_atom_reply(conn, atom_cookie, NULL);
+      if (atom_reply) {
+        self.bypassCompositorAtom = atom_reply->atom;
+        free(atom_reply);
+      } else {
+        self.bypassCompositorAtom = XCB_NONE;
+      }
+    }
+
     self.extensionsAvailable = YES;
     self.compositingEnabled = YES;
     NSLog(@"[CompositingManager] Initialization successful - compositing available");
@@ -985,6 +1008,30 @@
     cw.redirected = YES;
     cw.overrideRedirect = attr->override_redirect;
 
+    // Check _NET_WM_BYPASS_COMPOSITOR: if set to 1, the client requests
+    // the compositor to not redirect (composite) this window.  Opaque
+    // frequently-updating windows like terminals benefit from this.
+    if (self.bypassCompositorAtom != XCB_NONE)
+      {
+        xcb_get_property_cookie_t prop_cookie =
+            xcb_get_property(conn, 0, windowId,
+                             self.bypassCompositorAtom, XCB_ATOM_CARDINAL, 0, 1);
+        xcb_get_property_reply_t *prop_reply =
+            xcb_get_property_reply(conn, prop_cookie, NULL);
+        if (prop_reply && prop_reply->type == XCB_ATOM_CARDINAL
+            && prop_reply->format == 32 && prop_reply->value_len > 0)
+          {
+            uint32_t bypass = *(uint32_t *)xcb_get_property_value(prop_reply);
+            if (bypass == 1)
+              {
+                cw.redirected = NO;
+                xcb_composite_unredirect_window(conn, windowId,
+                                                XCB_COMPOSITE_REDIRECT_MANUAL);
+              }
+          }
+        free(prop_reply);
+      }
+
     // Track parent and compute absolute position in root coordinates
     xcb_query_tree_cookie_t tree_cookie = xcb_query_tree(conn, windowId);
     xcb_generic_error_t *treeError = NULL;
@@ -999,15 +1046,19 @@
     }
     [self updateAbsolutePositionForWindow:cw];
     
-    // Create damage object for the window.
-    // Use DELTA_RECTANGLES instead of NON_EMPTY so we keep receiving
-    // notifications for ongoing client redraws even if one notify is dropped.
-    // NON_EMPTY can stall forever when the empty->non-empty transition event is
-    // missed, which manifests as content only updating when unrelated events
-    // (for example titlebar hover redraws) force a repaint.
-    cw.damage = xcb_generate_id(conn);
-    xcb_damage_create(conn, cw.damage, windowId, XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
-    
+    // Create damage object for the window (only for composited windows).
+    // Unredirected windows are drawn by the client directly to the screen,
+    // so we don't need damage tracking for them.
+    if (cw.redirected) {
+      // Use DELTA_RECTANGLES instead of NON_EMPTY so we keep receiving
+      // notifications for ongoing client redraws even if one notify is dropped.
+      // NON_EMPTY can stall forever when the empty->non-empty transition event is
+      // missed, which manifests as content only updating when unrelated events
+      // (for example titlebar hover redraws) force a repaint.
+      cw.damage = xcb_generate_id(conn);
+      xcb_damage_create(conn, cw.damage, windowId, XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
+    }
+
     self.cwindows[@(windowId)] = cw;
     
     // OPTIMIZATION: Mark stacking order dirty (will be rebuilt on next paint)
@@ -1017,6 +1068,20 @@
     free(geom);
     
     [self.connection flush];
+}
+
+#pragma mark - No-Shadow Window Registration
+
+- (void)setSkipShadowForWindow:(xcb_window_t)windowId {
+    if (windowId != XCB_NONE) {
+        [self.noShadowWindows addObject:@(windowId)];
+    }
+}
+
+- (void)clearSkipShadowForWindow:(xcb_window_t)windowId {
+    if (windowId != XCB_NONE) {
+        [self.noShadowWindows removeObject:@(windowId)];
+    }
 }
 
 - (void)registerWindow:(xcb_window_t)window {
@@ -1057,12 +1122,14 @@
     if (!cw) {
         return;
     }
-    
-    // Damage the area where the window was
-    if (cw.viewable) {
+
+    // Damage the area where the window was (composited windows only).
+    // Unredirected windows draw directly to the screen so the X server
+    // handles their removal; the compositor doesn't need to repaint.
+    if (cw.viewable && cw.redirected) {
         [self damageWindowArea:cw];
     }
-    
+
     [self freeWindowData:cw delete:YES];
     [self.cwindows removeObjectForKey:@(windowId)];
 
@@ -1448,6 +1515,14 @@
     if (cw) {
         [self.parentFrameCache removeAllObjects];
         cw.viewable = YES;
+
+        // Unredirected windows draw directly to the screen — skip
+        // picture/shadow/damage since the compositor doesn't paint them.
+        if (!cw.redirected) {
+          self.stackingOrderDirty = YES;
+          return;
+        }
+
         cw.damaged = NO;
         // OPTIMIZATION: Force picture recreation on remap (window may have new content)
         cw.pictureValid = NO;
@@ -2193,6 +2268,12 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
             continue;
         }
 
+        // Skip windows that requested compositor bypass — the client draws
+        // them directly to the screen, so the compositor must not paint them.
+        if (!cw.redirected) {
+            continue;
+        }
+
         // Only paint top-level windows (root children). Child windows are
         // composited via IncludeInferiors on their parent.
         if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) {
@@ -2425,6 +2506,11 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         return; // Can't create shadow without alpha support, Gaussian map, or if it's override-redirect
     }
     
+    // Skip shadow for explicitly excluded windows (e.g. snap preview overlay)
+    if ([self.noShadowWindows containsObject:@(cw.windowId)]) {
+        return;
+    }
+    
     // Generate shadow image in memory
     int swidth, sheight;
     uint8_t *shadow_data = [self makeShadowImage:cw.width + 2 * cw.borderWidth 
@@ -2586,8 +2672,10 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
     }
 
-    // Draw shadow whenever available (including during resize).
-    if (cw.shadowPicture != XCB_NONE && !animating) {
+    // Draw shadow whenever available (including during resize),
+    // except for explicitly excluded windows (e.g. snap preview overlay).
+    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)];
+    if (cw.shadowPicture != XCB_NONE && !animating && !skipShadow) {
         int16_t shadowX = screenX + cw.shadowOffsetX;
         int16_t shadowY = screenY + cw.shadowOffsetY;
         uint16_t drawShadowWidth = cw.shadowWidth;

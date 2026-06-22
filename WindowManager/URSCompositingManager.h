@@ -77,6 +77,10 @@
 // Perform repair immediately without deferring (for critical updates like cursor blinking)
 - (void)performRepairNow;
 
+// Mark a window to skip shadow rendering (e.g. snap preview overlay)
+- (void)setSkipShadowForWindow:(xcb_window_t)windowId;
+- (void)clearSkipShadowForWindow:(xcb_window_t)windowId;
+
 // Fast check used by the event loop to avoid redundant performRepairNow calls
 - (BOOL)hasPendingDamage;
 

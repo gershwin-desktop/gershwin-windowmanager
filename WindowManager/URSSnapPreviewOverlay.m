@@ -18,6 +18,11 @@
 static const CGFloat kCornerRadius = 8.0;
 static const CGFloat kBorderWidth = 3.0;
 
+// Private interface
+@interface URSSnapPreviewOverlay ()
+@property (assign, nonatomic) xcb_window_t overlayX11Window;
+@end
+
 #pragma mark - URSSnapPreviewOverlayView
 
 @interface URSSnapPreviewOverlayView : NSView
@@ -96,7 +101,15 @@ static const CGFloat kBorderWidth = 3.0;
             [[URSSnapPreviewOverlayView alloc] initWithFrame:contentRect];
         [self setContentView:contentView];
 
-        NSLog(@"[SnapPreviewOverlay] Initialized");
+        // Capture the underlying X11 window ID so we can tell the compositor
+        // to skip drop shadows for this overlay.
+        _overlayX11Window = (xcb_window_t)[self windowNumber];
+
+        // Register with compositor to skip shadows (if compositing is active)
+        URSCompositingManager *compositor = [URSCompositingManager sharedManager];
+        [compositor setSkipShadowForWindow:_overlayX11Window];
+
+        NSLog(@"[SnapPreviewOverlay] Initialized (X11 window: %u)", _overlayX11Window);
     }
 
     return self;
@@ -123,6 +136,9 @@ static const CGFloat kBorderWidth = 3.0;
 
     [view setNeedsDisplay:YES];
 
+    // Ensure compositor skips shadows for this overlay window
+    [compositor setSkipShadowForWindow:_overlayX11Window];
+
     // Show the overlay
     [self orderFront:nil];
 
@@ -134,6 +150,13 @@ static const CGFloat kBorderWidth = 3.0;
 
 - (void)hide {
     [self orderOut:self];
+
+    // Clear the no-shadow flag (will be re-registered on next show)
+    if (_overlayX11Window != XCB_NONE) {
+        URSCompositingManager *compositor = [URSCompositingManager sharedManager];
+        [compositor clearSkipShadowForWindow:_overlayX11Window];
+    }
+
     NSLog(@"[SnapPreviewOverlay] Hidden");
 }
 
