@@ -1129,15 +1129,30 @@ static XCBConnection *sharedInstance;
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDock]];
                 [window stackAbove];
 
-                // Don't render a drop shadow behind translucent dock windows
+                // Only skip drop shadow for the Dock panel (identified by _NET_WM_NAME "Dock"),
+                // not all DOCK-type windows (some may be opaque panels that need shadows)
                 {
-                    Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                    id<URSCompositingManaging> compositor = nil;
-                    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                        compositor = [compositorClass performSelector:@selector(sharedManager)];
-                    }
-                    if (compositor) {
-                        [compositor setSkipShadowForWindow:[window window]];
+                    xcb_atom_t utf8Atom = [atomService atomFromCachedAtomsWithKey:[ewmhService UTF8_STRING]];
+                    void *nameReply = [ewmhService getProperty:[ewmhService EWMHWMName]
+                                                  propertyType:utf8Atom
+                                                     forWindow:window
+                                                        delete:NO
+                                                        length:256];
+                    if (nameReply)
+                    {
+                        char *name = (char *)xcb_get_property_value(nameReply);
+                        if (name && strcmp(name, "Dock") == 0)
+                        {
+                            Class compositorClass = NSClassFromString(@"URSCompositingManager");
+                            id<URSCompositingManaging> compositor = nil;
+                            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+                                compositor = [compositorClass performSelector:@selector(sharedManager)];
+                            }
+                            if (compositor) {
+                                [compositor setSkipShadowForWindow:[window window]];
+                            }
+                        }
+                        free(nameReply);
                     }
                 }
 
@@ -2574,22 +2589,37 @@ static XCBConnection *sharedInstance;
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDock]];
                 [window stackAbove];
 
-                // Don't render a drop shadow behind translucent dock windows
+                // Only skip drop shadow for the Dock panel (identified by _NET_WM_NAME "Dock"),
+                // not all DOCK-type windows (some may be opaque panels that need shadows)
                 {
-                    Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                    id<URSCompositingManaging> compositor = nil;
-                    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                        compositor = [compositorClass performSelector:@selector(sharedManager)];
-                    }
-                    if (compositor) {
-                        [compositor setSkipShadowForWindow:[window window]];
+                    xcb_atom_t utf8Atom = [atomService atomFromCachedAtomsWithKey:[ewmhService UTF8_STRING]];
+                    void *nameReply = [ewmhService getProperty:[ewmhService EWMHWMName]
+                                                  propertyType:utf8Atom
+                                                     forWindow:window
+                                                        delete:NO
+                                                        length:256];
+                    if (nameReply)
+                    {
+                        char *name = (char *)xcb_get_property_value(nameReply);
+                        if (name && strcmp(name, "Dock") == 0)
+                        {
+                            Class compositorClass = NSClassFromString(@"URSCompositingManager");
+                            id<URSCompositingManaging> compositor = nil;
+                            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+                                compositor = [compositorClass performSelector:@selector(sharedManager)];
+                            }
+                            if (compositor) {
+                                [compositor setSkipShadowForWindow:[window window]];
+                            }
+                        }
+                        free(nameReply);
                     }
                 }
             }
             free(windowTypeReply);
         }
     }
-    
+
     // Handle _NET_WORKAREA changes on root window to update cached workarea
     XCBScreen *screen = [[self screens] objectAtIndex:0];
     XCBWindow *rootWindow = [screen rootWindow];
