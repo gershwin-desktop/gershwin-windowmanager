@@ -291,6 +291,33 @@ static XCBConnection *sharedInstance;
     key = nil;
 }
 
+- (void)restackDockWindowsAbove
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    NSString *dockType = [ewmhService EWMHWMWindowTypeDock];
+
+    for (XCBWindow *aWindow in [windowsMap allValues])
+    {
+        if ([[aWindow windowType] isEqualToString:dockType])
+        {
+            [aWindow stackAbove];
+        }
+    }
+
+    // Notify compositor that stacking order has changed
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        id compositor = [compositorClass performSelector:@selector(sharedManager)];
+        if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirty)])
+        {
+            [compositor performSelector:@selector(markStackingOrderDirty)];
+        }
+    }
+
+    ewmhService = nil;
+}
+
 - (void)closeConnection
 {
     xcb_disconnect(connection);
@@ -706,6 +733,7 @@ static XCBConnection *sharedInstance;
                             [groupedFrame setNormalState];
                             // Stack ALL grouped windows above other apps
                             [groupedFrame stackAbove];
+                            [self restackDockWindowsAbove];
                         }
                         [groupedWindow setIsMinimized:NO];
                         [groupedWindow setNormalState];
@@ -781,6 +809,7 @@ static XCBConnection *sharedInstance;
                     // Bring to front and focus
                     [frame stackAbove];
                     [frame raiseResizeHandle];
+                    [self restackDockWindowsAbove];
 
                     if (titleBar)
                     {
@@ -1096,6 +1125,7 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDock]];
+                [window stackAbove];
 
                 window = nil;
                 ewmhService = nil;
@@ -1539,6 +1569,7 @@ static XCBConnection *sharedInstance;
     } else {
         [frame stackAbove];
         [frame raiseResizeHandle];
+        [self restackDockWindowsAbove];
     }
     [[frame childWindowForKey:TitleBar] setIsAbove:YES];
     [self drawAllTitleBarsExcept:(XCBTitleBar*)[frame childWindowForKey:TitleBar]];
@@ -1571,6 +1602,7 @@ static XCBConnection *sharedInstance;
     uint32_t config_win_vals[7];
     unsigned short i = 0;
     XCBWindow *window = [self windowForXCBId:anEvent->window];
+    __block BOOL restackDocksAfterConfigure = NO;
 
     /*** Handle configure requests (has it is) for windows we don't manage ***/
 
@@ -1622,12 +1654,19 @@ static XCBConnection *sharedInstance;
                 config_win_vals[i++] = XCB_STACK_MODE_BELOW;
             } else {
                 config_win_vals[i++] = anEvent->stack_mode;
+                if (anEvent->stack_mode == XCB_STACK_MODE_ABOVE) {
+                    restackDocksAfterConfigure = YES;
+                }
             }
             config_win_mask |= XCB_CONFIG_WINDOW_STACK_MODE;
             ewmhService = nil;
         }
 
         xcb_configure_window(connection, anEvent->window, config_win_mask, config_win_vals);
+
+        if (restackDocksAfterConfigure) {
+            [self restackDockWindowsAbove];
+        }
 
         /* Do NOT send a synthetic ConfigureNotify here.  The
            xcb_configure_window pass-through above is sufficient — the X
@@ -2158,6 +2197,7 @@ static XCBConnection *sharedInstance;
         if (!isDesktopWindow) {
             [frame stackAbove];
             [frame raiseResizeHandle];
+            [self restackDockWindowsAbove];
         }
     } else if (window && [window isKindOfClass:[XCBWindow class]]) {
         // Fallback: If we couldn't find client/frame but have a window, focus it directly
@@ -2167,6 +2207,7 @@ static XCBConnection *sharedInstance;
             uint32_t values[] = { XCB_STACK_MODE_ABOVE };
             xcb_configure_window(connection, [window window], XCB_CONFIG_WINDOW_STACK_MODE, values);
             [self flush];
+            [self restackDockWindowsAbove];
         }
     } else {
         // Last resort: ungrab keyboard to prevent being stuck
@@ -2513,6 +2554,12 @@ static XCBConnection *sharedInstance;
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDesktop]];
                 [window stackBelow];
             }
+            else if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDock]])
+            {
+                NSLog(@"PropertyNotify: Window %u identified as dock type - stacking above", anEvent->window);
+                [window setWindowType:[ewmhService EWMHWMWindowTypeDock]];
+                [window stackAbove];
+            }
             free(windowTypeReply);
         }
     }
@@ -2662,6 +2709,7 @@ static XCBConnection *sharedInstance;
                 frame = (XCBFrame *) [window parentWindow];
                 [frame stackAbove];
                 [frame raiseResizeHandle];
+                [self restackDockWindowsAbove];
                 titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar]; //TODO: Can i put all this in a single method?
                 [titleBar drawTitleBarComponents];
                 [self drawAllTitleBarsExcept:titleBar];
@@ -2789,6 +2837,7 @@ static XCBConnection *sharedInstance;
 
         [frame stackAbove];
         [frame raiseResizeHandle];
+        [self restackDockWindowsAbove];
         [clientWindow focus];
         [self drawAllTitleBarsExcept:titleBar];
 
@@ -3508,6 +3557,7 @@ static XCBConnection *sharedInstance;
     if (anEvent->place == XCB_CIRCULATE_RAISE_LOWEST) {
         // Raise the lowest window to the top
         [window stackAbove];
+        [self restackDockWindowsAbove];
         NSLog(@"Raised window %u to top", anEvent->window);
     } else if (anEvent->place == XCB_CIRCULATE_LOWER_HIGHEST) {
         // Lower the highest window to the bottom

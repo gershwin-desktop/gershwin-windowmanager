@@ -92,6 +92,7 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (id) initWithDisplay:(NSString *) aDisplay asWindowManager:(BOOL)isWindowManager;
 - (void) registerWindow:(XCBWindow*) aWindow;
 - (void) unregisterWindow:(XCBWindow *) aWindow;
+- (void) restackDockWindowsAbove;
 - (NSMutableDictionary *) windowsMap;
 - (void) setWindowsMap:(NSMutableDictionary *)aWindowsMap;
 - (void) closeConnection;

@@ -814,6 +814,7 @@
             frame = (XCBFrame *) [aWindow parentWindow];
             titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar];
             [frame stackAbove];
+            [connection restackDockWindowsAbove];
             [titleBar drawTitleBarComponents];
             [connection drawAllTitleBarsExcept:titleBar];
             frame = nil;
@@ -851,7 +852,10 @@
             BOOL above = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow isAbove]);
 
             if (above)
+            {
                 [aWindow stackAbove];
+                [connection restackDockWindowsAbove];
+            }
 
             [self updateNetWmState:aWindow];
         }
