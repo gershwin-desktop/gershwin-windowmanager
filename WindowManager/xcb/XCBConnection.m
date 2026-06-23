@@ -306,6 +306,26 @@ static XCBConnection *sharedInstance;
         }
     }
 
+    // Menu-type windows must remain above the dock so that context menus,
+    // popup menus, and dropdown menus are always fully visible.
+    // Stack them above the dock after the dock has been raised.
+    {
+        NSString *menuType = [ewmhService EWMHWMWindowTypeMenu];
+        NSString *popupMenuType = [ewmhService EWMHWMWindowTypePopupMenu];
+        NSString *dropdownMenuType = [ewmhService EWMHWMWindowTypeDropdownMenu];
+
+        for (XCBWindow *aWindow in [windowsMap allValues])
+        {
+            NSString *wtype = [aWindow windowType];
+            if ([wtype isEqualToString:menuType] ||
+                [wtype isEqualToString:popupMenuType] ||
+                [wtype isEqualToString:dropdownMenuType])
+            {
+                [aWindow stackAbove];
+            }
+        }
+    }
+
     // Notify compositor that stacking order has changed
     Class compositorClass = NSClassFromString(@"URSCompositingManager");
     if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
