@@ -1194,6 +1194,7 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeMenu]];
+                [window stackAbove];
 
                 window = nil;
                 ewmhService = nil;
@@ -1213,6 +1214,7 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypePopupMenu]];
+                [window stackAbove];
 
                 window = nil;
                 ewmhService = nil;
@@ -1232,6 +1234,7 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDropdownMenu]];
+                [window stackAbove];
 
                 window = nil;
                 ewmhService = nil;
