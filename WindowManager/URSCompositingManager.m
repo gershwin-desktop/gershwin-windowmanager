@@ -2073,7 +2073,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self animateWindowTransition:windowId
                                                  fromRect:startRect
                                                      toRect:endRect
-                                                 duration:0.42
+                                                 duration:2.1
                                                          fade:YES
                                                 minimizing:YES];
 }
@@ -2102,7 +2102,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self animateWindowTransition:windowId
                                                  fromRect:startRect
                                                      toRect:endRect
-                                                 duration:0.42
+                                                 duration:2.1
                                                          fade:YES
                                                 minimizing:NO];
 }
