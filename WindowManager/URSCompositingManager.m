@@ -74,6 +74,8 @@
 @property (assign, nonatomic) NSTimeInterval animationDuration;
 @property (assign, nonatomic) XCBRect animationStartRect;
 @property (assign, nonatomic) XCBRect animationEndRect;
+// Completion callback fired from finishAnimationForWindow:
+@property (copy, nonatomic) dispatch_block_t animationCompletion;
 @end
 
 @implementation URSCompositeWindow
@@ -109,9 +111,11 @@
         _animationDuration = 0;
         _animationStartRect = XCBInvalidRect;
         _animationEndRect = XCBInvalidRect;
+        _animationCompletion = nil;
     }
     return self;
 }
+
 @end
 
 @interface URSCompositingManager ()
@@ -2011,6 +2015,15 @@ static inline double URSEaseSmooth(double t) {
     return t * t * (3.0 - (2.0 * t));
 }
 
+// Cubic ease-out: f(t) = 1 - (1 - t)^3
+// Per PRD Section 9 Phase 4 — fast start, gradual finish.
+// Used for window birth animations; produces a natural feel of
+// the window expanding from the icon with no overshoot or bounce.
+static inline double URSEaseOutCubic(double t) {
+    double oneMinusT = 1.0 - t;
+    return 1.0 - (oneMinusT * oneMinusT * oneMinusT);
+}
+
 static inline xcb_render_transform_t URSIdentityTransform(void) {
     xcb_render_transform_t transform;
     transform.matrix11 = 1 << 16;
@@ -2063,6 +2076,24 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                                                  duration:0.42
                                                          fade:YES
                                                 minimizing:YES];
+}
+
+- (void)animateWindowMinimize:(xcb_window_t)windowId
+                     fromRect:(XCBRect)startRect
+                       toRect:(XCBRect)endRect
+                   completion:(dispatch_block_t)completion {
+    // Call the standard minimize animation
+    [self animateWindowMinimize:windowId fromRect:startRect toRect:endRect];
+
+    // Store the completion block on the composite window so it fires
+    // when the animation finishes (in finishAnimationForWindow:).
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (cw) {
+        cw.animationCompletion = completion;
+    } else if (completion) {
+        // Window wasn't found — fire immediately
+        completion();
+    }
 }
 
 - (void)animateWindowRestore:(xcb_window_t)windowId
@@ -2176,6 +2207,13 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self freeWindowData:cw delete:NO];
     } else if (!cw.viewable) {
         [self freeWindowData:cw delete:NO];
+    }
+
+    // Fire the completion callback if set (used e.g. to unmap the window
+    // after a minimize animation finishes).
+    if (cw.animationCompletion) {
+        cw.animationCompletion();
+        cw.animationCompletion = nil;
     }
 
     [self damageScreen];
@@ -2596,18 +2634,38 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         FnCheckXCBRectIsValid(cw.animationEndRect) && cw.animationDuration > 0.0) {
         double t = (now - cw.animationStart) / cw.animationDuration;
         t = URSClampDouble(t, 0.0, 1.0);
-        double ease = URSEaseSmooth(t);
-        double scaleEaseX = ease;
-        double scaleEaseY = t * t;
         BOOL wasMinimize = cw.animatingMinimize;
+        BOOL isBirthAnimation = !wasMinimize;
+
+        // Determine ease curve per PRD:
+        // - Birth (window-open): cubic ease-out f(t)=1-(1-t)^3 (PRD Section 9 Phase 4)
+        // - Minimize/restore: smoothstep (legacy behavior)
+        double ease;
+        double scaleEaseX;
+        double scaleEaseY;
+
+        if (isBirthAnimation) {
+            // Uniform cubic ease-out for all axes — window appears to expand
+            // naturally from the icon with no asymmetric stretching.
+            ease = URSEaseOutCubic(t);
+            scaleEaseX = ease;
+            scaleEaseY = ease;
+        } else {
+            // Minimize/restore uses smoothstep (symmetric ease-in-out) for
+            // position X, with slower height expansion (t^2) for the
+            // traditional "collapsing" visual.
+            ease = URSEaseSmooth(t);
+            scaleEaseX = ease;
+            scaleEaseY = t * t;
+        }
 
         // Log the first frame of animation to help debugging (not spammy)
         if (t < 0.02) {
-            NSLog(@"[Compositor] Animation started for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f",
+            NSLog(@"[Compositor] Animation started for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f isBirth=%d",
                   cw.windowId,
                   (int)cw.animationStartRect.position.x, (int)cw.animationStartRect.position.y, cw.animationStartRect.size.width, cw.animationStartRect.size.height,
                   (int)cw.animationEndRect.position.x, (int)cw.animationEndRect.position.y, cw.animationEndRect.size.width, cw.animationEndRect.size.height,
-                  cw.animationDuration);
+                  cw.animationDuration, (int)isBirthAnimation);
         }
 
         double startW = fmax(1.0, (double)cw.animationStartRect.size.width);
@@ -2789,7 +2847,19 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 
             if (cw.animatingFade) {
                 double t = URSClampDouble((now - cw.animationStart) / cw.animationDuration, 0.0, 1.0);
-                double alpha = cw.animatingMinimize ? (1.0 - (t * t)) : t;
+                double alpha;
+                if (cw.animatingMinimize) {
+                    // Minimize: fade OUT with quadratic ease-in
+                    alpha = 1.0 - (t * t);
+                } else {
+                    // Birth animation (window-open): start translucent (40%), gradually resolve
+                    // Uses quadratic ease-up from a 0.4 base:
+                    //   alpha = 0.4 + 0.6 * (1 - (1-t)^2)
+                    // Per PRD Sections 9 Phase 3 (translucent appearance) and Phase 5
+                    // (chrome materialization during final third).
+                    double oneMinusT = 1.0 - t;
+                    alpha = 0.4 + 0.6 * (1.0 - (oneMinusT * oneMinusT));
+                }
                 alpha = URSClampDouble(alpha, 0.0, 1.0);
                 if (alpha < 0.999 && self.argbFormat != XCB_NONE) {
                     alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha];

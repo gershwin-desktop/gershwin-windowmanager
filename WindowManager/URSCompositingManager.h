@@ -49,6 +49,10 @@
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                                          fromRect:(XCBRect)startRect
                                              toRect:(XCBRect)endRect;
+- (void)animateWindowMinimize:(xcb_window_t)windowId
+                                         fromRect:(XCBRect)startRect
+                                             toRect:(XCBRect)endRect
+                                         completion:(dispatch_block_t)completion;
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
