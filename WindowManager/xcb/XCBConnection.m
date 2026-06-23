@@ -44,6 +44,8 @@
                       connection:(XCBConnection *)connection
                           screen:(xcb_screen_t *)screen
                         duration:(NSTimeInterval)duration;
+- (void)setSkipShadowForWindow:(xcb_window_t)windowId;
+- (void)markStackingOrderDirty;
 @end
 
 // Find 32-bit ARGB visual for alpha transparency support
@@ -1126,6 +1128,18 @@ static XCBConnection *sharedInstance;
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDock]];
                 [window stackAbove];
+
+                // Don't render a drop shadow behind translucent dock windows
+                {
+                    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+                    id<URSCompositingManaging> compositor = nil;
+                    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+                        compositor = [compositorClass performSelector:@selector(sharedManager)];
+                    }
+                    if (compositor) {
+                        [compositor setSkipShadowForWindow:[window window]];
+                    }
+                }
 
                 window = nil;
                 ewmhService = nil;
@@ -2559,6 +2573,18 @@ static XCBConnection *sharedInstance;
                 NSLog(@"PropertyNotify: Window %u identified as dock type - stacking above", anEvent->window);
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDock]];
                 [window stackAbove];
+
+                // Don't render a drop shadow behind translucent dock windows
+                {
+                    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+                    id<URSCompositingManaging> compositor = nil;
+                    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+                        compositor = [compositorClass performSelector:@selector(sharedManager)];
+                    }
+                    if (compositor) {
+                        [compositor setSkipShadowForWindow:[window window]];
+                    }
+                }
             }
             free(windowTypeReply);
         }
