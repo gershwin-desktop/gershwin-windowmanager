@@ -22,12 +22,7 @@
 
 - (void)finishLaunching
 {
-    // DON'T call super finishLaunching to prevent dock icon appearance
-    // This is the key trick used by Menu.app
-    // [super finishLaunching];
-
-    // Set up our window manager without showing in dock
-    // The delegate will handle the actual window manager setup
+    [super finishLaunching];
 }
 
 @end
