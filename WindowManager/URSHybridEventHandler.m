@@ -2362,7 +2362,7 @@
     // Clean up keyboard grabs first
     [self.keyboardManager cleanupKeyboardGrabbing];
 
-    // Remove from run loop if integrated
+    // Remove from run loop if integrated - must match all modes added in setupXCBEventIntegration
     if (self.xcbEventsIntegrated && connection) {
         int xcbFD = xcb_get_file_descriptor([connection connection]);
         if (xcbFD >= 0) {
@@ -2370,6 +2370,14 @@
             [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
                                    type:ET_RDESC
                                 forMode:NSDefaultRunLoopMode
+                                   all:YES];
+            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
+                                   type:ET_RDESC
+                                forMode:NSRunLoopCommonModes
+                                   all:YES];
+            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
+                                   type:ET_RDESC
+                                forMode:NSEventTrackingRunLoopMode
                                    all:YES];
         }
     }

@@ -2065,6 +2065,12 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         return;
     }
     [self damageScreen];
+    // Paint immediately on each timer tick instead of deferring via
+    // performSelector:withObject:afterDelay:, which only fires when the
+    // run loop processes NSRunLoopCommonModes. Without this, painting
+    // stalls until XCB events (like mouse motion) wake the run loop
+    // in a mode that processes common-mode timers.
+    [self performRepairNow];
 }
 
 - (void)animateWindowMinimize:(xcb_window_t)windowId
@@ -2073,7 +2079,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self animateWindowTransition:windowId
                                                  fromRect:startRect
                                                      toRect:endRect
-                                                 duration:2.1
+                                                 duration:0.8
                                                          fade:YES
                                                 minimizing:YES];
 }
@@ -2102,7 +2108,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self animateWindowTransition:windowId
                                                  fromRect:startRect
                                                      toRect:endRect
-                                                 duration:2.1
+                                                 duration:0.8
                                                          fade:YES
                                                 minimizing:NO];
 }
@@ -2694,14 +2700,28 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             return;
         }
 
-        if (t >= 1.0) {
-            XCBRect finalRect = cw.animationEndRect;
-            [self finishAnimationForWindow:cw];
-            animating = NO;
-            destX = finalRect.position.x;
-            destY = finalRect.position.y;
-            destW = fmax(1.0, (double)finalRect.size.width);
-            destH = fmax(1.0, (double)finalRect.size.height);
+        // DIAGNOSTIC: count every animation frame
+        {
+            static int animFrameCount = 0;
+            animFrameCount++;
+            double prog = t;
+            if ((animFrameCount % 5) == 0) {
+                NSLog(@"[Compositor] ANIM_FRAME: win=%u frame=%d t=%.4f dest=(%.0f,%.0f) size=(%.0fx%.0f)",
+                      cw.windowId, animFrameCount, prog, destX, destY, destW, destH);
+            }
+            if (t >= 1.0) {
+                NSLog(@"[Compositor] ANIM_DONE: win=%u total_frames=%d duration=%.2f",
+                      cw.windowId, animFrameCount, cw.animationDuration);
+                animFrameCount = 0;
+
+                XCBRect finalRect = cw.animationEndRect;
+                [self finishAnimationForWindow:cw];
+                animating = NO;
+                destX = finalRect.position.x;
+                destY = finalRect.position.y;
+                destW = fmax(1.0, (double)finalRect.size.width);
+                destH = fmax(1.0, (double)finalRect.size.height);
+            }
         }
     }
     

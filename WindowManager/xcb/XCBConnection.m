@@ -951,14 +951,13 @@ static XCBConnection *sharedInstance;
                                   (int)endRect.position.x, (int)endRect.position.y, endRect.size.width, endRect.size.height);
 
                             if (compActive) {
-                                // Compositing mode: use smooth animated transition
-                                // Duration 200ms per PRD Section 10 (target 180-220ms)
+                                // Compositing mode: use birth animation
                                 [compositor animateWindowTransition:[frame window]
-                                                          fromRect:animStartRect
-                                                            toRect:endRect
-                                                          duration:0.2
-                                                              fade:YES];
-                                NSLog(@"[MapRequest] Called compositor animateWindowTransition for window %u", [frame window]);
+                                                           fromRect:animStartRect
+                                                             toRect:endRect
+                                                           duration:0.8
+                                                               fade:YES];
+                                NSLog(@"[MapRequest] Composited birth animation for window %u", [frame window]);
                             } else {
                                 // Non-compositing mode: use fast zoom rect animation
                                 XCBScreen *screenObj = [[self screens] objectAtIndex:0];
@@ -1699,10 +1698,10 @@ static XCBConnection *sharedInstance;
                                 XCBRect endRect = [frame windowRect];
                                 if ([compositor compositingActive]) {
                                     [compositor animateWindowTransition:[frame window]
-                                                              fromRect:animStartRect
-                                                                toRect:endRect
-                                                              duration:0.2
-                                                                  fade:YES];
+                                                               fromRect:animStartRect
+                                                                 toRect:endRect
+                                                               duration:0.8
+                                                                   fade:YES];
                                     NSLog(@"[MapRequest] Composited birth animation for NEW window %u", [frame window]);
                                 } else {
                                     XCBScreen *screenObj = [[self screens] objectAtIndex:0];
