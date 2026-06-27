@@ -2667,18 +2667,20 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         double endW = fmax(1.0, (double)cw.animationEndRect.size.width);
         double endH = fmax(1.0, (double)cw.animationEndRect.size.height);
 
-        // Preserve final aspect ratio throughout the animation.
-        // Compute a single uniform scale factor from the ease-based interpolation
-        // so the window never distorts — it always has its final shape.
+        // Always preserve the window's natural aspect ratio, defined by
+        // the LARGER start/end rect (the non-minimized state has the true
+        // window shape, the icon rect is often square).
+        double naturalW = fmax(startW, endW);
+        double naturalH = fmax(startH, endH);
         double rawW = startW + (endW - startW) * ease;
         double rawH = startH + (endH - startH) * ease;
-        double scaleW = rawW / endW;
-        double scaleH = rawH / endH;
-        double uniformScale = fmax(scaleW, scaleH);
+        double scaleFromNaturalW = rawW / naturalW;
+        double scaleFromNaturalH = rawH / naturalH;
+        double uniformScale = fmax(scaleFromNaturalW, scaleFromNaturalH);
         uniformScale = fmax(0.01, uniformScale); // never smaller than 1%
 
-        double currentW = (double)endW * uniformScale;
-        double currentH = (double)endH * uniformScale;
+        double currentW = naturalW * uniformScale;
+        double currentH = naturalH * uniformScale;
 
         double startCenterX = cw.animationStartRect.position.x + (startW * 0.5);
         double endCenterX = cw.animationEndRect.position.x + (endW * 0.5);
@@ -2698,28 +2700,22 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             return;
         }
 
-        // DIAGNOSTIC: count every animation frame
-        {
-            static int animFrameCount = 0;
-            animFrameCount++;
-            double prog = t;
-            if ((animFrameCount % 5) == 0) {
-                NSLog(@"[Compositor] ANIM_FRAME: win=%u frame=%d t=%.4f dest=(%.0f,%.0f) size=(%.0fx%.0f)",
-                      cw.windowId, animFrameCount, prog, destX, destY, destW, destH);
-            }
-            if (t >= 1.0) {
-                NSLog(@"[Compositor] ANIM_DONE: win=%u total_frames=%d duration=%.2f",
-                      cw.windowId, animFrameCount, cw.animationDuration);
-                animFrameCount = 0;
+        if (t >= 1.0) {
+            XCBRect finalRect = cw.animationEndRect;
+            [self finishAnimationForWindow:cw];
+            animating = NO;
+            destX = finalRect.position.x;
+            destY = finalRect.position.y;
+            destW = fmax(1.0, (double)finalRect.size.width);
+            destH = fmax(1.0, (double)finalRect.size.height);
 
-                XCBRect finalRect = cw.animationEndRect;
-                [self finishAnimationForWindow:cw];
-                animating = NO;
-                destX = finalRect.position.x;
-                destY = finalRect.position.y;
-                destW = fmax(1.0, (double)finalRect.size.width);
-                destH = fmax(1.0, (double)finalRect.size.height);
-            }
+            // Sync the composite window's tracked geometry to the final
+            // animation position so subsequent non-animated paints use the
+            // correct coordinates instead of stale values from addWindow:.
+            cw.x = finalRect.position.x;
+            cw.y = finalRect.position.y;
+            cw.width = finalRect.size.width;
+            cw.height = finalRect.size.height;
         }
     }
     
