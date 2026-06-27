@@ -2644,25 +2644,13 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         BOOL isBirthAnimation = !wasMinimize;
 
         // Determine ease curve per PRD:
-        // - Birth (window-open): cubic ease-out f(t)=1-(1-t)^3 (PRD Section 9 Phase 4)
-        // - Minimize/restore: smoothstep (legacy behavior)
+        // - Birth/unminimize: cubic ease-out f(t)=1-(1-t)^3  — fast start, gradual finish
+        // - Minimize: smoothstep f(t)=t²(3-2t)               — symmetric ease-in-out
         double ease;
-        double scaleEaseX;
-        double scaleEaseY;
-
         if (isBirthAnimation) {
-            // Uniform cubic ease-out for all axes — window appears to expand
-            // naturally from the icon with no asymmetric stretching.
             ease = URSEaseOutCubic(t);
-            scaleEaseX = ease;
-            scaleEaseY = ease;
         } else {
-            // Minimize/restore uses smoothstep (symmetric ease-in-out) for
-            // position X, with slower height expansion (t^2) for the
-            // traditional "collapsing" visual.
             ease = URSEaseSmooth(t);
-            scaleEaseX = ease;
-            scaleEaseY = t * t;
         }
 
         // Log the first frame of animation to help debugging (not spammy)
@@ -2679,8 +2667,18 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         double endW = fmax(1.0, (double)cw.animationEndRect.size.width);
         double endH = fmax(1.0, (double)cw.animationEndRect.size.height);
 
-        double currentW = startW + (endW - startW) * scaleEaseX;
-        double currentH = startH + (endH - startH) * scaleEaseY;
+        // Preserve final aspect ratio throughout the animation.
+        // Compute a single uniform scale factor from the ease-based interpolation
+        // so the window never distorts — it always has its final shape.
+        double rawW = startW + (endW - startW) * ease;
+        double rawH = startH + (endH - startH) * ease;
+        double scaleW = rawW / endW;
+        double scaleH = rawH / endH;
+        double uniformScale = fmax(scaleW, scaleH);
+        uniformScale = fmax(0.01, uniformScale); // never smaller than 1%
+
+        double currentW = (double)endW * uniformScale;
+        double currentH = (double)endH * uniformScale;
 
         double startCenterX = cw.animationStartRect.position.x + (startW * 0.5);
         double endCenterX = cw.animationEndRect.position.x + (endW * 0.5);
