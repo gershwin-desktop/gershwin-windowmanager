@@ -36,7 +36,7 @@
 @property (assign, nonatomic) xcb_window_t windowId;
 @property (assign, nonatomic) xcb_window_t parentWindowId;
 @property (assign, nonatomic) xcb_damage_damage_t damage;
-@property (assign, nonatomic) xcb_pixmap_t nameWindowPixmap;
+
 @property (assign, nonatomic) xcb_render_picture_t picture;
 @property (assign, nonatomic) xcb_xfixes_region_t borderSize;
 @property (assign, nonatomic) xcb_xfixes_region_t extents;
@@ -86,7 +86,6 @@
         _windowId = XCB_NONE;
         _parentWindowId = XCB_NONE;
         _damage = XCB_NONE;
-        _nameWindowPixmap = XCB_NONE;
         _picture = XCB_NONE;
         _borderSize = XCB_NONE;
         _extents = XCB_NONE;
@@ -1115,12 +1114,6 @@
       // (for example titlebar hover redraws) force a repaint.
       cw.damage = xcb_generate_id(conn);
       xcb_damage_create(conn, cw.damage, windowId, XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
-
-      // Name the backing pixmap so XRender can reference it via the window XID.
-      // This is required for the X server to properly handle IncludeInferiors on
-      // redirected windows across different X connections (Xlib vs XCB).
-      xcb_composite_name_window_pixmap(conn, windowId, windowId);
-      cw.nameWindowPixmap = windowId;
     }
 
     self.cwindows[@(windowId)] = cw;
@@ -1205,11 +1198,6 @@
 
 - (void)freeWindowData:(URSCompositeWindow *)cw delete:(BOOL)shouldDelete {
     xcb_connection_t *conn = [self.connection connection];
-    
-    if (cw.nameWindowPixmap != XCB_NONE) {
-        xcb_free_pixmap(conn, cw.nameWindowPixmap);
-        cw.nameWindowPixmap = XCB_NONE;
-    }
     
     if (cw.picture != XCB_NONE) {
         xcb_render_free_picture(conn, cw.picture);
@@ -1436,10 +1424,6 @@
 
     xcb_connection_t *conn = [self.connection connection];
 
-    if (cw.nameWindowPixmap != XCB_NONE) {
-        xcb_free_pixmap(conn, cw.nameWindowPixmap);
-        cw.nameWindowPixmap = XCB_NONE;
-    }
     if (cw.picture != XCB_NONE) {
         xcb_render_free_picture(conn, cw.picture);
         cw.picture = XCB_NONE;
@@ -1519,10 +1503,6 @@
             // detect the size mismatch via pictureWidth/pictureHeight and scale.
         } else {
             // Outside resize (e.g., programmatic resize): free and recreate normally.
-            if (cw.nameWindowPixmap != XCB_NONE) {
-                xcb_free_pixmap(conn, cw.nameWindowPixmap);
-                cw.nameWindowPixmap = XCB_NONE;
-            }
             if (cw.picture != XCB_NONE) {
                 xcb_render_free_picture(conn, cw.picture);
                 cw.picture = XCB_NONE;
@@ -1773,15 +1753,11 @@
     }
 
     // When a window is exposed (becomes visible after being obscured),
-    // the NameWindowPixmap may be stale because fixed-size windows don't redraw
-    // themselves - they expect the X server to preserve their contents.
-    // With compositing, we must force recreation of the pixmap to get fresh content.
+    // the X server may return a stale backing pixmap because fixed-size windows
+    // expect their contents to be preserved.  With compositing, we force
+    // recreation of the picture to get fresh content.
     xcb_connection_t *conn = [self.connection connection];
 
-    if (cw.nameWindowPixmap != XCB_NONE) {
-        xcb_free_pixmap(conn, cw.nameWindowPixmap);
-        cw.nameWindowPixmap = XCB_NONE;
-    }
     if (cw.picture != XCB_NONE) {
         xcb_render_free_picture(conn, cw.picture);
         cw.picture = XCB_NONE;
