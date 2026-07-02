@@ -18,6 +18,7 @@
 #import <xcb/xfixes.h>
 #import <xcb/render.h>
 #import <xcb/damage.h>
+#import <xcb/present.h>
 #import <xcb/shm.h>
 #import <sys/shm.h>
 #import <unistd.h>  // for usleep
@@ -171,6 +172,16 @@
 @property (assign, nonatomic) BOOL stackingOrderDirty;
 
 // Cache child window -> tracked parent frame resolution for damage routing.
+
+// X Present extension for vblank-synced compositing (flip chain)
+@property (assign, nonatomic) BOOL presentAvailable;
+@property (assign, nonatomic) uint8_t presentEventBase;
+@property (assign, nonatomic) xcb_pixmap_t presentPixmap0;
+@property (assign, nonatomic) xcb_pixmap_t presentPixmap1;
+@property (assign, nonatomic) xcb_render_picture_t presentPicture0;
+@property (assign, nonatomic) xcb_render_picture_t presentPicture1;
+@property (assign, nonatomic) int currentPresentIndex;
+@property (assign, nonatomic) BOOL presentInFlight;
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, id> *parentFrameCache;
 
 // OPTIMIZATION: MIT-SHM shared memory support for zero-copy transfers
@@ -260,6 +271,14 @@
 
         // OPTIMIZATION: Initialize MIT-SHM (will be checked during extension query)
         _shmAvailable = NO;
+        _presentAvailable = NO;
+        _presentEventBase = 0;
+        _presentPixmap0 = XCB_NONE;
+        _presentPixmap1 = XCB_NONE;
+        _presentPicture0 = XCB_NONE;
+        _presentPicture1 = XCB_NONE;
+        _currentPresentIndex = 0;
+        _presentInFlight = NO;
         _shmSeg = XCB_NONE;
         _shmId = -1;
         _shmAddr = NULL;
@@ -449,7 +468,19 @@
         } else {
             NSLog(@"[CompositingManager] MIT-SHM not available (using standard transfers)");
         }
-        
+
+        // Check X Present extension (vblank-synced compositing)
+        const xcb_query_extension_reply_t *present_ext =
+            xcb_get_extension_data(conn, &xcb_present_id);
+        if (present_ext && present_ext->present) {
+            self.presentEventBase = present_ext->first_event;
+            self.presentAvailable = YES;
+            NSLog(@"[CompositingManager] X Present vblank sync available (event base: %u)",
+                  self.presentEventBase);
+        } else {
+            NSLog(@"[CompositingManager] X Present not available — using direct composite");
+        }
+
         return allExtensionsOK;
         
     } @catch (NSException *exception) {
@@ -809,8 +840,31 @@
         }
         
         [self.connection flush];
-        NSLog(@"[CompositingManager] Root buffer created (%dx%d)", 
+        NSLog(@"[CompositingManager] Root buffer created (%dx%d)",
               self.screenWidth, self.screenHeight);
+
+        // Create present pixmaps for vblank-synced display (flip chain)
+        if (self.presentAvailable) {
+            self.presentPixmap0 = xcb_generate_id(conn);
+            xcb_create_pixmap(conn, [screen screen]->root_depth,
+                             self.presentPixmap0,
+                             self.rootWindow,
+                             self.screenWidth, self.screenHeight);
+            self.presentPicture0 = xcb_generate_id(conn);
+            xcb_render_create_picture(conn, self.presentPicture0,
+                                     self.presentPixmap0, self.rootFormat, 0, NULL);
+            self.presentPixmap1 = xcb_generate_id(conn);
+            xcb_create_pixmap(conn, [screen screen]->root_depth,
+                             self.presentPixmap1,
+                             self.rootWindow,
+                             self.screenWidth, self.screenHeight);
+            self.presentPicture1 = xcb_generate_id(conn);
+            xcb_render_create_picture(conn, self.presentPicture1,
+                                     self.presentPixmap1, self.rootFormat, 0, NULL);
+            self.currentPresentIndex = 0;
+            NSLog(@"[CompositingManager] Present flip chain created (2 pixmaps)");
+        }
+
         return YES;
         
     } @catch (NSException *exception) {
@@ -1061,6 +1115,12 @@
       // (for example titlebar hover redraws) force a repaint.
       cw.damage = xcb_generate_id(conn);
       xcb_damage_create(conn, cw.damage, windowId, XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
+
+      // Name the backing pixmap so XRender can reference it via the window XID.
+      // This is required for the X server to properly handle IncludeInferiors on
+      // redirected windows across different X connections (Xlib vs XCB).
+      xcb_composite_name_window_pixmap(conn, windowId, windowId);
+      cw.nameWindowPixmap = windowId;
     }
 
     self.cwindows[@(windowId)] = cw;
@@ -1258,23 +1318,37 @@
         rects[0].height = cw.height + 2 * cw.borderWidth;
         
         // Expand to include shadow if present
-        if (cw.shadowPicture != XCB_NONE) {
-            // Shadow offsets are typically negative, so we need to expand the rectangle
-            // to encompass both the window and its shadow
-            int16_t shadow_x = cw.x + cw.shadowOffsetX;
-            int16_t shadow_y = cw.y + cw.shadowOffsetY;
-            int16_t window_right = cw.x + cw.width + 2 * cw.borderWidth;
-            int16_t window_bottom = cw.y + cw.height + 2 * cw.borderWidth;
-            int16_t shadow_right = shadow_x + cw.shadowWidth;
-            int16_t shadow_bottom = shadow_y + cw.shadowHeight;
-            
-            // Calculate bounding box that includes both window and shadow
-            rects[0].x = (shadow_x < cw.x) ? shadow_x : cw.x;
-            rects[0].y = (shadow_y < cw.y) ? shadow_y : cw.y;
-            int16_t right = (shadow_right > window_right) ? shadow_right : window_right;
-            int16_t bottom = (shadow_bottom > window_bottom) ? shadow_bottom : window_bottom;
-            rects[0].width = right - rects[0].x;
-            rects[0].height = bottom - rects[0].y;
+        {
+            uint16_t sWidth = cw.shadowWidth;
+            uint16_t sHeight = cw.shadowHeight;
+            int16_t sOffX = cw.shadowOffsetX;
+            int16_t sOffY = cw.shadowOffsetY;
+
+            if (sWidth == 0 && sHeight == 0 && !cw.overrideRedirect
+                && self.argbFormat != XCB_NONE && self.gaussianSize > 0)
+            {
+                sWidth = cw.width + 2 * cw.borderWidth + self.gaussianSize;
+                sHeight = cw.height + 2 * cw.borderWidth + self.gaussianSize;
+                sOffX = SHADOW_OFFSET_X;
+                sOffY = SHADOW_OFFSET_Y;
+            }
+
+            if (cw.shadowPicture != XCB_NONE || (sWidth > 0 && sHeight > 0)) {
+                int16_t shadow_x = cw.x + sOffX;
+                int16_t shadow_y = cw.y + sOffY;
+                int16_t window_right = cw.x + cw.width + 2 * cw.borderWidth;
+                int16_t window_bottom = cw.y + cw.height + 2 * cw.borderWidth;
+                int16_t shadow_right = shadow_x + (int16_t)sWidth;
+                int16_t shadow_bottom = shadow_y + (int16_t)sHeight;
+                
+                // Calculate bounding box that includes both window and shadow
+                rects[0].x = (shadow_x < cw.x) ? shadow_x : cw.x;
+                rects[0].y = (shadow_y < cw.y) ? shadow_y : cw.y;
+                int16_t right = (shadow_right > window_right) ? shadow_right : window_right;
+                int16_t bottom = (shadow_bottom > window_bottom) ? shadow_bottom : window_bottom;
+                rects[0].width = right - rects[0].x;
+                rects[0].height = bottom - rects[0].y;
+            }
         }
         
         // New position (including shadow if present)
@@ -1284,23 +1358,37 @@
         rects[1].height = cw.height + 2 * cw.borderWidth;
         
         // Expand to include shadow if present
-        if (cw.shadowPicture != XCB_NONE) {
-            // Shadow offsets are typically negative, so we need to expand the rectangle
-            // to encompass both the window and its shadow
-            int16_t shadow_x = newX + cw.shadowOffsetX;
-            int16_t shadow_y = newY + cw.shadowOffsetY;
-            int16_t window_right = newX + cw.width + 2 * cw.borderWidth;
-            int16_t window_bottom = newY + cw.height + 2 * cw.borderWidth;
-            int16_t shadow_right = shadow_x + cw.shadowWidth;
-            int16_t shadow_bottom = shadow_y + cw.shadowHeight;
-            
-            // Calculate bounding box that includes both window and shadow
-            rects[1].x = (shadow_x < newX) ? shadow_x : newX;
-            rects[1].y = (shadow_y < newY) ? shadow_y : newY;
-            int16_t right = (shadow_right > window_right) ? shadow_right : window_right;
-            int16_t bottom = (shadow_bottom > window_bottom) ? shadow_bottom : window_bottom;
-            rects[1].width = right - rects[1].x;
-            rects[1].height = bottom - rects[1].y;
+        {
+            uint16_t sWidth = cw.shadowWidth;
+            uint16_t sHeight = cw.shadowHeight;
+            int16_t sOffX = cw.shadowOffsetX;
+            int16_t sOffY = cw.shadowOffsetY;
+
+            if (sWidth == 0 && sHeight == 0 && !cw.overrideRedirect
+                && self.argbFormat != XCB_NONE && self.gaussianSize > 0)
+            {
+                sWidth = cw.width + 2 * cw.borderWidth + self.gaussianSize;
+                sHeight = cw.height + 2 * cw.borderWidth + self.gaussianSize;
+                sOffX = SHADOW_OFFSET_X;
+                sOffY = SHADOW_OFFSET_Y;
+            }
+
+            if (cw.shadowPicture != XCB_NONE || (sWidth > 0 && sHeight > 0)) {
+                int16_t shadow_x = newX + sOffX;
+                int16_t shadow_y = newY + sOffY;
+                int16_t window_right = newX + cw.width + 2 * cw.borderWidth;
+                int16_t window_bottom = newY + cw.height + 2 * cw.borderWidth;
+                int16_t shadow_right = shadow_x + (int16_t)sWidth;
+                int16_t shadow_bottom = shadow_y + (int16_t)sHeight;
+                
+                // Calculate bounding box that includes both window and shadow
+                rects[1].x = (shadow_x < newX) ? shadow_x : newX;
+                rects[1].y = (shadow_y < newY) ? shadow_y : newY;
+                int16_t right = (shadow_right > window_right) ? shadow_right : window_right;
+                int16_t bottom = (shadow_bottom > window_bottom) ? shadow_bottom : window_bottom;
+                rects[1].width = right - rects[1].x;
+                rects[1].height = bottom - rects[1].y;
+            }
         }
         
         // Create a single region covering both areas
@@ -1535,7 +1623,14 @@
         if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE) {
             [self createShadowForWindow:cw];
         }
-        [self damageWindowArea:cw];
+        // Force full-screen repaint on first map to ensure window appears even
+        // if windowExtents returns stale geometry.  This is especially important
+        // for unframed windows (menus, popups) whose extents may not be correct
+        // at map time.
+        NSLog(@"[Compositor] mapWindow: %u viewable at (%d,%d) %dx%d parent=0x%x redirected=%d",
+              windowId, cw.x, cw.y, cw.width, cw.height,
+              (unsigned int)cw.parentWindowId, (int)cw.redirected);
+        [self damageScreen];
         // OPTIMIZATION: Window mapping can change stacking order
         self.stackingOrderDirty = YES;
     }
@@ -1760,29 +1855,17 @@
 
 - (void)repairWindow:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];
-    xcb_xfixes_region_t parts;
-    
-    if (cw.damaged) {
-        // Always use full window extents instead of the delta from
-        // xcb_damage_subtract.  The X Damage extension may report a sub-rect
-        // that is smaller than the visual area needing update (e.g. just the
-        // text background of a menu item).  The clip region in paintAll:
-        // restricts the final composite to this damage region, so a partial
-        // rectangle results in only part of the window being refreshed
-        // visible as "half-height" highlights during fast motion.
-        parts = [self windowExtents:cw];
-        
-        // Drain all accumulated damage so the X damage object starts fresh.
-        xcb_damage_subtract(conn, cw.damage, XCB_NONE, XCB_NONE);
-    } else {
-        // First damage on this window - use full extents.
-        // windowExtents always produces at least a 1x1 rectangle, so no
-        // emptiness check is needed here.
-        parts = [self windowExtents:cw];
-        
-        // Clear all damage
-        xcb_damage_subtract(conn, cw.damage, XCB_NONE, XCB_NONE);
-    }
+
+    // Always use full window extents instead of the delta from
+    // xcb_damage_subtract.  The X Damage extension may report a sub-rect
+    // that is smaller than the visual area needing update (e.g. just the
+    // text background of a menu item).  If we passed a partial rectangle
+    // to addDamage: then the clip region in paintAll: would restrict the
+    // final composite to that subset, leaving parts of the window stale.
+    xcb_xfixes_region_t parts = [self windowExtents:cw];
+
+    // Drain all accumulated damage so the X damage object starts fresh.
+    xcb_damage_subtract(conn, cw.damage, XCB_NONE, XCB_NONE);
 
     // Invalidate the picture so paintWindow: creates a fresh
     // XRender picture from the window drawable on the next paint cycle.
@@ -1848,12 +1931,29 @@
     int16_t ww = cw.width + 2 * cw.borderWidth;
     int16_t wh = cw.height + 2 * cw.borderWidth;
 
-    // Compute bounding union of window + shadow so no pixel is missed.
-    if (cw.shadowPicture != XCB_NONE || (cw.shadowWidth > 0 && cw.shadowHeight > 0)) {
-        int16_t sx = cw.x + cw.shadowOffsetX;
-        int16_t sy = cw.y + cw.shadowOffsetY;
-        int16_t sx2 = sx + (int16_t)cw.shadowWidth;
-        int16_t sy2 = sy + (int16_t)cw.shadowHeight;
+    // Compute bounding union of window + shadow extents so no pixel is
+    // missed during invalidation.  Shadow may not yet be created (e.g.
+    // a window that is unmapped before createShadowForWindow: runs), so
+    // estimate dimensions from the shadow configuration constants.
+    uint16_t sWidth = cw.shadowWidth;
+    uint16_t sHeight = cw.shadowHeight;
+    int16_t sOffX = cw.shadowOffsetX;
+    int16_t sOffY = cw.shadowOffsetY;
+
+    if (sWidth == 0 && sHeight == 0 && !cw.overrideRedirect
+        && self.argbFormat != XCB_NONE && self.gaussianSize > 0)
+    {
+        sWidth = cw.width + 2 * cw.borderWidth + self.gaussianSize;
+        sHeight = cw.height + 2 * cw.borderWidth + self.gaussianSize;
+        sOffX = SHADOW_OFFSET_X;
+        sOffY = SHADOW_OFFSET_Y;
+    }
+
+    if (cw.shadowPicture != XCB_NONE || (sWidth > 0 && sHeight > 0)) {
+        int16_t sx = wx + sOffX;
+        int16_t sy = wy + sOffY;
+        int16_t sx2 = sx + (int16_t)sWidth;
+        int16_t sy2 = sy + (int16_t)sHeight;
         int16_t wx2 = wx + ww;
         int16_t wy2 = wy + wh;
 
@@ -2285,13 +2385,40 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
     
     NSUInteger num_windows = [self.windowStackingOrder count];
-    
+
+    // Expand the damage region to cover the current position of every visible
+    // top-level window.  This prevents the background fill from leaving stale
+    // pixels from a previous frame when a window has moved since allDamage was
+    // captured — the background fill would otherwise repaint only the old area
+    // and the no-clip window composite would paint on top of adjacent leftover
+    // pixels.
+    for (NSUInteger i = 0; i < num_windows; i++) {
+        xcb_window_t win = [self.windowStackingOrder[i] unsignedIntValue];
+        if (win == self.overlayWindow || win == self.outputWindow) { continue; }
+        URSCompositeWindow *cw = [self findCWindow:win];
+        if (!cw || (!cw.viewable && !cw.animating) || !cw.redirected) { continue; }
+        if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) { continue; }
+
+        xcb_xfixes_region_t winExtents = [self windowExtents:cw];
+        if (winExtents != XCB_NONE) {
+            xcb_xfixes_union_region(conn, region, region, winExtents);
+            xcb_xfixes_destroy_region(conn, winExtents);
+        }
+    }
+
     // Paint background ONLY in damaged areas (performance optimization)
     xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, region, 0, 0);
     xcb_render_color_t bg_color = {0x8000, 0x8000, 0x8000, 0xFFFF}; // Mid grey background
     xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
     xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
                                self.rootBuffer, bg_color, 1, &bg_rect);
+
+    // Drop the clip before painting windows so every window composite
+    // renders its full extent.  This prevents artifacts when a window
+    // moves between the time allDamage was captured (performRepair)
+    // and the paint cycle — the damage-region clip would otherwise
+    // not cover the window's latest position.
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, XCB_NONE, 0, 0);
     
     // Paint windows from bottom to top (so higher z-order windows are on top)
     for (NSUInteger i = 0; i < num_windows; i++) {
@@ -2332,25 +2459,62 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     // uploads) between paint cycles.
     xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, XCB_NONE, 0, 0);
 
-    // Flush all window painting commands before copying to screen.
-    // This ensures all render operations on rootBuffer are complete before
-    // we read from it, preventing partially-rendered content from appearing.
-    xcb_flush(conn);
+    if (self.presentAvailable) {
+        // Vblank-synced presentation via X Present extension.
+        // Use a flip chain with 2 pixmaps, alternating each frame.
+        // This guarantees we never overwrite a buffer that the X server
+        // may still be scanning out — by the time we cycle back to a
+        // buffer (2 frames later, ~33ms at 60Hz), the server is done.
+        int idx = self.currentPresentIndex;
+        xcb_pixmap_t pixmap = (idx == 0) ? self.presentPixmap0 : self.presentPixmap1;
+        xcb_render_picture_t picture = (idx == 0) ? self.presentPicture0 : self.presentPicture1;
+        self.currentPresentIndex = 1 - idx;
 
-    // Copy ONLY damaged region to screen (performance optimization)
-    xcb_xfixes_set_picture_clip_region(conn, self.rootPicture, region, 0, 0);
-    xcb_render_composite(conn,
-                        XCB_RENDER_PICT_OP_SRC,
-                        self.rootBuffer,
-                        XCB_NONE,
-                        self.rootPicture,
-                        0, 0,
-                        0, 0,
-                        0, 0,
-                        self.screenWidth, self.screenHeight);
+        xcb_flush(conn);
+        xcb_render_composite(conn,
+                            XCB_RENDER_PICT_OP_SRC,
+                            self.rootBuffer,
+                            XCB_NONE,
+                            picture,
+                            0, 0, 0, 0, 0, 0,
+                            self.screenWidth, self.screenHeight);
 
-    [self.connection flush];
-    
+        xcb_present_pixmap(conn,
+                          self.outputWindow,
+                          pixmap,
+                          0,
+                          0,
+                          0,
+                          0, 0,
+                          XCB_NONE,
+                          XCB_NONE,
+                          XCB_NONE,
+                          XCB_PRESENT_OPTION_NONE,
+                          0,
+                          0, 0,
+                          0,
+                          NULL);
+        self.presentInFlight = YES;
+        [self.connection flush];
+    } else {
+        // Non-vblank-synced path: direct copy to screen (fallback).
+        // Compose the full rootBuffer — never clip to the damage region since
+        // the damage-region clip was already applied during rendering and is
+        // no longer valid once window positions may have shifted.
+        xcb_flush(conn);
+        xcb_render_composite(conn,
+                            XCB_RENDER_PICT_OP_SRC,
+                            self.rootBuffer,
+                            XCB_NONE,
+                            self.rootPicture,
+                            0, 0, 0, 0, 0, 0,
+                            self.screenWidth, self.screenHeight);
+        // Clear any clip that may have been set on rootPicture so it doesn't
+        // persist to future XRender operations.
+        xcb_xfixes_set_picture_clip_region(conn, self.rootPicture, XCB_NONE, 0, 0);
+        [self.connection flush];
+    }
+
     // NSLog(@"[CompositingManager] paintAll: painted %lu windows", (unsigned long)num_windows);
     URS_PROFILE_END(paintAll);
 }
@@ -2719,6 +2883,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
     }
     
+#if 1
     // Keep shadows visible during live resize by reusing the existing shadow.
     // Recreate (or create) only when resize is not active to avoid heavy uploads per motion step.
     if (self.argbFormat != XCB_NONE && !cw.overrideRedirect) {
@@ -2794,6 +2959,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             xcb_render_set_picture_transform(conn, cw.shadowPicture, resetShadow);
         }
     }
+#endif
     
     // OPTIMIZATION: Lazy picture creation - only create when first painting
     // NOTE: The underlying NameWindowPixmap is automatically updated by X server on damage
@@ -2824,8 +2990,8 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         {
             static int paintCounter = 0;
             if ((paintCounter++ % 120) == 0) {
-                NSLog(@"[Compositor] PAINT: win=%u dest=(%d,%d) size=(%hu,%hu) anim=%d",
-                      cw.windowId, destXInt, destYInt, destWInt, destHInt, (int)animating);
+                NSLog(@"[Compositor] PAINT: win=%u dest=(%d,%d) size=(%hu,%hu) anim=%d parent=0x%x",
+                      cw.windowId, destXInt, destYInt, destWInt, destHInt, (int)animating, (unsigned int)cw.parentWindowId);
             }
         }
 
@@ -2942,12 +3108,12 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     uint32_t pa_mask = XCB_RENDER_CP_SUBWINDOW_MODE;
     uint32_t pa_values[] = { XCB_SUBWINDOW_MODE_INCLUDE_INFERIORS };
     xcb_render_create_picture(conn, picture, draw, format, pa_mask, pa_values);
-    
+
     // BEST PRACTICE: Set picture filter to 'good' or 'bilinear' for smooth scaling
     // especially during minimize/restore animations
     const char *filter = "good";
     xcb_render_set_picture_filter(conn, picture, strlen(filter), filter, 0, NULL);
-    
+
     return picture;
 }
 
@@ -3039,6 +3205,18 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 
 - (uint8_t)damageEventBase {
     return _damageEventBase;
+}
+
+- (uint8_t)presentEventBase {
+    return _presentEventBase;
+}
+
+- (void)handlePresentComplete:(void *)event {
+    self.presentInFlight = NO;
+}
+
+- (void)handlePresentIdle {
+    self.presentInFlight = NO;
 }
 
 #pragma mark - Deactivation & Cleanup
@@ -3137,6 +3315,24 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             self.overlayWindow = XCB_NONE;
         }
         
+                // Free present extension resources (flip chain)
+        if (self.presentPicture0 != XCB_NONE) {
+            xcb_render_free_picture(conn, self.presentPicture0);
+            self.presentPicture0 = XCB_NONE;
+        }
+        if (self.presentPixmap0 != XCB_NONE) {
+            xcb_free_pixmap(conn, self.presentPixmap0);
+            self.presentPixmap0 = XCB_NONE;
+        }
+        if (self.presentPicture1 != XCB_NONE) {
+            xcb_render_free_picture(conn, self.presentPicture1);
+            self.presentPicture1 = XCB_NONE;
+        }
+        if (self.presentPixmap1 != XCB_NONE) {
+            xcb_free_pixmap(conn, self.presentPixmap1);
+            self.presentPixmap1 = XCB_NONE;
+        }
+
         [self.connection flush];
         NSLog(@"[CompositingManager] Cleanup complete");
         

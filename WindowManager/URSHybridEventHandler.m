@@ -25,6 +25,7 @@
 #import <xcb/xcb_icccm.h>
 #import <xcb/xcb_aux.h>
 #import <xcb/damage.h>
+#import <xcb/present.h>
 #import <xcb/xproto.h>
 #import <X11/keysym.h>
 #import "EWMHService.h"
@@ -966,6 +967,17 @@
     
     uint8_t responseType = event->response_type & ~0x80;
     uint8_t damageEventBase = [self.compositingManager damageEventBase];
+    uint8_t presentEventBase = [self.compositingManager presentEventBase];
+    
+    // X Present extension: vblank-synced composite complete
+    if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_COMPLETE_NOTIFY) {
+        [self.compositingManager handlePresentComplete:event];
+        return;
+    }
+    if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_IDLE_NOTIFY) {
+        [self.compositingManager handlePresentIdle];
+        return;
+    }
     
     // DAMAGE notify events are at base_event + XCB_DAMAGE_NOTIFY (0)
     // Check if this is a DAMAGE event

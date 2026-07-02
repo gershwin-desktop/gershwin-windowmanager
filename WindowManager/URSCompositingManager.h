@@ -11,6 +11,7 @@
 #import "XCBConnection.h"
 #import "XCBTypes.h"
 
+
 @interface URSCompositingManager : NSObject
 
 // Singleton access
@@ -99,6 +100,11 @@
 
 // Extension event base access (for event routing)
 - (uint8_t)damageEventBase;
+- (uint8_t)presentEventBase;
+
+// X Present extension events (vblank sync)
+- (void)handlePresentComplete:(void *)event;
+- (void)handlePresentIdle;
 
 // Cleanup
 - (void)cleanup;
