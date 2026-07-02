@@ -2386,8 +2386,12 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         }
     }
 
-    // Paint background ONLY in damaged areas (performance optimization)
-    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, region, 0, 0);
+    // Fill the entire rootBuffer with the desktop background colour.
+    // We do NOT clip to the damage region: the FULL screen is filled so
+    // that every stale shadow pixel from a previous frame is overwritten.
+    // Without this, a window that was unmapped or moved could leave old
+    // shadow pixels outside the damage+expansion region, and when a new
+    // window's shadow blends on top those leftovers make it look darker.
     xcb_render_color_t bg_color = {0x8000, 0x8000, 0x8000, 0xFFFF}; // Mid grey background
     xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
     xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
