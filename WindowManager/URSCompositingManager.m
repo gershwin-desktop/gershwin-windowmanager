@@ -2366,6 +2366,14 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     
     NSUInteger num_windows = [self.windowStackingOrder count];
 
+    // Fill rootBuffer with the desktop background colour so that areas not
+    // covered by any window (including transparent window corners) show the
+    // intended background instead of undefined/black pixels.
+    xcb_render_color_t bg_color = {0x8000, 0x8000, 0x8000, 0xFFFF};
+    xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
+    xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
+                               self.rootBuffer, bg_color, 1, &bg_rect);
+
     // Paint windows from bottom to top (so higher z-order windows are on top)
     for (NSUInteger i = 0; i < num_windows; i++) {
         xcb_window_t win = [self.windowStackingOrder[i] unsignedIntValue];
