@@ -1515,6 +1515,10 @@
                 xcb_free_pixmap(conn, cw.shadowPixmap);
                 cw.shadowPixmap = XCB_NONE;
             }
+            // Reset dimensions so windowExtents: falls through to the
+            // geometric estimation block rather than using stale values.
+            cw.shadowWidth = 0;
+            cw.shadowHeight = 0;
             // Reset lazy picture flags so picture is recreated
             cw.pictureValid = NO;
             cw.needsPictureCreation = YES;
@@ -2878,6 +2882,14 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
                 xcb_free_pixmap(conn, cw.shadowPixmap);
                 cw.shadowPixmap = XCB_NONE;
             }
+            // Reset dimensions so windowExtents: falls through to the
+            // geometric estimation block.  Without this, the expansion
+            // loop in paintAll: reads stale nonzero shadowWidth/Height
+            // and computes a bounding box that doesn't match the new
+            // shadow size, causing the background fill to miss part of
+            // the shadow area → leftover pixels darken the shadow.
+            cw.shadowWidth = 0;
+            cw.shadowHeight = 0;
         }
 
         if (cw.shadowPicture == XCB_NONE && ![self.connection resizeState]) {
