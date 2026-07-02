@@ -2366,44 +2366,6 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     
     NSUInteger num_windows = [self.windowStackingOrder count];
 
-    // Expand the damage region to cover the current position of every visible
-    // top-level window.  This prevents the background fill from leaving stale
-    // pixels from a previous frame when a window has moved since allDamage was
-    // captured — the background fill would otherwise repaint only the old area
-    // and the no-clip window composite would paint on top of adjacent leftover
-    // pixels.
-    for (NSUInteger i = 0; i < num_windows; i++) {
-        xcb_window_t win = [self.windowStackingOrder[i] unsignedIntValue];
-        if (win == self.overlayWindow || win == self.outputWindow) { continue; }
-        URSCompositeWindow *cw = [self findCWindow:win];
-        if (!cw || (!cw.viewable && !cw.animating) || !cw.redirected) { continue; }
-        if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) { continue; }
-
-        xcb_xfixes_region_t winExtents = [self windowExtents:cw];
-        if (winExtents != XCB_NONE) {
-            xcb_xfixes_union_region(conn, region, region, winExtents);
-            xcb_xfixes_destroy_region(conn, winExtents);
-        }
-    }
-
-    // Fill the entire rootBuffer with the desktop background colour.
-    // We do NOT clip to the damage region: the FULL screen is filled so
-    // that every stale shadow pixel from a previous frame is overwritten.
-    // Without this, a window that was unmapped or moved could leave old
-    // shadow pixels outside the damage+expansion region, and when a new
-    // window's shadow blends on top those leftovers make it look darker.
-    xcb_render_color_t bg_color = {0x8000, 0x8000, 0x8000, 0xFFFF}; // Mid grey background
-    xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
-    xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
-                               self.rootBuffer, bg_color, 1, &bg_rect);
-
-    // Drop the clip before painting windows so every window composite
-    // renders its full extent.  This prevents artifacts when a window
-    // moves between the time allDamage was captured (performRepair)
-    // and the paint cycle — the damage-region clip would otherwise
-    // not cover the window's latest position.
-    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, XCB_NONE, 0, 0);
-    
     // Paint windows from bottom to top (so higher z-order windows are on top)
     for (NSUInteger i = 0; i < num_windows; i++) {
         xcb_window_t win = [self.windowStackingOrder[i] unsignedIntValue];
