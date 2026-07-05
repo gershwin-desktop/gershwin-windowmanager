@@ -72,9 +72,6 @@
 
     NSMenu *menu = [self buildMenuForFrame:frame];
 
-    NSLog(@"[SnappingMenu] Showing context menu at GNUstep (%.0f, %.0f) for frame %u",
-          gnustepPoint.x, gnustepPoint.y, [frame window]);
-
     NSEvent *event =
         [NSEvent mouseEventWithType:NSRightMouseDown
                            location:gnustepPoint

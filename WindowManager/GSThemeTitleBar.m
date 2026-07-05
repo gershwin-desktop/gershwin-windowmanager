@@ -16,29 +16,21 @@
 #pragma mark - XCBTitleBar Method Overrides
 
 - (void)drawTitleBarForColor:(TitleBarColor)aColor {
-    NSLog(@"GSThemeTitleBar: drawTitleBarForColor called - using GSTheme");
-
     BOOL isActive = (aColor == TitleBarUpColor);
     [self renderWithGSTheme:isActive];
 }
 
 - (void)drawArcsForColor:(TitleBarColor)aColor {
-    NSLog(@"GSThemeTitleBar: drawArcsForColor called - using GSTheme");
-
     BOOL isActive = (aColor == TitleBarUpColor);
     [self renderWithGSTheme:isActive];
 }
 
 - (void)drawTitleBarComponents {
-    NSLog(@"GSThemeTitleBar: drawTitleBarComponents called - using GSTheme");
-
-    [self renderWithGSTheme:YES]; // Default to active
+    [self renderWithGSTheme:YES];
 }
 
 - (void)drawTitleBarComponentsPixmaps {
-    NSLog(@"GSThemeTitleBar: drawTitleBarComponentsPixmaps called - using GSTheme");
-
-    [self renderWithGSTheme:YES]; // Default to active
+    [self renderWithGSTheme:YES];
 }
 
 #pragma mark - GSTheme Rendering Implementation
@@ -55,20 +47,13 @@
         XCBRect titlebarRect = [self windowRect];
         NSSize titlebarSize = NSMakeSize(titlebarRect.size.width, titlebarRect.size.height);
 
-        NSLog(@"GSThemeTitleBar: Rendering %dx%d titlebar with GSTheme",
-              (int)titlebarSize.width, (int)titlebarSize.height);
-
         // Create GSTheme image
         NSImage *titlebarImage = [self createGSThemeImage:titlebarSize
                                                     title:[self windowTitle]
                                                    active:isActive];
 
         if (titlebarImage) {
-            // Transfer GSTheme image to X11 pixmap
             [self transferGSThemeImageToPixmap:titlebarImage];
-            NSLog(@"GSThemeTitleBar: Successfully rendered with GSTheme");
-        } else {
-            NSLog(@"GSThemeTitleBar: Failed to create GSTheme image");
         }
 
     } @catch (NSException *exception) {
@@ -107,7 +92,6 @@
 
     [image unlockFocus];
 
-    NSLog(@"GSThemeTitleBar: Created GSTheme image for title: %@", title ?: @"(untitled)");
     return image;
 }
 
@@ -206,7 +190,6 @@
     [[self connection] flush];
     xcb_flush(conn);
 
-    NSLog(@"GSThemeTitleBar: Successfully transferred GSTheme image to X11 pixmap");
 }
 
 #pragma mark - Helper Methods

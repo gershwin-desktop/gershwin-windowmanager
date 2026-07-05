@@ -135,7 +135,6 @@
 
         switch (button) {
             case GSThemeTitleBarButtonClose:
-                NSLog(@"GSTheme: Close button clicked");
                 if (clientWindow) {
                     [clientWindow close];
                     [frame setNeedDestroy:YES];
@@ -143,7 +142,6 @@
                 break;
 
             case GSThemeTitleBarButtonMiniaturize:
-                NSLog(@"GSTheme: Minimize button clicked");
                 [frame minimize];
                 break;
 
@@ -175,12 +173,7 @@
                   titlebar:(XCBTitleBar *)titlebar
               clientWindow:(XCBWindow *)clientWindow
 {
-    NSLog(@"GSTheme: Zoom button clicked, frame isMaximized: %d",
-          [frame isMaximized]);
-
     if ([frame isMaximized]) {
-        // Restore from maximized
-        NSLog(@"GSTheme: Restoring window from maximized state");
         XCBRect startRect = [frame windowRect];
         XCBRect restoredRect = [frame oldRect];
 
@@ -211,11 +204,7 @@
         [self animateTransition:frame
                        fromRect:startRect
                          toRect:[frame windowRect]];
-
-        NSLog(@"GSTheme: Restore complete, titlebar redrawn");
     } else {
-        // Maximize
-        NSLog(@"GSTheme: Maximizing window");
         XCBRect startRect = [frame windowRect];
 
         [frame setOldRect:startRect];
@@ -258,8 +247,6 @@
         [self animateTransition:frame
                        fromRect:startRect
                          toRect:[frame windowRect]];
-
-        NSLog(@"GSTheme: Maximize complete, titlebar redrawn at new size");
     }
 }
 
@@ -570,10 +557,6 @@
 
         if (pixmapSize.width != titlebarRect.size.width ||
             pixmapSize.height != titlebarRect.size.height) {
-            NSLog(@"GSTheme: Titlebar size changed from %dx%d to %dx%d, recreating pixmap",
-                  pixmapSize.width, pixmapSize.height,
-                  titlebarRect.size.width, titlebarRect.size.height);
-
             [titlebar destroyPixmap];
             [titlebar createPixmap];
 
@@ -595,7 +578,6 @@
                 [self.compositingManager damageScreen];
                 [self.compositingManager performRepairNow];
             }
-            NSLog(@"GSTheme: Titlebar redrawn after resize");
         }
     } @catch (NSException *exception) {
         NSLog(@"Exception in handleResizeComplete: %@", exception.reason);

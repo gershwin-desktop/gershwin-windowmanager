@@ -1153,70 +1153,37 @@
     xcb_atom_t props[12];
 
     if ([aWindow skipTaskBar])
-    {
-        NSLog(@"Skip taskbar for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateSkipTaskbar];
-    }
 
     if ([aWindow skipPager])
-    {
-        NSLog(@"Skip Pager for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateSkipPager];
-    }
 
     if ([aWindow isAbove])
-    {
-        NSLog(@"Above for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateAbove];
-    }
 
     if ([aWindow isBelow])
-    {
-        NSLog(@"Below for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateBelow];
-    }
 
     if ([aWindow maximizedHorizontally])
-    {
-        NSLog(@"Maximize horizotally for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateMaximizedHorz];
-    }
 
     if ([aWindow maximizedVertically])
-    {
-        NSLog(@"Maximize vertically for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateMaximizedVert];
-    }
 
     if ([aWindow shaded])
-    {
-        NSLog(@"Shaded for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateShaded];
-    }
 
     if ([aWindow isMinimized])
-    {
-        NSLog(@"Hidden for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateHidden];
-    }
 
     if ([aWindow fullScreen])
-    {
-        NSLog(@"Full screen for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateFullscreen];
-    }
 
     if ([aWindow gotAttention])
-    {
-        NSLog(@"Demands attention for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateDemandsAttention];
-    }
 
     if ([aWindow alwaysOnTop])
-    {
-        NSLog(@"Sticky for window %u", [aWindow window]);
         props[i++] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateSticky];
-    }
 
     [self changePropertiesForWindow:aWindow
                            withMode:XCB_PROP_MODE_REPLACE
@@ -1581,8 +1548,6 @@
     xcb_window_t clientWindowId = [clientWindow window];
     xcb_window_t frameWindowId = [frameWindow window];
     
-    NSLog(@"[EWMH] Syncing properties from client %u to frame %u (blacklist approach)", clientWindowId, frameWindowId);
-    
     // Query the window tree to get all properties on the client window
     xcb_list_properties_cookie_t propCookie = xcb_list_properties(conn, clientWindowId);
     xcb_generic_error_t *error = NULL;
@@ -1604,10 +1569,6 @@
     
     xcb_atom_t *atoms = xcb_list_properties_atoms(propReply);
     int atomCount = xcb_list_properties_atoms_length(propReply);
-    
-    NSLog(@"[EWMH] Found %d properties on client window %u", atomCount, clientWindowId);
-    
-    int copiedCount = 0;
     
     // Iterate through all properties on the client window
     for (int i = 0; i < atomCount; i++)
@@ -1634,7 +1595,6 @@
         // Check blacklist
         if ([self shouldExcludePropertyFromFrameSync:propAtom propertyName:propName])
         {
-            NSLog(@"[EWMH] Excluding blacklisted property: %@", propName ? propName : @"(unknown)");
             if (nameReply)
                 free(nameReply);
             continue;
@@ -1704,17 +1664,12 @@
                             itemCount,
                             propertyData);
         
-        copiedCount++;
-        NSLog(@"[EWMH] Copied property %@ (format=%d, items=%u) to frame", 
-              propName ? propName : @"(unknown)", format, itemCount);
-        
         free(readReply);
         if (nameReply)
             free(nameReply);
     }
     
     free(propReply);
-    NSLog(@"[EWMH] Property sync complete: copied %d/%d properties", copiedCount, atomCount);
 }
 
 /**

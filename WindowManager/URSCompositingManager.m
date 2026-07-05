@@ -1187,6 +1187,13 @@
         [self damageWindowArea:cw];
     }
 
+    // If the window was animating, finish the animation first so
+    // activeAnimations is properly decremented and the animation
+    // timer can stop when idle (preventing a timer leak).
+    if (cw.animating) {
+        [self finishAnimationForWindow:cw];
+    }
+
     [self freeWindowData:cw delete:YES];
     [self.cwindows removeObjectForKey:@(windowId)];
 
@@ -2948,15 +2955,6 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         uint16_t destWInt = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
         uint16_t destHInt = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
 
-        // DIAGNOSTIC: Log composite position every ~120 frames
-        {
-            static int paintCounter = 0;
-            if ((paintCounter++ % 120) == 0) {
-                NSLog(@"[Compositor] PAINT: win=%u dest=(%d,%d) size=(%hu,%hu) anim=%d parent=0x%x",
-                      cw.windowId, destXInt, destYInt, destWInt, destHInt, (int)animating, (unsigned int)cw.parentWindowId);
-            }
-        }
-
         xcb_render_picture_t alphaMask = XCB_NONE;
 
         // During live resize the picture may have been captured at a different size
@@ -3293,6 +3291,13 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         if (self.presentPixmap1 != XCB_NONE) {
             xcb_free_pixmap(conn, self.presentPixmap1);
             self.presentPixmap1 = XCB_NONE;
+        }
+
+        // Invalidate the animation timer to prevent it from continuing
+        // to fire after cleanup (e.g. when compositing is deactivated).
+        if (self.animationTimer) {
+            [self.animationTimer invalidate];
+            self.animationTimer = nil;
         }
 
         [self.connection flush];
