@@ -1978,26 +1978,13 @@
 #pragma mark - Compositing
 
 - (void)scheduleRepair {
-    // If repair is already scheduled, don't reschedule (damage accumulates)
     if (self.repairScheduled) {
         return;
     }
-    
-    // Mark repair as scheduled
     self.repairScheduled = YES;
-    
-    // Schedule repair on next run loop iteration (immediate)
-    // This ensures damage is painted as soon as possible while still
-    // allowing multiple damage events to accumulate.
-    //
-    // Use NSRunLoopCommonModes so the repair fires even during menu
-    // tracking, where the default-mode timer would otherwise be
-    // deferred indefinitely and leave the menu bar appearing to
-    // "lag" behind highlight changes.
-    [self performSelector:@selector(performRepair)
-               withObject:nil
-               afterDelay:0.0
-                  inModes:@[NSRunLoopCommonModes]];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self performRepair];
+    });
 }
 
 - (void)performRepair {
@@ -2036,40 +2023,26 @@
         return;
     }
 
-    // PERFORMANCE FIX: Time-based throttling during drag or resize (target ~60fps = 16.67ms)
-    // During drag this prevents ghost artifacts while maintaining good performance.
-    // During resize this avoids hammering the compositor on every motion pixel.
     if ([self.connection dragState] || [self.connection resizeState]) {
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         NSTimeInterval elapsed = now - self.lastRepairTime;
 
-        // Throttle to ~60fps during drag (allow paint if >= 16ms since last paint)
-        // This prevents ghost artifacts that occurred with frame-skipping
         if (elapsed < 0.016 && self.lastRepairTime > 0) {
-            // Too soon - schedule a deferred repair to ensure we don't miss this damage.
-            // Use NSRunLoopCommonModes so the deferred repair fires even if the
-            // runloop is in a tracking mode (drag/resize).
             if (!self.repairScheduled) {
                 self.repairScheduled = YES;
-                [self performSelector:@selector(performRepair)
-                           withObject:nil
-                           afterDelay:0.016 - elapsed
-                              inModes:@[NSRunLoopCommonModes]];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)((0.016 - elapsed) * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+                    [self performRepair];
+                });
             }
             return;
         }
         self.lastRepairTime = now;
     }
 
-    // Cancel any scheduled repair
-    if (self.repairScheduled) {
-        [NSObject cancelPreviousPerformRequestsWithTarget:self
-                                                 selector:@selector(performRepair)
-                                                   object:nil];
-        self.repairScheduled = NO;
-    }
+    self.repairScheduled = NO;
 
-    // Check if there's damage to paint
     if (self.allDamage == XCB_NONE) {
         return;
     }
