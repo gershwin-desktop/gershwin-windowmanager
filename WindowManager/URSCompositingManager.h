@@ -106,6 +106,12 @@
 - (void)handlePresentComplete:(void *)event;
 - (void)handlePresentIdle;
 
+// Redirect a window individually — needed for windows created after the
+// initial redirect_subwindows(root) call which only captures existing
+// root children.  Must be called BEFORE the window is mapped so the
+// backing pixmap captures all initial rendering.
+- (void)redirectWindow:(xcb_window_t)windowId;
+
 // Cleanup
 - (void)cleanup;
 

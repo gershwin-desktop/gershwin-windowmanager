@@ -1103,10 +1103,8 @@
     }
     [self updateAbsolutePositionForWindow:cw];
     
-    // Create damage object for the window (only for composited windows).
-    // Unredirected windows are drawn by the client directly to the screen,
-    // so we don't need damage tracking for them.
     if (cw.redirected) {
+      // Create damage object for the window (only for composited windows).
       // Use DELTA_RECTANGLES instead of NON_EMPTY so we keep receiving
       // notifications for ongoing client redraws even if one notify is dropped.
       // NON_EMPTY can stall forever when the empty->non-empty transition event is
@@ -1669,6 +1667,11 @@
 
 #pragma mark - Damage Handling
 
+- (void)redirectWindow:(xcb_window_t)windowId {
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_composite_redirect_window(conn, windowId, XCB_COMPOSITE_REDIRECT_MANUAL);
+}
+
 - (void)handleDamageNotify:(xcb_window_t)windowId {
     URS_PROFILE_BEGIN(damageNotify);
     if (!self.compositingActive) {
@@ -1678,17 +1681,6 @@
 
     URSCompositeWindow *cw = [self findCWindow:windowId];
 
-    // Always resolve to the top-level frame window for damage routing.
-    // Child windows (titlebar, resize zones) that are tracked separately in
-    // cwindows have their own damage objects and can be found directly.  When
-    // we operate on a child's cw we only damage that child's extents (a thin
-    // strip), which means paintWindow composites the frame's IncludeInferiors
-    // picture clipped to just the child's area.  This is correct in theory but
-    // fragile: if the child's absolute position is even slightly stale the
-    // clip rectangle will be offset and produce a "half-rendered" title bar.
-    //
-    // Safer approach: always resolve to the parent frame so the full window
-    // extents (frame + shadow) are damaged and the entire window is repainted.
     if (cw) {
         if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) {
             xcb_window_t parentFrame = [self findParentFrameWindow:windowId];
@@ -1706,6 +1698,12 @@
         }
     }
 
+    URSCompositeWindow *originalCW = [self findCWindow:windowId];
+    if (originalCW && originalCW != cw && originalCW.damage != XCB_NONE) {
+        xcb_damage_subtract([[self connection] connection],
+                            originalCW.damage, XCB_NONE, XCB_NONE);
+    }
+
     if (!cw || !cw.damage) {
         // Unknown window damaged; force full screen repaint to avoid artifacts
         [self damageScreen];
@@ -1713,21 +1711,7 @@
         return;
     }
 
-    // Keep root-relative coordinates current for damage calculations
     [self updateAbsolutePositionForWindow:cw];
-
-    // DIAGNOSTIC: Log window position vs damage extents
-    {
-        int16_t diagW = cw.width + 2 * cw.borderWidth;
-        int16_t diagH = cw.height + 2 * cw.borderWidth;
-        static int diagCounter = 0;
-        if ((diagCounter++ % 60) == 0) {  // ~every 60 damage events
-            NSLog(@"[Compositor] DAMAGE: win=%u pos=(%d,%d) size=(%d,%d) parent=0x%x",
-                  cw.windowId, cw.x, cw.y, diagW, diagH,
-                  (unsigned int)cw.parentWindowId);
-        }
-    }
-
     [self repairWindow:cw];
     URS_PROFILE_END(damageNotify);
 }
@@ -1982,9 +1966,9 @@
         return;
     }
     self.repairScheduled = YES;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self performRepair];
-    });
+    [self performSelector:@selector(performRepair)
+               withObject:nil
+               afterDelay:0.0];
 }
 
 - (void)performRepair {
@@ -2030,18 +2014,21 @@
         if (elapsed < 0.016 && self.lastRepairTime > 0) {
             if (!self.repairScheduled) {
                 self.repairScheduled = YES;
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                    (int64_t)((0.016 - elapsed) * NSEC_PER_SEC)),
-                    dispatch_get_main_queue(), ^{
-                    [self performRepair];
-                });
+                [self performSelector:@selector(performRepair)
+                           withObject:nil
+                           afterDelay:0.016 - elapsed];
             }
             return;
         }
         self.lastRepairTime = now;
     }
 
-    self.repairScheduled = NO;
+    if (self.repairScheduled) {
+        [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                                 selector:@selector(performRepair)
+                                                   object:nil];
+        self.repairScheduled = NO;
+    }
 
     if (self.allDamage == XCB_NONE) {
         return;
@@ -2102,7 +2089,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     if (self.animationTimer || self.activeAnimations == 0) {
         return;
     }
-    self.animationTimer = [NSTimer scheduledTimerWithTimeInterval:0.016
+    self.animationTimer = [NSTimer scheduledTimerWithTimeInterval:0.033
                                                            target:self
                                                          selector:@selector(animationTimerFired:)
                                                          userInfo:nil
@@ -2124,12 +2111,29 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self stopAnimationTimerIfIdle];
         return;
     }
-    [self damageScreen];
-    // Paint immediately on each timer tick instead of deferring via
-    // performSelector:withObject:afterDelay:, which only fires when the
-    // run loop processes NSRunLoopCommonModes. Without this, painting
-    // stalls until XCB events (like mouse motion) wake the run loop
-    // in a mode that processes common-mode timers.
+    for (URSCompositeWindow *cw in [self.cwindows allValues]) {
+        if (!cw.animating) continue;
+        XCBRect s = cw.animationStartRect;
+        XCBRect e = cw.animationEndRect;
+        if (!FnCheckXCBRectIsValid(s) || !FnCheckXCBRectIsValid(e)) continue;
+        int16_t x1 = MIN(s.position.x, e.position.x);
+        int16_t y1 = MIN(s.position.y, e.position.y);
+        int16_t x2 = MAX(s.position.x + (int16_t)s.size.width,
+                         e.position.x + (int16_t)e.size.width) + 2 * cw.borderWidth;
+        int16_t y2 = MAX(s.position.y + (int16_t)s.size.height,
+                         e.position.y + (int16_t)e.size.height) + 2 * cw.borderWidth;
+        uint16_t shadowPad = self.gaussianSize + abs(SHADOW_OFFSET_X);
+        x1 -= shadowPad;
+        y1 -= shadowPad;
+        x2 += shadowPad;
+        y2 += shadowPad;
+        xcb_rectangle_t r = {x1, y1,
+                             (uint16_t)(x2 - x1), (uint16_t)(y2 - y1)};
+        xcb_connection_t *conn = [self.connection connection];
+        xcb_xfixes_region_t reg = xcb_generate_id(conn);
+        xcb_xfixes_create_region(conn, reg, 1, &r);
+        [self addDamage:reg];
+    }
     [self performRepairNow];
 }
 

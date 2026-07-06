@@ -743,13 +743,32 @@
             // Resize window to 70% of screen size before mapping
             [self resizeWindowTo70Percent:mapRequestEvent->window];
 
+            // Redirect the client window BEFORE it is mapped, so the
+            // Composite backing pixmap captures all initial content.
+            // If redirect happens after mapping, the backing pixmap
+            // starts undefined (grey) and the window's existing content
+            // is lost.
+            if (self.compositingManager && [self.compositingManager compositingActive]) {
+                [self.compositingManager redirectWindow:mapRequestEvent->window];
+            }
+
             // Let XCBConnection handle the map request (creates frame for managed windows)
             [connection handleMapRequest:mapRequestEvent];
+
+            // Redirect the frame window so its backing pixmap is ready
+            // before GSTheme renders to it.  The frame is freshly created
+            // and has no content yet, so redirecting after map is safe.
+            XCBWindow *mappedClient = [connection windowForXCBId:mapRequestEvent->window];
+            if (mappedClient && [[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
+                XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
+                if (self.compositingManager && [self.compositingManager compositingActive]) {
+                    [self.compositingManager redirectWindow:[frame window]];
+                }
+            }
 
             // Check if handleMapRequest created a frame for this window.
             // Unframed windows (menus, popups, tooltips, transients) only need
             // compositor registration — skip theme, focus, and border processing.
-            XCBWindow *mappedClient = [connection windowForXCBId:mapRequestEvent->window];
             if (!mappedClient || ![[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
                 NSLog(@"[WindowManager] Unframed window %u - skipping post-processing", mapRequestEvent->window);
                 if (self.compositingManager && [self.compositingManager compositingActive]) {
