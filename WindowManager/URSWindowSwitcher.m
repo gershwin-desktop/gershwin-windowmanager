@@ -1094,10 +1094,10 @@
                 if (titleBar) {
                     [titleBar setIsAbove:YES];
                     [titleBar setButtonsAbove:YES];
-                    [titleBar drawTitleBarComponents];
-                    
-                    // CRITICAL: This is what makes all OTHER windows appear inactive
-                    [self.connection drawAllTitleBarsExcept:titleBar];
+                    if (![titleBar isGSThemeActive]) {
+                        [titleBar drawTitleBarComponents];
+                        [self.connection drawAllTitleBarsExcept:titleBar];
+                    }
                 }
                 
                 //NSLog(@"[WindowSwitcher] Window activation complete using XCBKit standard path");

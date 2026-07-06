@@ -815,8 +815,10 @@
             titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar];
             [frame stackAbove];
             [connection restackDockWindowsAbove];
-            [titleBar drawTitleBarComponents];
-            [connection drawAllTitleBarsExcept:titleBar];
+            if (![titleBar isGSThemeActive]) {
+                [titleBar drawTitleBarComponents];
+                [connection drawAllTitleBarsExcept:titleBar];
+            }
             frame = nil;
             titleBar = nil;
         }

@@ -2376,8 +2376,10 @@ static XCBConnection *sharedInstance;
     titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar];
     [titleBar setIsAbove:YES];
     [titleBar setButtonsAbove:YES];
-    [titleBar drawTitleBarComponents];
-    [self drawAllTitleBarsExcept:titleBar];
+    if (![titleBar isGSThemeActive]) {
+        [titleBar drawTitleBarComponents];
+        [self drawAllTitleBarsExcept:titleBar];
+    }
 
     XCBRect frameRect = [frame windowRect];
     XCBPoint relativeOffset = XCBMakePoint(anEvent->root_x - frameRect.position.x, anEvent->root_y - frameRect.position.y);
@@ -2888,8 +2890,10 @@ static XCBConnection *sharedInstance;
                 [frame raiseResizeHandle];
                 [self restackDockWindowsAbove];
                 titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar]; //TODO: Can i put all this in a single method?
-                [titleBar drawTitleBarComponents];
-                [self drawAllTitleBarsExcept:titleBar];
+                if (![titleBar isGSThemeActive]) {
+                    [titleBar drawTitleBarComponents];
+                    [self drawAllTitleBarsExcept:titleBar];
+                }
             }
         }
     }
@@ -3764,7 +3768,9 @@ static XCBConnection *sharedInstance;
         XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
         if (titleBar) {
             [titleBar setIsAbove:(anEvent->place == XCB_CIRCULATE_RAISE_LOWEST)];
-            [titleBar drawTitleBarComponents];
+            if (![titleBar isGSThemeActive]) {
+                [titleBar drawTitleBarComponents];
+            }
         }
     }
 
