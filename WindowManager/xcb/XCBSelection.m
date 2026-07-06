@@ -64,7 +64,7 @@
 
     xcb_flush([connection connection]);
 
-    NSLog(@"[XCBSelection] Set selection owner for atom %u to window %u", atom, [aWindow window]);
+    //NSLog(@"[XCBSelection] Set selection owner for atom %u to window %u", atom, [aWindow window]);
 }
 
 - (BOOL)aquireWithWindow:(XCBWindow *)aWindow replace:(BOOL)replace
@@ -77,21 +77,21 @@
         if (!replace)
             return NO;
 
-        xcb_window_t oldOwnerWindow = [currentOwner window];
-        NSLog(@"[XCBSelection] Current owner is window %u, attempting replacement", oldOwnerWindow);
+        //xcb_window_t oldOwnerWindow = [currentOwner window];
+        //NSLog(@"[XCBSelection] Current owner is window %u, attempting replacement", oldOwnerWindow);
 
         // ICCCM §2.8: Set ourselves as the new owner
         // The old owner will receive a SelectionClear event and should clean itself up
         [self setOwner:aWindow];
         
-        NSLog(@"[XCBSelection] Successfully replaced old owner window %u", oldOwnerWindow);
-        NSLog(@"[XCBSelection] Old WM should receive SelectionClear and terminate gracefully");
+        //NSLog(@"[XCBSelection] Successfully replaced old owner window %u", oldOwnerWindow);
+        //NSLog(@"[XCBSelection] Old WM should receive SelectionClear and terminate gracefully");
 
         aquired = YES;
     }
     else
     {
-        NSLog(@"[XCBSelection] No current owner, acquiring selection");
+        //NSLog(@"[XCBSelection] No current owner, acquiring selection");
         [self setOwner:aWindow];
         aquired = YES;
     }
@@ -115,7 +115,7 @@
     xcb_send_event([connection connection], false, [screen screen]->root, eventMask, (char*)&ev);
     xcb_flush([connection connection]);
     
-    NSLog(@"[XCBSelection] Sent MANAGER ClientMessage for atom %u with timestamp %u", atom, [connection currentTime]);
+    //NSLog(@"[XCBSelection] Sent MANAGER ClientMessage for atom %u with timestamp %u", atom, [connection currentTime]);
     
     screen = nil;
     ewmhService = nil;

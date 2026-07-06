@@ -67,7 +67,7 @@
 
 - (void) description
 {
-    NSLog(@"Screen number: %hd", screenNumber);
+    //NSLog(@"Screen number: %hd", screenNumber);
 }
 
 - (void) dealloc

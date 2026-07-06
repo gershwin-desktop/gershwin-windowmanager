@@ -106,8 +106,8 @@
         }
 
         [self.windowStruts setObject:strutData forKey:key];
-        NSLog(@"[ICCCM] Registered strut partial for window %u: left=%u, right=%u, top=%u, bottom=%u",
-              windowId, strutPartial[0], strutPartial[1], strutPartial[2], strutPartial[3]);
+        //NSLog(@"[ICCCM] Registered strut partial for window %u: left=%u, right=%u, top=%u, bottom=%u",
+        //      windowId, strutPartial[0], strutPartial[1], strutPartial[2], strutPartial[3]);
         return YES;
     }
 
@@ -126,8 +126,8 @@
         }
 
         [self.windowStruts setObject:strutData forKey:key];
-        NSLog(@"[ICCCM] Registered strut for window %u: left=%u, right=%u, top=%u, bottom=%u",
-              windowId, strut[0], strut[1], strut[2], strut[3]);
+        //NSLog(@"[ICCCM] Registered strut for window %u: left=%u, right=%u, top=%u, bottom=%u",
+        //      windowId, strut[0], strut[1], strut[2], strut[3]);
         return YES;
     }
 
@@ -139,7 +139,7 @@
     NSNumber *key = @(windowId);
     if ([self.windowStruts objectForKey:key]) {
         [self.windowStruts removeObjectForKey:key];
-        NSLog(@"[ICCCM] Removed strut for window %u", windowId);
+        //NSLog(@"[ICCCM] Removed strut for window %u", windowId);
         return YES;
     }
     return NO;
@@ -191,10 +191,10 @@
         self.cachedWorkareaWidth  = workareaWidth;
         self.cachedWorkareaHeight = workareaHeight;
 
-        NSLog(@"[ICCCM] Recalculated workarea: x=%d, y=%d, width=%u, height=%u "
-              @"(struts: left=%u, right=%u, top=%u, bottom=%u)",
-              workareaX, workareaY, workareaWidth, workareaHeight,
-              maxLeft, maxRight, maxTop, maxBottom);
+        //NSLog(@"[ICCCM] Recalculated workarea: x=%d, y=%d, width=%u, height=%u "
+        //      @"(struts: left=%u, right=%u, top=%u, bottom=%u)",
+        //      workareaX, workareaY, workareaWidth, workareaHeight,
+        //      maxLeft, maxRight, maxTop, maxBottom);
 
         EWMHService *ewmhService =
             [EWMHService sharedInstanceWithConnection:self.connection];

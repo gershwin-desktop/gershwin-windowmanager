@@ -99,7 +99,7 @@
         return NO;
     }
     
-    NSLog(@"XFixes extension initialized with version %d.%d", versionReply->major_version, versionReply->minor_version);
+    //NSLog(@"XFixes extension initialized with version %d.%d", versionReply->major_version, versionReply->minor_version);
     
     free(reply);
     free(versionReply);

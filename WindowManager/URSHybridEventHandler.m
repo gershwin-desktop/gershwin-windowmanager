@@ -93,9 +93,9 @@
                                   boolForKey:@"URSCompositingEnabled"];
     
     if (self.compositingRequested) {
-        NSLog(@"[WindowManager] Compositing requested - will attempt to initialize");
+        //NSLog(@"[WindowManager] Compositing requested - will attempt to initialize");
     } else {
-        NSLog(@"[WindowManager] Compositing disabled - using direct rendering");
+        //NSLog(@"[WindowManager] Compositing disabled - using direct rendering");
     }
 
     return self;
@@ -146,7 +146,7 @@
 
 - (void)applicationWillTerminate:(NSNotification *)notification
 {
-    NSLog(@"[WindowManager] Application terminating - performing full cleanup");
+    //NSLog(@"[WindowManager] Application terminating - performing full cleanup");
     [self cleanupBeforeExit];
 }
 
@@ -159,9 +159,9 @@
 #pragma mark - Compositing Management
 
 - (void)initializeCompositing {
-    NSLog(@"[WindowManager] ================================================");
-    NSLog(@"[WindowManager] Initializing XRender compositing (experimental)");
-    NSLog(@"[WindowManager] ================================================");
+    //NSLog(@"[WindowManager] ================================================");
+    //NSLog(@"[WindowManager] Initializing XRender compositing (experimental)");
+    //NSLog(@"[WindowManager] ================================================");
     
     @try {
         // Create compositing manager singleton
@@ -171,9 +171,9 @@
         BOOL initialized = [self.compositingManager initializeWithConnection:self.connection];
         
         if (!initialized) {
-            NSLog(@"[WindowManager] ⚠️  Compositing initialization failed");
-            NSLog(@"[WindowManager] ⚠️  Falling back to direct rendering (traditional mode)");
-            NSLog(@"[WindowManager] ⚠️  Windows will render normally without compositing");
+            //NSLog(@"[WindowManager] ⚠️  Compositing initialization failed");
+            //NSLog(@"[WindowManager] ⚠️  Falling back to direct rendering (traditional mode)");
+            //NSLog(@"[WindowManager] ⚠️  Windows will render normally without compositing");
             self.compositingManager = nil;
             return;
         }
@@ -182,21 +182,21 @@
         BOOL activated = [self.compositingManager activateCompositing];
         
         if (!activated) {
-            NSLog(@"[WindowManager] ⚠️  Compositing activation failed");
-            NSLog(@"[WindowManager] ⚠️  Falling back to direct rendering (traditional mode)");
-            NSLog(@"[WindowManager] ⚠️  Windows will render normally without compositing");
+            //NSLog(@"[WindowManager] ⚠️  Compositing activation failed");
+            //NSLog(@"[WindowManager] ⚠️  Falling back to direct rendering (traditional mode)");
+            //NSLog(@"[WindowManager] ⚠️  Windows will render normally without compositing");
             [self.compositingManager cleanup];
             self.compositingManager = nil;
             return;
         }
         
-        NSLog(@"[WindowManager] ✓ Compositing successfully activated!");
-        NSLog(@"[WindowManager] ✓ Windows will use XRender for transparency effects");
-        NSLog(@"[WindowManager] ================================================");
+        //NSLog(@"[WindowManager] ✓ Compositing successfully activated!");
+        //NSLog(@"[WindowManager] ✓ Windows will use XRender for transparency effects");
+        //NSLog(@"[WindowManager] ================================================");
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowManager] ❌ EXCEPTION initializing compositing: %@", exception.reason);
-        NSLog(@"[WindowManager] ❌ Falling back to non-compositing mode");
+        //NSLog(@"[WindowManager] ❌ Falling back to non-compositing mode");
         if (self.compositingManager) {
             [self.compositingManager cleanup];
             self.compositingManager = nil;
@@ -225,11 +225,11 @@
                                                     withValueList:NULL
                                                   registerWindow:YES];
 
-    NSLog(@"[WindowManager] Attempting to become WM (replace existing if needed)...");
+    //NSLog(@"[WindowManager] Attempting to become WM (replace existing if needed)...");
     BOOL registered = [connection registerAsWindowManager:YES screenId:0 selectionWindow:selectionManagerWindow];
 
     if (!registered) {
-        NSLog(@"[WindowManager] Existing WM detected; trying to replace it");
+        //NSLog(@"[WindowManager] Existing WM detected; trying to replace it");
         registered = [connection registerAsWindowManager:NO screenId:0 selectionWindow:selectionManagerWindow];
     }
 
@@ -238,7 +238,7 @@
         return NO;
     }
 
-    NSLog(@"[WindowManager] Successfully registered as window manager");
+    //NSLog(@"[WindowManager] Successfully registered as window manager");
 
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
     [ewmhService putPropertiesForRootWindow:[screen rootWindow] andWmWindow:selectionManagerWindow];
@@ -268,7 +268,7 @@
         xcb_window_t *children = [tree queryTreeAsArray];
         uint32_t childCount = tree.childrenLen;
 
-        NSLog(@"[WindowManager] Decorating %u pre-existing windows", childCount);
+        //NSLog(@"[WindowManager] Decorating %u pre-existing windows", childCount);
 
         connection.adoptingExistingWindows = YES;
         for (uint32_t i = 0; i < childCount; i++) {
@@ -284,34 +284,34 @@
             XCBAttributesReply *attrs = [win attributes];
 
             if (!attrs) {
-                NSLog(@"[WindowManager] Skipping window %u (no attributes)", winId);
+                //NSLog(@"[WindowManager] Skipping window %u (no attributes)", winId);
                 continue;
             }
 
             // Ignore override-redirect windows for decoration
             if (attrs.overrideRedirect) {
-                NSLog(@"[WindowManager] Skipping window %u (override-redirect)", winId);
+                //NSLog(@"[WindowManager] Skipping window %u (override-redirect)", winId);
                 continue;
             }
 
             if (attrs.mapState != XCB_MAP_STATE_VIEWABLE) {
-                NSLog(@"[WindowManager] Skipping window %u (mapState %u)", winId, attrs.mapState);
+                //NSLog(@"[WindowManager] Skipping window %u (mapState %u)", winId, attrs.mapState);
                 continue;
             }
             
             // Check if this is a dock window with struts - scan for struts even if already managed
             if ([ewmhService isWindowTypeDock:win]) {
-                NSLog(@"[WindowManager] Found dock window %u at startup - checking for struts", winId);
+                //NSLog(@"[WindowManager] Found dock window %u at startup - checking for struts", winId);
                 [self.workareaManager readAndRegisterStrutForWindow:winId];
             }
 
             // Skip already-managed windows
             if ([connection windowForXCBId:winId]) {
-                NSLog(@"[WindowManager] Window %u already managed; skipping", winId);
+                //NSLog(@"[WindowManager] Window %u already managed; skipping", winId);
                 continue;
             }
 
-            NSLog(@"[WindowManager] Adopting existing window %u", winId);
+            //NSLog(@"[WindowManager] Adopting existing window %u", winId);
 
             // Synthesize a map request so normal decoration flow runs
             xcb_map_request_event_t mapEvent = {0};
@@ -733,7 +733,7 @@
             EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
             XCBWindow *tempWindow = [[XCBWindow alloc] initWithXCBWindow:mapRequestEvent->window andConnection:connection];
             if ([ewmhService isWindowTypeDock:tempWindow]) {
-                NSLog(@"[WindowManager] Dock window %u being mapped - checking for struts", mapRequestEvent->window);
+                //NSLog(@"[WindowManager] Dock window %u being mapped - checking for struts", mapRequestEvent->window);
                 [self.workareaManager readAndRegisterStrutForWindow:mapRequestEvent->window];
                 [self.workareaManager recalculateWorkarea];
             }
@@ -743,34 +743,16 @@
             // Resize window to 70% of screen size before mapping
             [self resizeWindowTo70Percent:mapRequestEvent->window];
 
-            // Redirect the client window BEFORE it is mapped, so the
-            // Composite backing pixmap captures all initial content.
-            // If redirect happens after mapping, the backing pixmap
-            // starts undefined (grey) and the window's existing content
-            // is lost.
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager redirectWindow:mapRequestEvent->window];
-            }
-
             // Let XCBConnection handle the map request (creates frame for managed windows)
             [connection handleMapRequest:mapRequestEvent];
 
-            // Redirect the frame window so its backing pixmap is ready
-            // before GSTheme renders to it.  The frame is freshly created
-            // and has no content yet, so redirecting after map is safe.
             XCBWindow *mappedClient = [connection windowForXCBId:mapRequestEvent->window];
-            if (mappedClient && [[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
-                XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
-                if (self.compositingManager && [self.compositingManager compositingActive]) {
-                    [self.compositingManager redirectWindow:[frame window]];
-                }
-            }
 
             // Check if handleMapRequest created a frame for this window.
             // Unframed windows (menus, popups, tooltips, transients) only need
             // compositor registration — skip theme, focus, and border processing.
             if (!mappedClient || ![[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
-                NSLog(@"[WindowManager] Unframed window %u - skipping post-processing", mapRequestEvent->window);
+                //NSLog(@"[WindowManager] Unframed window %u - skipping post-processing", mapRequestEvent->window);
                 if (self.compositingManager && [self.compositingManager compositingActive]) {
                     [self.compositingManager registerWindow:mapRequestEvent->window];
                 }
@@ -781,14 +763,14 @@
 
             // Register window with compositor if active
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                NSLog(@"[HybridEventHandler] Registering window %u with compositor (compositingActive=%d)", mapRequestEvent->window, (int)[self.compositingManager compositingActive]);
+                //NSLog(@"[HybridEventHandler] Registering window %u with compositor (compositingActive=%d)", mapRequestEvent->window, (int)[self.compositingManager compositingActive]);
                 [self.compositingManager registerWindow:mapRequestEvent->window];
-                NSLog(@"[HybridEventHandler] Registered client window %u", mapRequestEvent->window);
+                //NSLog(@"[HybridEventHandler] Registered client window %u", mapRequestEvent->window);
                 // Register any existing child windows so their damage events are tracked
                 [self registerChildWindowsForCompositor:mapRequestEvent->window depth:3];
                 // Register children of the frame too
                 XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
-                NSLog(@"[HybridEventHandler] Registering frame window %u for client %u", [frame window], mapRequestEvent->window);
+                //NSLog(@"[HybridEventHandler] Registering frame window %u for client %u", [frame window], mapRequestEvent->window);
                 [self.compositingManager registerWindow:[frame window]];
                 [self registerChildWindowsForCompositor:[frame window] depth:3];
             }
@@ -920,7 +902,7 @@
             uint8_t responseType = event->response_type & ~0x80;
             uint8_t damageBase = self.compositingManager ? [self.compositingManager damageEventBase] : 0;
             if (responseType > 64 && responseType != damageBase) { // Extension events except DAMAGE
-                NSLog(@"[Event] Unhandled extension event: response_type=%u", responseType);
+                //NSLog(@"[Event] Unhandled extension event: response_type=%u", responseType);
             }
             [self handleExtensionEvent:event];
             break;
@@ -1016,7 +998,7 @@
         return;
     }
 
-    NSLog(@"GSTheme: Applying theme to new titlebar for window: %@", titlebar.windowTitle);
+    //NSLog(@"GSTheme: Applying theme to new titlebar for window: %@", titlebar.windowTitle);
 
     // Register with theme integration
     [[URSThemeIntegration sharedInstance] handleWindowCreated:titlebar];
@@ -1024,14 +1006,14 @@
     // Newly mapped windows almost always become the active (focused) window,
     // so render them as active immediately.  If they don't actually get focus,
     // the next FocusIn event will correct them.
-    BOOL success = [URSThemeIntegration renderGSThemeTitlebar:titlebar
-                                                        title:titlebar.windowTitle
-                                                       active:YES];
+    //BOOL success = [URSThemeIntegration renderGSThemeTitlebar:titlebar
+    //                                                    title:titlebar.windowTitle
+    //                                                   active:YES];
 
-    if (!success) {
-        NSLog(@"GSTheme rendering failed for titlebar, falling back to default titlebar path");
+    //if (!success) {
+        //NSLog(@"GSTheme rendering failed for titlebar, falling back to default titlebar path");
         // XCBTitleBar will fall back to its default titlebar rendering
-    }
+    //}
 }
 
 - (void)handleFocusChange:(xcb_window_t)windowId isActive:(BOOL)isActive {
@@ -1123,7 +1105,7 @@
         }
 
         if (!titlebar) {
-            NSLog(@"handleFocusChange: No titlebar found for window %u", windowId);
+            //NSLog(@"handleFocusChange: No titlebar found for window %u", windowId);
             // If we deactivated the previous window above (isActive == YES)
             // but the current window has no titlebar, still clear stale focus.
             if (isActive) {
@@ -1132,7 +1114,7 @@
             return;
         }
 
-        NSLog(@"GSTheme: Focus %@ for window %@", isActive ? @"gained" : @"lost", titlebar.windowTitle);
+        //NSLog(@"GSTheme: Focus %@ for window %@", isActive ? @"gained" : @"lost", titlebar.windowTitle);
 
         if (isActive) {
             XCBWindow *clientWindow = [self.focusManager clientWindowForWindow:window fallbackFrame:frame];
@@ -1183,7 +1165,7 @@
         return;
     }
 
-    NSLog(@"GSTheme: Focus changed for window %@ (active: %d)", titlebar.windowTitle, active);
+    //NSLog(@"GSTheme: Focus changed for window %@ (active: %d)", titlebar.windowTitle, active);
 
     // Update theme integration
     [[URSThemeIntegration sharedInstance] handleWindowFocusChanged:titlebar isActive:active];
@@ -1195,14 +1177,14 @@
 }
 
 - (void)refreshAllManagedWindows {
-    NSLog(@"GSTheme: Refreshing all managed windows with current theme");
+    //NSLog(@"GSTheme: Refreshing all managed windows with current theme");
     xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
     [URSThemeIntegration refreshAllTitlebarsWithFocusedWindow:focusedId];
 }
 
 - (void)handleMapRequestWithGSTheme:(xcb_map_request_event_t*)mapRequestEvent {
     @try {
-        NSLog(@"Intercepting map request for window %u - using GSTheme-only decoration", mapRequestEvent->window);
+        //NSLog(@"Intercepting map request for window %u - using GSTheme-only decoration", mapRequestEvent->window);
 
         // Let XCBConnection handle the map request BUT don't let it decorate with XCBKit
         // We need to duplicate XCBConnection's handleMapRequest logic but skip the decorateClientWindow call
@@ -1214,7 +1196,7 @@
         xcb_get_geometry_reply_t *geom_reply = xcb_get_geometry_reply([connection connection], geom_cookie, NULL);
 
         if (geom_reply) {
-            NSLog(@"Window geometry: %dx%d at %d,%d", geom_reply->width, geom_reply->height, geom_reply->x, geom_reply->y);
+            //NSLog(@"Window geometry: %dx%d at %d,%d", geom_reply->width, geom_reply->height, geom_reply->x, geom_reply->y);
 
             // Create frame without XCBKit titlebar decoration
             XCBWindow *clientWindow = [connection windowForXCBId:requestWindow];
@@ -1229,7 +1211,7 @@
             // Create frame for the window (this will create the structure but we'll handle decoration)
             XCBFrame *frame = [[XCBFrame alloc] initWithClientWindow:clientWindow withConnection:connection];
 
-            NSLog(@"Created frame for client window, will apply GSTheme-only decoration");
+            //NSLog(@"Created frame for client window, will apply GSTheme-only decoration");
 
             // Map the frame and client window
             [connection mapWindow:frame];
@@ -1256,7 +1238,7 @@
 
 - (void)applyGSThemeOnlyDecoration:(XCBFrame*)frame {
     @try {
-        NSLog(@"Applying GSTheme-only decoration to frame");
+        //NSLog(@"Applying GSTheme-only decoration to frame");
 
         // Get the titlebar from the frame
         XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
@@ -1271,7 +1253,7 @@
                                                                active:YES];
 
             if (success) {
-                NSLog(@"GSTheme-only decoration applied successfully");
+                //NSLog(@"GSTheme-only decoration applied successfully");
 
                 // Add to managed list
                 URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
@@ -1279,10 +1261,10 @@
                     [integration.managedTitlebars addObject:titlebar];
                 }
             } else {
-                NSLog(@"GSTheme-only decoration failed");
+                //NSLog(@"GSTheme-only decoration failed");
             }
         } else {
-            NSLog(@"No titlebar found in frame for GSTheme decoration");
+            //NSLog(@"No titlebar found in frame for GSTheme decoration");
         }
 
     } @catch (NSException *exception) {
@@ -1312,7 +1294,7 @@
                 }
 
                 if (frame) {
-                    NSLog(@"Titlebar %u exposed, re-applying GSTheme", exposedWindow);
+                    //NSLog(@"Titlebar %u exposed, re-applying GSTheme", exposedWindow);
 
                     // Determine whether this window actually has keyboard focus
                     XCBWindow *exposeClient = [frame childWindowForKey:ClientWindow];
@@ -1355,7 +1337,7 @@
                 sizeHints.min_width == sizeHints.max_width &&
                 sizeHints.min_height == sizeHints.max_height) {
 
-                NSLog(@"Fixed-size window %u detected - removing border and extra buttons", clientWindowId);
+                //NSLog(@"Fixed-size window %u detected - removing border and extra buttons", clientWindowId);
 
                 // Register as fixed-size window (for button hiding in GSTheme rendering)
                 [URSThemeIntegration registerFixedSizeWindow:clientWindowId];
@@ -1364,7 +1346,7 @@
                 XCBWindow *clientW = [connection windowForXCBId:clientWindowId];
                 if (clientW) {
                     [clientW setCanResize:NO];
-                    NSLog(@"Marked client window %u as non-resizable (canResize=NO)", clientWindowId);
+                    //NSLog(@"Marked client window %u as non-resizable (canResize=NO)", clientWindowId);
                 }
 
                 // Find the frame for this client window and set its border to 0
@@ -1384,7 +1366,7 @@
                                                  XCB_CONFIG_WINDOW_BORDER_WIDTH,
                                                  borderWidth);
                             [connection flush];
-                            NSLog(@"Removed border from frame %u for fixed-size window %u", [frame window], clientWindowId);
+                            //NSLog(@"Removed border from frame %u for fixed-size window %u", [frame window], clientWindowId);
                             return;
                         }
                     }
@@ -1403,8 +1385,8 @@
         // is handled precisely by XCBConnection's handleMapRequest during the map sequence.
         XCBWindow *existingWindow = [connection windowForXCBId:clientWindowId];
         if (existingWindow && ([existingWindow decorated] || [existingWindow isMinimized])) {
-            NSLog(@"[WindowManager] Skipping automatic resize for already-managed window %u (decorated=%d, minimized=%d)", 
-                  clientWindowId, [existingWindow decorated], [existingWindow isMinimized]);
+            //NSLog(@"[WindowManager] Skipping automatic resize for already-managed window %u (decorated=%d, minimized=%d)", 
+                  //clientWindowId, [existingWindow decorated], [existingWindow isMinimized]);
             return;
         }
 
@@ -1436,7 +1418,7 @@
                     (sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_MAX_SIZE) &&
                     sizeHints.min_width == sizeHints.max_width &&
                     sizeHints.min_height == sizeHints.max_height) {
-                    NSLog(@"resizeWindowTo70Percent: client %u is fixed-size; skipping WM defaults", clientWindowId);
+                    //NSLog(@"resizeWindowTo70Percent: client %u is fixed-size; skipping WM defaults", clientWindowId);
                     free(geom_reply);
                     return;
                 }
@@ -1513,14 +1495,14 @@
                              XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
                                      sizeValues);
                 [connection flush];
-                NSLog(@"Window %u exceeds 90%% of screen (%ux%u). Clamped to 80%% (%ux%u) and placed at (%u,%u) before map.",
-                      clientWindowId,
-                      geom_reply->width,
-                      geom_reply->height,
-                      clampedWidth,
-                    clampedHeight,
-                    defaultX,
-                    defaultY);
+                //NSLog(@"Window %u exceeds 90%% of screen (%ux%u). Clamped to 80%% (%ux%u) and placed at (%u,%u) before map.",
+                      //clientWindowId,
+                      //geom_reply->width,
+                      //geom_reply->height,
+                      //clampedWidth,
+                    //clampedHeight,
+                    //defaultX,
+                    //defaultY);
             }
 
             // Only apply WM default placement if:
@@ -1536,8 +1518,8 @@
                 // dialogs get centered (golden ratio), other windows get 22,44 offset.
                 uint16_t defaultX = isDialogWindow ? goldenPosX : 22;
                 uint16_t defaultY = isDialogWindow ? goldenPosY : 44;
-                NSLog(@"Window %u starts at origin (0,0) but is not full-width (%u). Applying default placement (%u,%u) to avoid x=0 default.",
-                      clientWindowId, geom_reply->width, defaultX, defaultY);
+                //NSLog(@"Window %u starts at origin (0,0) but is not full-width (%u). Applying default placement (%u,%u) to avoid x=0 default.",
+                      //clientWindowId, geom_reply->width, defaultX, defaultY);
                 
                 uint32_t configValues[] = {defaultX, defaultY};
                 xcb_configure_window([connection connection],
@@ -1546,14 +1528,14 @@
                                      configValues);
                 [connection flush];
             } else if (isDesktopWindow || isFullscreenState) {
-                NSLog(@"Window %u is desktop or fullscreen window. Skipping WM defaults (isDesktop=%d, isFullscreen=%d)",
-                      clientWindowId, isDesktopWindow, isFullscreenState);
+                //NSLog(@"Window %u is desktop or fullscreen window. Skipping WM defaults (isDesktop=%d, isFullscreen=%d)",
+                      //clientWindowId, isDesktopWindow, isFullscreenState);
             } else if (isAtOrigin && isFullScreenSize) {
-                NSLog(@"Window %u is exactly full screen size at origin; skipping >90%% clamp per 100%% exception.",
-                      clientWindowId);
+                //NSLog(@"Window %u is exactly full screen size at origin; skipping >90%% clamp per 100%% exception.",
+                      //clientWindowId);
             } else {
-                NSLog(@"Window %u has app-determined geometry (%ux%u at %d,%d). Respecting app preferences",
-                      clientWindowId, geom_reply->width, geom_reply->height, geom_reply->x, geom_reply->y);
+                //NSLog(@"Window %u has app-determined geometry (%ux%u at %d,%d). Respecting app preferences",
+                      //clientWindowId, geom_reply->width, geom_reply->height, geom_reply->x, geom_reply->y);
             }
             free(geom_reply);
         }
@@ -1566,7 +1548,7 @@
     @try {
         xcb_window_t windowId = [windowIdNumber unsignedIntValue];
 
-        NSLog(@"Applying GSTheme to recently mapped window: %u", windowId);
+        //NSLog(@"Applying GSTheme to recently mapped window: %u", windowId);
 
         // Find the frame for this client window
         NSDictionary *windowsMap = [self.connection windowsMap];
@@ -1585,7 +1567,7 @@
                     if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
                         XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
 
-                        NSLog(@"Found frame for client window %u, applying GSTheme to titlebar", windowId);
+                        //NSLog(@"Found frame for client window %u, applying GSTheme to titlebar", windowId);
 
                         // Apply GSTheme rendering (this will override XCBKit's decoration).
                         // Newly mapped windows almost always get focus, so default active.
@@ -1601,8 +1583,8 @@
                                 [integration.managedTitlebars addObject:titlebar];
                             }
 
-                            NSLog(@"Successfully applied GSTheme to titlebar for window %u: %@",
-                                  windowId, titlebar.windowTitle ?: @"(untitled)");
+                            //NSLog(@"Successfully applied GSTheme to titlebar for window %u: %@",
+                                  //windowId, titlebar.windowTitle ?: @"(untitled)");
 
                             // Paint the GSTheme content into the titlebar's backing store NOW,
                             // before the compositor takes its first NameWindowPixmap snapshot.
@@ -1637,7 +1619,7 @@
         // Attempt a direct focus on the client window as a fallback.
         XCBWindow *directWindow = [self.connection windowForXCBId:windowId];
         if (directWindow) {
-            NSLog(@"[Focus] No frame found for %u; attempting direct focus on window %u", windowId, [directWindow window]);
+            //NSLog(@"[Focus] No frame found for %u; attempting direct focus on window %u", windowId, [directWindow window]);
             if ([self.focusManager isWindowFocusable:directWindow allowDesktop:NO]) {
                 [self performSelector:@selector(focusWindowAfterThemeApplied:)
                            withObject:directWindow
@@ -1657,7 +1639,7 @@
     @try {
         if (!titlebar) return;
 
-        NSLog(@"Reapplying GSTheme to titlebar: %@", titlebar.windowTitle);
+        //NSLog(@"Reapplying GSTheme to titlebar: %@", titlebar.windowTitle);
 
         // Find the frame containing this titlebar
         NSDictionary *windowsMap = [self.connection windowsMap];
@@ -1681,7 +1663,7 @@
                                                          frame:frame
                                                          title:titlebar.windowTitle
                                                         active:reapplyIsActive];
-                    NSLog(@"GSTheme reapplied to titlebar: %@", titlebar.windowTitle);
+                    //NSLog(@"GSTheme reapplied to titlebar: %@", titlebar.windowTitle);
                     
                     // Notify compositor about the content change
                     if (self.compositingManager && [self.compositingManager compositingActive]) {
@@ -1777,8 +1759,8 @@
     if (!spatialPath || [spatialPath length] == 0)
         return NO;
 
-    NSLog(@"[SpatialPath] Modifier+click on titlebar for client %u, path='%@'",
-          clientId, spatialPath);
+    //NSLog(@"[SpatialPath] Modifier+click on titlebar for client %u, path='%@'",
+          //clientId, spatialPath);
 
     /* Release the implicit grab so the menu can track */
     xcb_allow_events([self.connection connection],
@@ -1838,8 +1820,8 @@
     /* Store reference to the client window for the menu action */
     _spatialPathClientWindow = clientId;
 
-    NSLog(@"[SpatialPath] Showing path popup at (%.0f, %.0f) for '%@'",
-          menuLocation.x, menuLocation.y, spatialPath);
+    //NSLog(@"[SpatialPath] Showing path popup at (%.0f, %.0f) for '%@'",
+          //menuLocation.x, menuLocation.y, spatialPath);
 
     [NSMenu popUpContextMenu:menu withEvent:menuEvent forView:nil];
 
@@ -1854,8 +1836,8 @@
         return;
     }
 
-    NSLog(@"[SpatialPath] User selected path '%@' for client window %u",
-          targetPath, _spatialPathClientWindow);
+    //NSLog(@"[SpatialPath] User selected path '%@' for client window %u",
+          //targetPath, _spatialPathClientWindow);
 
     /* Write the target path to _GW_SPATIAL_NAVIGATE on the client window */
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self.connection];
@@ -1880,8 +1862,8 @@
                         cpath);
     [self.connection flush];
 
-    NSLog(@"[SpatialPath] Wrote '%@' to _GW_SPATIAL_NAVIGATE on window %u",
-          targetPath, _spatialPathClientWindow);
+    //NSLog(@"[SpatialPath] Wrote '%@' to _GW_SPATIAL_NAVIGATE on window %u",
+          //targetPath, _spatialPathClientWindow);
 
     _spatialPathClientWindow = XCB_NONE;
 }
@@ -1944,7 +1926,7 @@
 #pragma mark - Cleanup
 
 - (void)cleanupRootWindowEventMask {
-    NSLog(@"[WindowManager] Cleaning up root window event mask");
+    //NSLog(@"[WindowManager] Cleaning up root window event mask");
     
     @try {
         XCBScreen *screen = [[connection screens] objectAtIndex:0];
@@ -1959,7 +1941,7 @@
                                             checked:NO];
         
         if (success) {
-            NSLog(@"[WindowManager] Successfully restored root window event mask");
+            //NSLog(@"[WindowManager] Successfully restored root window event mask");
         } else {
             NSLog(@"[WindowManager] Warning: Failed to restore root window event mask");
         }
@@ -1973,43 +1955,43 @@
 
 - (void)cleanupBeforeExit
 {
-    NSLog(@"[WindowManager] ========== Starting comprehensive cleanup ==========");
+    //NSLog(@"[WindowManager] ========== Starting comprehensive cleanup ==========");
     
     @try {
         // Step 0: Clean up compositing if active
         if (self.compositingManager && [self.compositingManager compositingActive]) {
-            NSLog(@"[WindowManager] Step 0: Deactivating compositing");
+            //NSLog(@"[WindowManager] Step 0: Deactivating compositing");
             [self.compositingManager deactivateCompositing];
             [self.compositingManager cleanup];
             self.compositingManager = nil;
         }
         
         // Step 1: Clean up keyboard grabs
-        NSLog(@"[WindowManager] Step 1: Cleaning up keyboard grabs");
+        //NSLog(@"[WindowManager] Step 1: Cleaning up keyboard grabs");
         [self.keyboardManager cleanupKeyboardGrabbing];
         
         // Step 2: Undecorate and restore all client windows
-        NSLog(@"[WindowManager] Step 2: Restoring all client windows");
+        //NSLog(@"[WindowManager] Step 2: Restoring all client windows");
         [self undecoratAllWindows];
         
         // Step 3: Clear EWMH properties
-        NSLog(@"[WindowManager] Step 3: Clearing EWMH properties");
+        //NSLog(@"[WindowManager] Step 3: Clearing EWMH properties");
         [self clearEWMHProperties];
         
         // Step 4: Release window manager selection ownership
-        NSLog(@"[WindowManager] Step 4: Releasing WM selection ownership");
+        //NSLog(@"[WindowManager] Step 4: Releasing WM selection ownership");
         [self releaseWMSelection];
         
         // Step 5: Restore root window event mask
-        NSLog(@"[WindowManager] Step 5: Restoring root window event mask");
+        //NSLog(@"[WindowManager] Step 5: Restoring root window event mask");
         [self cleanupRootWindowEventMask];
         
         // Step 6: Flush all changes to X server
-        NSLog(@"[WindowManager] Step 6: Flushing changes to X server");
+        //NSLog(@"[WindowManager] Step 6: Flushing changes to X server");
         [connection flush];
         xcb_aux_sync([connection connection]);
         
-        NSLog(@"[WindowManager] ========== Cleanup completed successfully ==========");
+        //NSLog(@"[WindowManager] ========== Cleanup completed successfully ==========");
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowManager] Exception during cleanup: %@", exception.reason);
@@ -2020,17 +2002,17 @@
 {
     @try {
         if (!connection) {
-            NSLog(@"[WindowManager] No connection available for window cleanup");
+            //NSLog(@"[WindowManager] No connection available for window cleanup");
             return;
         }
         
         NSDictionary *windowsMap = [connection windowsMap];
         if (!windowsMap || [windowsMap count] == 0) {
-            NSLog(@"[WindowManager] No windows to clean up");
+            //NSLog(@"[WindowManager] No windows to clean up");
             return;
         }
         
-        NSLog(@"[WindowManager] Cleaning up %lu managed windows", (unsigned long)[windowsMap count]);
+        //NSLog(@"[WindowManager] Cleaning up %lu managed windows", (unsigned long)[windowsMap count]);
         
         XCBScreen *screen = [[connection screens] objectAtIndex:0];
         XCBWindow *rootWindow = [screen rootWindow];
@@ -2045,7 +2027,7 @@
             }
         }
         
-        NSLog(@"[WindowManager] Found %lu frames to clean up", (unsigned long)[framesToCleanup count]);
+        //NSLog(@"[WindowManager] Found %lu frames to clean up", (unsigned long)[framesToCleanup count]);
         
         // Clean up each frame
         for (XCBFrame *frame in framesToCleanup) {
@@ -2053,7 +2035,7 @@
                 XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
                 
                 if (clientWindow) {
-                    NSLog(@"[WindowManager] Restoring client window %u", [clientWindow window]);
+                    //NSLog(@"[WindowManager] Restoring client window %u", [clientWindow window]);
 
                     // Translate client coordinates to root-space before reparenting.
                     // clientWindow.windowRect is relative to the frame and causes
@@ -2093,7 +2075,7 @@
                     // Mark client as not decorated
                     [clientWindow setDecorated:NO];
                     
-                    NSLog(@"[WindowManager] Client window %u restored to root at %d,%d", [clientWindow window], rootX, rootY);
+                    //NSLog(@"[WindowManager] Client window %u restored to root at %d,%d", [clientWindow window], rootX, rootY);
                 }
                 
                 // Destroy the frame window (this will also clean up titlebar and buttons)
@@ -2115,7 +2097,7 @@
 {
     @try {
         if (!connection) {
-            NSLog(@"[WindowManager] No connection available for EWMH cleanup");
+            //NSLog(@"[WindowManager] No connection available for EWMH cleanup");
             return;
         }
         
@@ -2123,7 +2105,7 @@
         XCBWindow *rootWindow = [screen rootWindow];
         EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
         
-        NSLog(@"[WindowManager] Clearing EWMH properties from root window");
+        //NSLog(@"[WindowManager] Clearing EWMH properties from root window");
         
         // Clear _NET_SUPPORTING_WM_CHECK
         xcb_delete_property([connection connection],
@@ -2146,7 +2128,7 @@
                           [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHClientListStacking]]);
         
         [connection flush];
-        NSLog(@"[WindowManager] EWMH properties cleared");
+        //NSLog(@"[WindowManager] EWMH properties cleared");
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowManager] Exception clearing EWMH properties: %@", exception.reason);
@@ -2157,11 +2139,11 @@
 {
     @try {
         if (!connection) {
-            NSLog(@"[WindowManager] No connection available for selection release");
+            //NSLog(@"[WindowManager] No connection available for selection release");
             return;
         }
         
-        NSLog(@"[WindowManager] Releasing WM_S0 selection ownership");
+        //NSLog(@"[WindowManager] Releasing WM_S0 selection ownership");
         
         XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
         xcb_atom_t wmS0Atom = [atomService atomFromCachedAtomsWithKey:@"WM_S0"];
@@ -2174,7 +2156,7 @@
                                    XCB_CURRENT_TIME);
             
             [connection flush];
-            NSLog(@"[WindowManager] WM_S0 selection released");
+            //NSLog(@"[WindowManager] WM_S0 selection released");
         } else {
             NSLog(@"[WindowManager] Warning: Could not find WM_S0 atom");
         }
@@ -2191,8 +2173,8 @@
     
     // Check if this is the WM_S0 selection being cleared (we're being replaced)
     if (event->selection == wmS0Atom) {
-        NSLog(@"[WindowManager] WM_S0 selection cleared - another WM is taking over");
-        NSLog(@"[WindowManager] Timestamp: %u, Owner: %u", event->time, event->owner);
+        //NSLog(@"[WindowManager] WM_S0 selection cleared - another WM is taking over");
+        //NSLog(@"[WindowManager] Timestamp: %u, Owner: %u", event->time, event->owner);
         
         // Initiate clean shutdown
         [self cleanupBeforeExit];
@@ -2201,15 +2183,15 @@
         if (selectionManagerWindow) {
             xcb_destroy_window([connection connection], [selectionManagerWindow window]);
             [connection flush];
-            NSLog(@"[WindowManager] Selection manager window destroyed");
+            //NSLog(@"[WindowManager] Selection manager window destroyed");
         }
         
         // Terminate the application gracefully
-        NSLog(@"[WindowManager] Terminating to allow new WM to take over");
+        //NSLog(@"[WindowManager] Terminating to allow new WM to take over");
         [NSApp terminate:nil];
     } else {
-        NSString *selectionName = [atomService atomNameFromAtom:event->selection];
-        NSLog(@"[WindowManager] SelectionClear for non-WM selection: %@", selectionName);
+        //NSString *selectionName = [atomService atomNameFromAtom:event->selection];
+        ////NSLog(@"[WindowManager] SelectionClear for non-WM selection: %@", selectionName);
     }
 }
 

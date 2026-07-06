@@ -901,10 +901,11 @@
                     [frame setOldRect:[frame windowRect]];
 
                     // Respect client resizability: do nothing if the client is non-resizable
-                    XCBWindow *clientWin = (XCBWindow*)[frame childWindowForKey:ClientWindow];
-                    if (clientWin && ![clientWin canResize]) {
-                        NSLog(@"[EWMH] Skipping horizontal maximize for non-resizable client %u", [clientWin window]);
-                    } else {
+                    //XCBWindow *clientWin = (XCBWindow*)[frame childWindowForKey:ClientWindow];
+                    //if (clientWin && ![clientWin canResize]) {
+                    //    NSLog(@"[EWMH] Skipping horizontal maximize for non-resizable client %u", [clientWin window]);
+                    //} else
+                    {
                         /*** Use programmaticResizeToRect - keeps width, expands to workarea width ***/
                         XCBRect targetRect = XCBMakeRect(
                             XCBMakePoint(workareaX, [frame windowRect].position.y),
@@ -923,9 +924,10 @@
                 }
                 else
                 {
-                    if (![aWindow canResize]) {
-                        NSLog(@"[EWMH] Skipping horizontal maximize for non-resizable undecorated client %u", [aWindow window]);
-                    } else {
+                    //if (![aWindow canResize]) {
+                    //    NSLog(@"[EWMH] Skipping horizontal maximize for non-resizable undecorated client %u", [aWindow window]);
+                    //} else
+                    {
                         size = XCBMakeSize(workareaWidth, [aWindow windowRect].size.height);
                         position = XCBMakePoint(workareaX, [aWindow windowRect].position.y);
                         [aWindow maximizeToSize:size andPosition:position];
@@ -969,10 +971,11 @@
                     [frame setOldRect:[frame windowRect]];
 
                     // Respect client resizability: do nothing if the client is non-resizable
-                    XCBWindow *clientWin = (XCBWindow*)[frame childWindowForKey:ClientWindow];
-                    if (clientWin && ![clientWin canResize]) {
-                        NSLog(@"[EWMH] Skipping vertical maximize for non-resizable client %u", [clientWin window]);
-                    } else {
+                    //XCBWindow *clientWin = (XCBWindow*)[frame childWindowForKey:ClientWindow];
+                    //if (clientWin && ![clientWin canResize]) {
+                    //    NSLog(@"[EWMH] Skipping vertical maximize for non-resizable client %u", [clientWin window]);
+                    //} else
+                    {
                         /*** Use programmaticResizeToRect - keeps width, expands to workarea height ***/
                         XCBRect targetRect = XCBMakeRect(
                             XCBMakePoint([frame windowRect].position.x, workareaY),
@@ -991,9 +994,10 @@
                 }
                 else
                 {
-                    if (![aWindow canResize]) {
-                        NSLog(@"[EWMH] Skipping vertical maximize for non-resizable undecorated client %u", [aWindow window]);
-                    } else {
+                    //if (![aWindow canResize]) {
+                    //    NSLog(@"[EWMH] Skipping vertical maximize for non-resizable undecorated client %u", [aWindow window]);
+                    //} else
+                    {
                         size = XCBMakeSize([aWindow windowRect].size.width, workareaHeight);
                         position = XCBMakePoint([aWindow windowRect].position.x, workareaY);
                         [aWindow maximizeToSize:size andPosition:position];
@@ -1037,10 +1041,11 @@
                     [frame setOldRect:[frame windowRect]];
 
                     // Respect client resizability: do nothing if the client is non-resizable
-                    XCBWindow *clientWin = (XCBWindow*)[frame childWindowForKey:ClientWindow];
-                    if (clientWin && ![clientWin canResize]) {
-                        NSLog(@"[EWMH] Skipping fullscreen/maximize for non-resizable client %u", [clientWin window]);
-                    } else {
+                    //XCBWindow *clientWin = (XCBWindow*)[frame childWindowForKey:ClientWindow];
+                    //if (clientWin && ![clientWin canResize]) {
+                    //    NSLog(@"[EWMH] Skipping fullscreen/maximize for non-resizable client %u", [clientWin window]);
+                    //} else
+                    {
                         /*** Use programmaticResizeToRect - fullscreen to workarea ***/
                         XCBRect targetRect = XCBMakeRect(
                             XCBMakePoint(workareaX, workareaY),
@@ -1062,9 +1067,10 @@
                 }
                 else
                 {
-                    if (![aWindow canResize]) {
-                        NSLog(@"[EWMH] Skipping fullscreen for non-resizable undecorated client %u", [aWindow window]);
-                    } else {
+                    //if (![aWindow canResize]) {
+                    //    NSLog(@"[EWMH] Skipping fullscreen for non-resizable undecorated client %u", [aWindow window]);
+                    //} else
+                    {
                         size = XCBMakeSize(workareaWidth, workareaHeight);
                         position = XCBMakePoint(workareaX, workareaY);
                         [aWindow maximizeToSize:size andPosition:position];
@@ -1810,7 +1816,7 @@
     // For now we support a single desktop
     uint32_t workarea[4] = { (uint32_t)x, (uint32_t)y, width, height };
     
-    NSLog(@"[EWMH] Setting _NET_WORKAREA: x=%d, y=%d, width=%u, height=%u", x, y, width, height);
+    //NSLog(@"[EWMH] Setting _NET_WORKAREA: x=%d, y=%d, width=%u, height=%u", x, y, width, height);
     
     [self changePropertiesForWindow:rootWindow
                            withMode:XCB_PROP_MODE_REPLACE

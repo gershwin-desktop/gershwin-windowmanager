@@ -136,22 +136,20 @@
     NSNumber *windowIdNum = @(windowId);
 
     if ([self.recentlyAutoFocusedWindowIds containsObject:windowIdNum]) {
-        NSLog(@"[Focus] Window %u already auto-focused recently, skipping", windowId);
+        //NSLog(@"[Focus] Window %u already auto-focused recently, skipping", windowId);
         return;
     }
 
-    NSLog(@"[Focus] Focusing window %u after theme applied", windowId);
+    //NSLog(@"[Focus] Focusing window %u after theme applied", windowId);
     if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
         [clientWindow focus];
         [self refreshAppKitActivationState];
         [self.recentlyAutoFocusedWindowIds addObject:windowIdNum];
-        NSLog(@"[Focus] Successfully focused window %u", windowId);
+        //NSLog(@"[Focus] Successfully focused window %u", windowId);
 
         [self performSelector:@selector(removeWindowFromRecentlyFocused:)
                    withObject:windowIdNum
                    afterDelay:1.0];
-    } else {
-        NSLog(@"[Focus] Window %u is not focusable", windowId);
     }
 }
 
@@ -169,20 +167,18 @@
     xcb_window_t windowId = [clientWindow window];
     NSNumber *windowIdNum = @(windowId);
 
-    NSLog(@"[Focus] Focusing newly mapped window %u", windowId);
+    //NSLog(@"[Focus] Focusing newly mapped window %u", windowId);
     if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
         [clientWindow focus];
         [self refreshAppKitActivationState];
         [self.recentlyAutoFocusedWindowIds addObject:windowIdNum];
         [self trackFocusGain:windowId];
-        NSLog(@"[Focus] Successfully focused newly mapped window %u", windowId);
+        //NSLog(@"[Focus] Successfully focused newly mapped window %u", windowId);
 
         // Remove from anti-spam set after 1 second to allow other windows to be focused
         [self performSelector:@selector(removeWindowFromRecentlyFocused:)
                    withObject:windowIdNum
                    afterDelay:1.0];
-    } else {
-        NSLog(@"[Focus] Newly mapped window %u is not focusable, skipping focus", windowId);
     }
 }
 

@@ -36,11 +36,11 @@
 
 - (void) description
 {
-    NSLog(@"Geometries:\n%@;\nBorder width: %d;\nDepth: %d;\nRoot Window: %d;",
-          FnFromXCBRectToString(rect),
-          borderWidth,
-          depth,
-          [rootWindow window]);
+    //NSLog(@"Geometries:\n%@;\nBorder width: %d;\nDepth: %d;\nRoot Window: %d;",
+    //      FnFromXCBRectToString(rect),
+    //      borderWidth,
+    //      depth,
+    //      [rootWindow window]);
 }
 
 -(void) dealloc

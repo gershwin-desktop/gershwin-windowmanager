@@ -142,7 +142,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         sizeHints->min_width == sizeHints->max_width &&
         sizeHints->min_height == sizeHints->max_height)
     {
-        NSLog(@"[XCBFrame] Detected fixed-size (non-resizable) client window %u (min==max)", [aClientWindow window]);
+        //NSLog(@"[XCBFrame] Detected fixed-size (non-resizable) client window %u (min==max)", [aClientWindow window]);
         // Disable resizing for the client window so WM won't offer resize handles etc.
         [aClientWindow setCanResize:NO];
     }
@@ -269,7 +269,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         xcb_visualid_t argbVisualId = findARGBVisual([scr screen], &argbVisualType);
 
         if (argbVisualId != 0 && argbVisualType != NULL) {
-            NSLog(@"[XCBFrame] Creating titlebar with 32-bit ARGB visual (0x%x) for compositor alpha", argbVisualId);
+            //NSLog(@"[XCBFrame] Creating titlebar with 32-bit ARGB visual (0x%x) for compositor alpha", argbVisualId);
 
             // Create colormap for ARGB visual (required for 32-bit windows)
             argbColormap = xcb_generate_id([connection connection]);
@@ -291,8 +291,6 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
             values[1] = 0;  // border_pixel = transparent
             values[2] = TITLE_MASK_VALUES;  // event_mask
             values[3] = argbColormap;  // colormap
-        } else {
-            NSLog(@"[XCBFrame] No ARGB visual found, using standard 24-bit titlebar");
         }
     }
 
@@ -320,7 +318,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     if (depth == 32 && argbColormap != XCB_NONE) {
         [titleBar setUse32BitDepth:YES];
         [titleBar setArgbVisualId:[titlebarVisual visualId]];
-        NSLog(@"[XCBFrame] Configured titlebar for 32-bit ARGB pixmaps");
+        //NSLog(@"[XCBFrame] Configured titlebar for 32-bit ARGB pixmaps");
     }
 
     [self addChildWindow:titleBar withKey:TitleBar];
@@ -338,7 +336,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     {
         char *value = xcb_get_property_value(reply);
         int len = xcb_get_property_value_length(reply);
-        NSLog(@"Window title: %s, len: %d", value, len);
+            //NSLog(@"Window title: %s, len: %d", value, len);
         windowTitle = [NSString stringWithCString:value length:len];
     }
 
@@ -915,7 +913,7 @@ void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
     if (clientWindow && ![clientWindow canResize]) {
-        NSDebugLog(@"Ignoring interactive right-edge resize for non-resizable client %u", [clientWindow window]);
+        //NSDebugLog(@"Ignoring interactive right-edge resize for non-resizable client %u", [clientWindow window]);
         return;
     }
     XCBTitleBar* titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
@@ -993,7 +991,7 @@ void resizeFromLeftForEvent(xcb_motion_notify_event_t *anEvent,
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
     if (clientWindow && ![clientWindow canResize]) {
-        NSDebugLog(@"Ignoring interactive left-edge resize for non-resizable client %u", [clientWindow window]);
+        //NSDebugLog(@"Ignoring interactive left-edge resize for non-resizable client %u", [clientWindow window]);
         return;
     }
     XCBTitleBar* titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
@@ -1098,7 +1096,7 @@ void resizeFromBottomForEvent(xcb_motion_notify_event_t *anEvent,
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
     if (clientWindow && ![clientWindow canResize]) {
-        NSDebugLog(@"Ignoring interactive bottom-edge resize for non-resizable client %u", [clientWindow window]);
+        //NSDebugLog(@"Ignoring interactive bottom-edge resize for non-resizable client %u", [clientWindow window]);
         return;
     }
     //xcb_connection_t *connection = [[frame connection] connection];
@@ -1169,7 +1167,7 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
     if (clientWindow && ![clientWindow canResize]) {
-        NSDebugLog(@"Ignoring interactive top-edge resize for non-resizable client %u", [clientWindow window]);
+        //NSDebugLog(@"Ignoring interactive top-edge resize for non-resizable client %u", [clientWindow window]);
         return;
     }
     XCBTitleBar* titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
@@ -1268,7 +1266,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     XCBWindow* clientWindow = [frame childWindowForKey:ClientWindow];
     // Respect ICCCM: if client is non-resizable, ignore interactive resize
     if (clientWindow && ![clientWindow canResize]) {
-        NSDebugLog(@"Ignoring interactive corner resize for non-resizable client %u", [clientWindow window]);
+        //NSDebugLog(@"Ignoring interactive corner resize for non-resizable client %u", [clientWindow window]);
         return;
     }
     XCBTitleBar* titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
@@ -1414,7 +1412,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 
     // Enforce ICCCM / WM_NORMAL_HINTS: do not resize non-resizable (fixed-size) clients
     if (![clientWindow canResize]) {
-        NSLog(@"[XCBFrame] Refusing programmatic resize for non-resizable client %u", [clientWindow window]);
+        //NSLog(@"[XCBFrame] Refusing programmatic resize for non-resizable client %u", [clientWindow window]);
         return;
     }
 

@@ -209,8 +209,8 @@
         
         self.windowEntries = sortedEntries;
         
-        NSLog(@"[WindowSwitcher] Updated window stack with %lu windows (MRU order from X stacking)", 
-              (unsigned long)[self.windowEntries count]);
+        //NSLog(@"[WindowSwitcher] Updated window stack with %lu windows (MRU order from X stacking)", 
+              //(unsigned long)[self.windowEntries count]);
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowSwitcher] Exception updating window stack: %@", exception.reason);
@@ -261,13 +261,13 @@
             if (valuePtr) {
                 xcb_window_t activeWindowId = *valuePtr;
                 
-                NSLog(@"[WindowSwitcher] Active window from _NET_ACTIVE_WINDOW: %u", activeWindowId);
+                //NSLog(@"[WindowSwitcher] Active window from _NET_ACTIVE_WINDOW: %u", activeWindowId);
                 
-                // Log all windows for debugging
-                for (NSInteger i = 0; i < [entries count]; i++) {
-                    URSWindowEntry *entry = [entries objectAtIndex:i];
-                    NSLog(@"[WindowSwitcher]   Entry %ld: window %u (%@)", (long)i, [entry.frame window], entry.title);
-                }
+                //// Log all windows for debugging
+                //for (NSInteger i = 0; i < [entries count]; i++) {
+                //    URSWindowEntry *entry = [entries objectAtIndex:i];
+                //    //NSLog(@"[WindowSwitcher]   Entry %ld: window %u (%@)", (long)i, [entry.frame window], entry.title);
+                //}
                 
                 // Find the entry matching this active window
                 NSInteger activeIndex = -1;
@@ -275,7 +275,7 @@
                     URSWindowEntry *entry = [entries objectAtIndex:i];
                     if ([entry.frame window] == activeWindowId) {
                         activeIndex = i;
-                        NSLog(@"[WindowSwitcher] Found active window at index %ld", (long)activeIndex);
+                        //NSLog(@"[WindowSwitcher] Found active window at index %ld", (long)activeIndex);
                         break;
                     }
                 }
@@ -285,11 +285,11 @@
                     URSWindowEntry *activeEntry = [entries objectAtIndex:activeIndex];
                     [entries removeObjectAtIndex:activeIndex];
                     [entries insertObject:activeEntry atIndex:0];
-                    NSLog(@"[WindowSwitcher] ✓ Moved active window to front (was at index %ld)", (long)activeIndex);
+                    //NSLog(@"[WindowSwitcher] ✓ Moved active window to front (was at index %ld)", (long)activeIndex);
                 } else if (activeIndex == 0) {
-                    NSLog(@"[WindowSwitcher] Active window already at front (index 0)");
+                    //NSLog(@"[WindowSwitcher] Active window already at front (index 0)");
                 } else {
-                    NSLog(@"[WindowSwitcher] ⚠ Active window not found in entries!");
+                    //NSLog(@"[WindowSwitcher] ⚠ Active window not found in entries!");
                 }
             }
             free(propReply);
@@ -380,7 +380,7 @@
         xcb_unmap_window(conn, [frame window]);
         
         [self.connection flush];
-        NSLog(@"[WindowSwitcher] Minimized window %u", [frame window]);
+        //NSLog(@"[WindowSwitcher] Minimized window %u", [frame window]);
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowSwitcher] Exception minimizing window: %@", exception.reason);
@@ -422,7 +422,7 @@
             }
             
             if (titlebarParent != [frame window]) {
-                NSLog(@"[WindowSwitcher] Warning: Titlebar parent mismatch, re-parenting");
+                //NSLog(@"[WindowSwitcher] Warning: Titlebar parent mismatch, re-parenting");
                 xcb_reparent_window(conn, [titlebarWindow window], [frame window], 0, 0);
             }
             
@@ -448,7 +448,7 @@
             }
             
             if (clientParent != [frame window]) {
-                NSLog(@"[WindowSwitcher] Warning: Client parent mismatch, re-parenting");
+                //NSLog(@"[WindowSwitcher] Warning: Client parent mismatch, re-parenting");
                 // Get the client's current geometry to maintain position
                 xcb_get_geometry_reply_t *geomReply = xcb_get_geometry_reply(conn,
                     xcb_get_geometry(conn, [clientWindow window]), NULL);
@@ -534,7 +534,7 @@
         xcb_configure_window(conn, [frame window], XCB_CONFIG_WINDOW_STACK_MODE, finalStackValues);
         [self.connection flush];
         
-        NSLog(@"[WindowSwitcher] Unminimized window %u", [frame window]);
+        //NSLog(@"[WindowSwitcher] Unminimized window %u", [frame window]);
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowSwitcher] Exception unminimizing window: %@", exception.reason);
@@ -902,7 +902,7 @@
 - (void)startSwitching {
     if (self.isSwitching) return;
     
-    NSLog(@"[WindowSwitcher] Starting window switching");
+    //NSLog(@"[WindowSwitcher] Starting window switching");
     
     // Build fresh window list with minimized state tracking
     // ALWAYS recalculate to get current focus state
@@ -910,8 +910,8 @@
     
     // Check if we have at least one window OR if we have only minimized windows
     if ([self.windowEntries count] < 1) {
-        NSLog(@"[WindowSwitcher] No windows to switch (count: %lu)", 
-              (unsigned long)[self.windowEntries count]);
+        //NSLog(@"[WindowSwitcher] No windows to switch (count: %lu)", 
+              //(unsigned long)[self.windowEntries count]);
         return;
     }
     
@@ -919,10 +919,10 @@
     if ([self.windowEntries count] == 1) {
         URSWindowEntry *entry = [self.windowEntries objectAtIndex:0];
         if (entry.wasMinimized) {
-            NSLog(@"[WindowSwitcher] Single minimized window - Alt-Tab will unminimize it");
+            //NSLog(@"[WindowSwitcher] Single minimized window - Alt-Tab will unminimize it");
             // Allow switching to continue so the user can unminimize this window
         } else {
-            NSLog(@"[WindowSwitcher] Only 1 non-minimized window, nothing to switch to");
+            //NSLog(@"[WindowSwitcher] Only 1 non-minimized window, nothing to switch to");
             return;
         }
     }
@@ -1017,8 +1017,8 @@
     [self.overlay updateWithTitles:titles icons:icons currentIndex:self.currentIndex];
     self.overlayVisible = YES;
     
-    NSLog(@"[WindowSwitcher] Overlay shown after 250ms delay, selected index: %ld",
-          (long)self.currentIndex);
+    //NSLog(@"[WindowSwitcher] Overlay shown after 250ms delay, selected index: %ld",
+          //(long)self.currentIndex);
 }
 
 - (void)showWindowAtCurrentIndex {
@@ -1026,8 +1026,8 @@
         return;
     }
     
-    URSWindowEntry *entry = [self.windowEntries objectAtIndex:self.currentIndex];
-    NSLog(@"[WindowSwitcher] Previewing window at index %ld: %@", (long)self.currentIndex, entry.title);
+    //URSWindowEntry *entry = [self.windowEntries objectAtIndex:self.currentIndex];
+    //NSLog(@"[WindowSwitcher] Previewing window at index %ld: %@", (long)self.currentIndex, entry.title);
     
     // NOTE: We do NOT raise, focus, or unminimize ANY windows while Alt is held
     // The actual window switching will happen in completeSwitching when Alt is released
@@ -1053,8 +1053,8 @@
 - (void)completeSwitching {
     if (!self.isSwitching) return;
     
-    NSLog(@"[WindowSwitcher] ========== COMPLETING WINDOW SWITCH ==========");
-    NSLog(@"[WindowSwitcher] Current index: %ld", (long)self.currentIndex);
+    //NSLog(@"[WindowSwitcher] ========== COMPLETING WINDOW SWITCH ==========");
+    //NSLog(@"[WindowSwitcher] Current index: %ld", (long)self.currentIndex);
     
     // CRITICAL: Wrap in @try/@catch to guarantee state is always reset.
     // If any of the called methods (unminimizeWindow, focus, stackAbove,
@@ -1064,11 +1064,11 @@
         // NOW perform the actual window switching when Alt is released
         if (self.currentIndex >= 0 && self.currentIndex < [self.windowEntries count]) {
             URSWindowEntry *entry = [self.windowEntries objectAtIndex:self.currentIndex];
-            NSLog(@"[WindowSwitcher] Switching to: %@", entry.title);
+            //NSLog(@"[WindowSwitcher] Switching to: %@", entry.title);
             
             // If this window was minimized, unminimize it now
             if (entry.wasMinimized) {
-                NSLog(@"[WindowSwitcher] Window was minimized, unminimizing...");
+                //NSLog(@"[WindowSwitcher] Window was minimized, unminimizing...");
                 [self unminimizeWindow:entry.frame];
             }
             
@@ -1078,8 +1078,8 @@
             XCBTitleBar *titleBar = (XCBTitleBar *)[entry.frame childWindowForKey:TitleBar];
             
             if (clientWindow && entry.frame) {
-                NSLog(@"[WindowSwitcher] Focusing client window %u and raising frame %u", 
-                      [clientWindow window], [entry.frame window]);
+                //NSLog(@"[WindowSwitcher] Focusing client window %u and raising frame %u", 
+                      //[clientWindow window], [entry.frame window]);
                 
                 // Step 1: Focus the client window (same as handleButtonPress)
                 [clientWindow focus];
@@ -1100,7 +1100,7 @@
                     [self.connection drawAllTitleBarsExcept:titleBar];
                 }
                 
-                NSLog(@"[WindowSwitcher] Window activation complete using XCBKit standard path");
+                //NSLog(@"[WindowSwitcher] Window activation complete using XCBKit standard path");
             } else {
                 NSLog(@"[WindowSwitcher] WARNING: Could not get client window or frame!");
             }
@@ -1118,7 +1118,7 @@
         }
     } @catch (NSException *exception) {
         NSLog(@"[WindowSwitcher] EXCEPTION in completeSwitching: %@", exception.reason);
-        NSLog(@"[WindowSwitcher] Stack trace: %@", exception.callStackSymbols);
+        //NSLog(@"[WindowSwitcher] Stack trace: %@", exception.callStackSymbols);
     }
     
     // Hide overlay (only if it was shown) — do this OUTSIDE the @try
@@ -1142,13 +1142,13 @@
     self.overlayVisible = NO;
     self.currentIndex = -1;
     
-    NSLog(@"[WindowSwitcher] ========== WINDOW SWITCH COMPLETED ==========");
+    //NSLog(@"[WindowSwitcher] ========== WINDOW SWITCH COMPLETED ==========");
 }
 
 - (void)cancelSwitching {
     if (!self.isSwitching) return;
     
-    NSLog(@"[WindowSwitcher] Cancelling window switch");
+    //NSLog(@"[WindowSwitcher] Cancelling window switch");
     
     @try {
         // Restore all temporarily shown windows to minimized state
@@ -1204,7 +1204,7 @@
                     if ([compositor respondsToSelector:@selector(performRepairNow)]) {
                         [compositor performSelector:@selector(performRepairNow)];
                     }
-                    NSLog(@"[WindowSwitcher] Forced compositor screen redraw after overlay hide");
+                    //NSLog(@"[WindowSwitcher] Forced compositor screen redraw after overlay hide");
                     return;
                 }
             }
@@ -1235,7 +1235,7 @@
                           XCB_EVENT_MASK_EXPOSURE,
                           (const char *)&expose);
             [self.connection flush];
-            NSLog(@"[WindowSwitcher] Sent synthetic expose to root window after overlay hide");
+            //NSLog(@"[WindowSwitcher] Sent synthetic expose to root window after overlay hide");
         }
     } @catch (NSException *exception) {
         NSLog(@"[WindowSwitcher] Exception in forceScreenRedraw: %@", exception.reason);

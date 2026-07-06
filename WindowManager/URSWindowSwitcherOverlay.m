@@ -217,7 +217,7 @@ static const CGFloat kSelectionPadding = 6.0;
         // Request ARGB visual for true transparency on X11
         [self configureARGBVisualForX11];
         
-        NSLog(@"[WindowSwitcherOverlay] Initialized with ARGB transparency support");
+        //NSLog(@"[WindowSwitcherOverlay] Initialized with ARGB transparency support");
     }
     
     return self;
@@ -232,7 +232,7 @@ static const CGFloat kSelectionPadding = 6.0;
         // Get the X11 window number from the NSWindow
         NSInteger windowNumber = [self windowNumber];
         if (windowNumber <= 0) {
-            NSLog(@"[WindowSwitcherOverlay] No window number yet, will use default visual");
+            //NSLog(@"[WindowSwitcherOverlay] No window number yet, will use default visual");
             return;
         }
         
@@ -250,16 +250,16 @@ static const CGFloat kSelectionPadding = 6.0;
         int composite_event_base, composite_error_base;
         if (!XCompositeQueryExtension(display, &composite_event_base, &composite_error_base)) {
             NSLog(@"[WindowSwitcherOverlay] WARNING: X COMPOSITE extension not available!");
-            NSLog(@"[WindowSwitcherOverlay] Rounded corner transparency will NOT work.");
-            NSLog(@"[WindowSwitcherOverlay] Enable Composite in X server and run a compositor (picom/compton)");
+            //NSLog(@"[WindowSwitcherOverlay] Rounded corner transparency will NOT work.");
+            //NSLog(@"[WindowSwitcherOverlay] Enable Composite in X server and run a compositor (picom/compton)");
             XCloseDisplay(display);
             return;
         }
         
         int composite_major, composite_minor;
         XCompositeQueryVersion(display, &composite_major, &composite_minor);
-        NSLog(@"[WindowSwitcherOverlay] X COMPOSITE extension available: v%d.%d", 
-              composite_major, composite_minor);
+        //NSLog(@"[WindowSwitcherOverlay] X COMPOSITE extension available: v%d.%d", 
+//              composite_major, composite_minor);
         
         // Find ARGB visual (32-bit depth with alpha channel)
         XVisualInfo visual_template;
@@ -274,7 +274,7 @@ static const CGFloat kSelectionPadding = 6.0;
                                                    &num_visuals);
         
         if (visual_info && num_visuals > 0) {
-            NSLog(@"[WindowSwitcherOverlay] Found %d ARGB visuals (32-bit with alpha)", num_visuals);
+            //NSLog(@"[WindowSwitcherOverlay] Found %d ARGB visuals (32-bit with alpha)", num_visuals);
             
             // Set window attributes for compositing
             // Redirect the window for compositing - this tells the X server
@@ -282,10 +282,10 @@ static const CGFloat kSelectionPadding = 6.0;
             XCompositeRedirectWindow(display, xwindow, CompositeRedirectManual);
             
             XFree(visual_info);
-            NSLog(@"[WindowSwitcherOverlay] Successfully configured for ARGB transparency");
+            //NSLog(@"[WindowSwitcherOverlay] Successfully configured for ARGB transparency");
         } else {
             NSLog(@"[WindowSwitcherOverlay] WARNING: No 32-bit ARGB visual found!");
-            NSLog(@"[WindowSwitcherOverlay] The X server may not support true transparency.");
+            //NSLog(@"[WindowSwitcherOverlay] The X server may not support true transparency.");
         }
         
         XCloseDisplay(display);
@@ -295,7 +295,7 @@ static const CGFloat kSelectionPadding = 6.0;
     }
 #else
     // On non-Linux platforms (macOS, BSD), transparency should work natively
-    NSLog(@"[WindowSwitcherOverlay] Non-Linux platform, using native transparency");
+    //NSLog(@"[WindowSwitcherOverlay] Non-Linux platform, using native transparency");
 #endif
 }
 
@@ -307,7 +307,7 @@ static const CGFloat kSelectionPadding = 6.0;
     }
     
     if (!mainScreen) {
-        NSLog(@"[WindowSwitcherOverlay] No screen available");
+        //NSLog(@"[WindowSwitcherOverlay] No screen available");
         return;
     }
     
@@ -328,13 +328,13 @@ static const CGFloat kSelectionPadding = 6.0;
     [self makeKeyAndOrderFront:nil];
     [self orderFrontRegardless];
     
-    NSLog(@"[WindowSwitcherOverlay] Showing at golden ratio (more top space) at %.0f, %.0f (level: %ld)", x, goldenRatioY, (long)[self level]);
+    //NSLog(@"[WindowSwitcherOverlay] Showing at golden ratio (more top space) at %.0f, %.0f (level: %ld)", x, goldenRatioY, (long)[self level]);
 }
 
 - (void)hide {
     // Immediately remove from screen and ensure it's completely hidden
     [self orderOut:self];
-    NSLog(@"[WindowSwitcherOverlay] Hidden immediately");
+    //NSLog(@"[WindowSwitcherOverlay] Hidden immediately");
 }
 
 - (void)updateWithTitles:(NSArray *)titles icons:(NSArray *)icons currentIndex:(NSInteger)index {
@@ -390,8 +390,8 @@ static const CGFloat kSelectionPadding = 6.0;
     // A fast typist pressing Tab repeatedly can thus see a stale highlight.
     [view displayIfNeeded];
     
-    NSLog(@"[WindowSwitcherOverlay] Updated with %lu titles, selected: %ld, rounded corners: %d",
-          (unsigned long)count, (long)index, view.useRoundedCorners);
+    //NSLog(@"[WindowSwitcherOverlay] Updated with %lu titles, selected: %ld, rounded corners: %d",
+//          (unsigned long)count, (long)index, view.useRoundedCorners);
 }
 
 @end

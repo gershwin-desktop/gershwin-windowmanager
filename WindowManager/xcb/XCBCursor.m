@@ -238,7 +238,7 @@
 
     if (cursor == 0)
     {
-        NSLog(@"Cursor '%@': theme lookup returned 0, using X cursor font fallback (glyph %u)", name, glyph);
+        //NSLog(@"Cursor '%@': theme lookup returned 0, using X cursor font fallback (glyph %u)", name, glyph);
         if (cursorFont != 0)
         {
             cursor = xcb_generate_id([connection connection]);
@@ -253,12 +253,12 @@
         }
         else
         {
-            NSLog(@"Warning: No cursor font available, cursor '%@' will be unavailable", name);
+            //NSLog(@"Warning: No cursor font available, cursor '%@' will be unavailable", name);
         }
     }
     else
     {
-        NSLog(@"Cursor '%@': loaded from theme (id %u)", name, cursor);
+        //NSLog(@"Cursor '%@': loaded from theme (id %u)", name, cursor);
     }
 
     [cursors setObject:[NSNumber numberWithUnsignedInt:cursor] forKey:name];

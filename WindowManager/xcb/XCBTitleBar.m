@@ -55,7 +55,7 @@
 {
     // Check if GSTheme is active - if so, skip XCB button generation entirely
     if ([self isGSThemeActive]) {
-        NSLog(@"XCBTitleBar: Skipping XCB button generation - GSTheme will handle buttons");
+        //NSLog(@"XCBTitleBar: Skipping XCB button generation - GSTheme will handle buttons");
         return;
     }
 
@@ -102,8 +102,8 @@
             [[hideWindowButton shape] createPixmapsAndGCs];
             [[hideWindowButton shape] createArcsWithRadius:7];
         }
-        else
-            NSLog(@"Shape extension not supported for window: %u", [hideWindowButton window]);
+        //else
+        //    NSLog(@"Shape extension not supported for window: %u", [hideWindowButton window]);
 
     }
 
@@ -136,8 +136,8 @@
             [[minimizeWindowButton shape] createPixmapsAndGCs];
             [[minimizeWindowButton shape] createArcsWithRadius:7];
         }
-        else
-            NSLog(@"Shape extension not supported for window: %u", [minimizeWindowButton window]);
+        //else
+        //    NSLog(@"Shape extension not supported for window: %u", [minimizeWindowButton window]);
 
     }
 
@@ -170,8 +170,8 @@
             [[maximizeWindowButton shape] createPixmapsAndGCs];
             [[maximizeWindowButton shape] createArcsWithRadius:7];
         }
-        else
-            NSLog(@"Shape extension not supported for window: %u", [maximizeWindowButton window]);
+        //else
+        //    NSLog(@"Shape extension not supported for window: %u", [maximizeWindowButton window]);
     }
 
     [[super connection] mapWindow:hideWindowButton];

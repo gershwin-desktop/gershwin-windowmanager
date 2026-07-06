@@ -83,13 +83,13 @@ static const CGFloat ORB_BUTTON_SPACING = 4.0;
             if (visual->_class == XCB_VISUAL_CLASS_TRUE_COLOR) {
                 // Check that it has reasonable bit masks for ARGB
                 // 32-bit visuals typically have 8 bits per channel
-                NSLog(@"[URSThemeIntegration] Found 32-bit TrueColor visual: 0x%x", visual->visual_id);
+                //NSLog(@"[URSThemeIntegration] Found 32-bit TrueColor visual: 0x%x", visual->visual_id);
                 return visual->visual_id;
             }
         }
     }
 
-    NSLog(@"[URSThemeIntegration] No 32-bit ARGB visual found");
+    //NSLog(@"[URSThemeIntegration] No 32-bit ARGB visual found");
     return 0;
 }
 
@@ -118,14 +118,14 @@ static const CGFloat ORB_BUTTON_SPACING = 4.0;
 + (void)registerFixedSizeWindow:(xcb_window_t)windowId {
     @synchronized(fixedSizeWindows) {
         [fixedSizeWindows addObject:@(windowId)];
-        NSLog(@"Registered fixed-size window %u (total: %lu)", windowId, (unsigned long)[fixedSizeWindows count]);
+        //NSLog(@"Registered fixed-size window %u (total: %lu)", windowId, (unsigned long)[fixedSizeWindows count]);
     }
 }
 
 + (void)unregisterFixedSizeWindow:(xcb_window_t)windowId {
     @synchronized(fixedSizeWindows) {
         [fixedSizeWindows removeObject:@(windowId)];
-        NSLog(@"Unregistered fixed-size window %u", windowId);
+        //NSLog(@"Unregistered fixed-size window %u", windowId);
     }
 }
 
@@ -423,7 +423,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     if (self) {
         self.enabled = YES;
         self.managedTitlebars = [[NSMutableArray alloc] init];
-        NSLog(@"GSTheme titlebar integration initialized");
+        //NSLog(@"GSTheme titlebar integration initialized");
     }
     return self;
 }
@@ -436,7 +436,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         NSString *themeName = [defaults stringForKey:@"GSTheme"];
 
-        NSLog(@"GSTheme user default: '%@'", themeName ?: @"(none)");
+        //NSLog(@"GSTheme user default: '%@'", themeName ?: @"(none)");
 
         if (themeName && [themeName length] > 0) {
             // Remove .theme extension if present
@@ -444,27 +444,27 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 themeName = [themeName stringByDeletingPathExtension];
             }
 
-            NSLog(@"Loading user's selected theme: %@", themeName);
+            //NSLog(@"Loading user's selected theme: %@", themeName);
             GSTheme *userTheme = [GSTheme loadThemeNamed:themeName];
             if (userTheme) {
                 [GSTheme setTheme:userTheme];
-                NSLog(@"GSTheme loaded: %@", [userTheme name] ?: @"Unknown");
+                //NSLog(@"GSTheme loaded: %@", [userTheme name] ?: @"Unknown");
                 return;
             } else {
                 NSLog(@"Failed to load theme '%@', falling back to default", themeName);
             }
         } else {
-            NSLog(@"No theme specified in GSTheme default, using system default");
+            //NSLog(@"No theme specified in GSTheme default, using system default");
         }
 
-        // Fallback to whatever GSTheme gives us by default
-        GSTheme *theme = [GSTheme theme];
-        NSLog(@"GSTheme fallback loaded: %@", [theme name] ?: @"Default");
+        //// Fallback to whatever GSTheme gives us by default
+        //GSTheme *theme = [GSTheme theme];
+        ////NSLog(@"GSTheme fallback loaded: %@", [theme name] ?: @"Default");
 
-        // Log theme bundle info for debugging
-        if (theme && [theme bundle]) {
-            NSLog(@"Theme bundle path: %@", [[theme bundle] bundlePath]);
-        }
+        //// Log theme bundle info for debugging
+        //if (theme && [theme bundle]) {
+        //    //NSLog(@"Theme bundle path: %@", [[theme bundle] bundlePath]);
+        //}
 
     } @catch (NSException *exception) {
         NSLog(@"Failed to load GSTheme: %@", exception.reason);
@@ -476,15 +476,15 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 }
 
 + (void)enableGSThemeTitleBars {
-    NSLog(@"Enabling GSThemeTitleBar replacement for XCBTitleBar...");
+    //NSLog(@"Enabling GSThemeTitleBar replacement for XCBTitleBar...");
 
     // The GSThemeTitleBar class will automatically override XCBTitleBar methods
     // when instances are created. We just need to ensure it's loaded.
     Class gsThemeClass = [GSThemeTitleBar class];
     if (gsThemeClass) {
-        NSLog(@"GSThemeTitleBar class loaded successfully");
+        //NSLog(@"GSThemeTitleBar class loaded successfully");
     } else {
-        NSLog(@"Warning: GSThemeTitleBar class not found");
+        //NSLog(@"Warning: GSThemeTitleBar class not found");
     }
 }
 
@@ -500,7 +500,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
     GSTheme *theme = [self currentTheme];
     if (!theme) {
-        NSLog(@"Warning: No GSTheme available for titlebar rendering");
+        //NSLog(@"Warning: No GSTheme available for titlebar rendering");
         return NO;
     }
 
@@ -743,7 +743,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         return success;
 
     } @catch (NSException *exception) {
-        NSLog(@"GSTheme titlebar rendering failed: %@", exception.reason);
+        //NSLog(@"GSTheme titlebar rendering failed: %@", exception.reason);
         return NO;
     }
 }
@@ -969,7 +969,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
     GSTheme *theme = [self currentTheme];
     if (!theme) {
-        NSLog(@"Warning: No GSTheme available for standalone titlebar rendering");
+        //NSLog(@"Warning: No GSTheme available for standalone titlebar rendering");
         return NO;
     }
 
@@ -977,7 +977,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // Get the frame's titlebar area
         XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
         if (!titlebarWindow || ![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
-            NSLog(@"Warning: No titlebar found in frame for GSTheme rendering");
+            //NSLog(@"Warning: No titlebar found in frame for GSTheme rendering");
             return NO;
         }
         XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
@@ -1428,7 +1428,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         return success;
 
     } @catch (NSException *exception) {
-        NSLog(@"Standalone GSTheme titlebar rendering failed: %@", exception.reason);
+        //NSLog(@"Standalone GSTheme titlebar rendering failed: %@", exception.reason);
         URS_PROFILE_END(themeRender);
         return NO;
     }
@@ -1457,7 +1457,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                              active:isActive];
     }
 
-    NSLog(@"Refreshed %lu titlebars with GSTheme decorations", (unsigned long)[integration.managedTitlebars count]);
+    //NSLog(@"Refreshed %lu titlebars with GSTheme decorations", (unsigned long)[integration.managedTitlebars count]);
 }
 
 #pragma mark - Event Handlers
@@ -1470,7 +1470,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     // Add to managed windows list
     if (![self.managedTitlebars containsObject:titlebar]) {
         [self.managedTitlebars addObject:titlebar];
-        NSLog(@"Added titlebar to GSTheme management: %@", titlebar.windowTitle);
+        //NSLog(@"Added titlebar to GSTheme management: %@", titlebar.windowTitle);
     }
 
     // Newly mapped windows almost always become the active (focused) window,
@@ -1508,10 +1508,10 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     [defaults synchronize];
 
     if (enabled) {
-        NSLog(@"GSTheme integration enabled - XCBKit will skip legacy button drawing");
+        //NSLog(@"GSTheme integration enabled - XCBKit will skip legacy button drawing");
         // Don't call refreshAllTitlebars here - let the periodic timer handle it
     } else {
-        NSLog(@"GSTheme integration disabled - falling back to default titlebar rendering");
+        //NSLog(@"GSTheme integration disabled - falling back to default titlebar rendering");
     }
 }
 

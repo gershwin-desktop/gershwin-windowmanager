@@ -119,10 +119,10 @@ static XCBConnection *sharedInstance;
 
     if (aDisplay == NULL)
     {
-        NSLog(@"[XCBConnection] Connecting to the default display in env DISPLAY");
+        //NSLog(@"[XCBConnection] Connecting to the default display in env DISPLAY");
     } else
     {
-        NSLog(@"XCBConnection: Creating connection with display: %@", aDisplay);
+        //NSLog(@"XCBConnection: Creating connection with display: %@", aDisplay);
         localDisplayName = [aDisplay UTF8String];
     }
 
@@ -150,9 +150,9 @@ static XCBConnection *sharedInstance;
         return nil;
     }
 
-    int fd = xcb_get_file_descriptor(connection);
-
-    NSLog(@"XCBConnection: Connection: %d", fd);
+//    int fd = xcb_get_file_descriptor(connection);
+//
+//    NSLog(@"XCBConnection: Connection: %d", fd);
 
     /** save all screens **/
 
@@ -180,12 +180,12 @@ static XCBConnection *sharedInstance;
     {
         if (asWindowManager)
         {
-            NSLog(@"[XCBConnection]: Creating shared connection as window manager...");
+            //NSLog(@"[XCBConnection]: Creating shared connection as window manager...");
             sharedInstance = [[self alloc] initAsWindowManager:asWindowManager];
         }
         else
         {
-            NSLog(@"[XCBConnection]: Creating shared connection...");
+            //NSLog(@"[XCBConnection]: Creating shared connection...");
             sharedInstance = [[self alloc] initAsWindowManager:asWindowManager];
         }
     }
@@ -254,7 +254,7 @@ static XCBConnection *sharedInstance;
 
     if (win != 0)
     {
-        NSLog(@"[XCBConnection] Adding the window %u in the windowsMap", win);
+        //NSLog(@"[XCBConnection] Adding the window %u in the windowsMap", win);
         clientList[clientListIndex++] = win;
         
         if (!isRootWindow)
@@ -279,8 +279,8 @@ static XCBConnection *sharedInstance;
         return;
 
     xcb_window_t win = [aWindow window];
-    if (win != 0)
-        NSLog(@"[XCBConnection] Removing the window %u from the windowsMap", win);
+    //if (win != 0)
+    //    NSLog(@"[XCBConnection] Removing the window %u from the windowsMap", win);
     NSNumber *key = [[NSNumber alloc] initWithInt:win];
     [windowsMap removeObjectForKey:key];
     
@@ -384,12 +384,12 @@ static XCBConnection *sharedInstance;
         [screen setScreenNumber:number++];
         [screens addObject:screen];
 
-        NSLog(@"[XCBConnection] Screen with root window: %d;\n\
-			  With width in pixels: %d;\n\
-			  With height in pixels: %d\n",
-              scr->root,
-              scr->width_in_pixels,
-              scr->height_in_pixels);
+        //NSLog(@"[XCBConnection] Screen with root window: %d;\n\
+//			  With width in pixels: %d;\n\
+//			  With height in pixels: %d\n",
+//              scr->root,
+//              scr->width_in_pixels,
+//              scr->height_in_pixels);
 
         [self registerWindow:rootWindow];
 
@@ -404,7 +404,7 @@ static XCBConnection *sharedInstance;
 
     }
 
-    NSLog(@"Number of screens: %lu", (unsigned long) [screens count]);
+    //NSLog(@"Number of screens: %lu", (unsigned long) [screens count]);
 }
 
 - (NSMutableArray *)screens
@@ -544,7 +544,7 @@ static XCBConnection *sharedInstance;
 - (void)handleMapNotify:(xcb_map_notify_event_t *)anEvent
 {
     XCBWindow *window = [self windowForXCBId:anEvent->window];
-    NSLog(@"[%@] The window %u is mapped!", NSStringFromClass([self class]), [window window]);
+    //NSLog(@"[%@] The window %u is mapped!", NSStringFromClass([self class]), [window window]);
     [window setIsMapped:YES];
 
     window = nil;
@@ -570,13 +570,13 @@ static XCBConnection *sharedInstance;
     // Consuming them here prevents the frame-destruction path from running on these stale events.
     if (window.ignoreUnmapCount > 0) {
         window.ignoreUnmapCount--;
-        NSLog(@"[handleUnMapNotify] Absorbed synthetic unmap for window %u (remaining=%d)",
-              anEvent->window, window.ignoreUnmapCount);
+        //NSLog(@"[handleUnMapNotify] Absorbed synthetic unmap for window %u (remaining=%d)",
+        //      anEvent->window, window.ignoreUnmapCount);
         return;
     }
 
     [window setIsMapped:NO];
-    NSLog(@"[%@] The window %u is unmapped!", NSStringFromClass([self class]), [window window]);
+    //NSLog(@"[%@] The window %u is unmapped!", NSStringFromClass([self class]), [window window]);
 
     XCBFrame *frameWindow = (XCBFrame *) [window parentWindow];
 
@@ -604,7 +604,7 @@ static XCBConnection *sharedInstance;
                                         withFormat:32
                                     withDataLength:1
                                           withData:&none];
-            NSLog(@"[%u] Cleared _NET_ACTIVE_WINDOW", [window window]);
+            //NSLog(@"[%u] Cleared _NET_ACTIVE_WINDOW", [window window]);
         }
         free(reply);
     }
@@ -640,7 +640,7 @@ static XCBConnection *sharedInstance;
         [self addDamagedRegion:damageRegion];
         damageRegion = nil;
 
-        NSLog(@"Destroying window %u", [frameWindow window]);
+        //NSLog(@"Destroying window %u", [frameWindow window]);
 
         // Reparent using root-relative coordinates. windowRect is frame-relative
         // for decorated clients and causes visible position drift if used directly.
@@ -689,13 +689,13 @@ static XCBConnection *sharedInstance;
     
     isWindowsMapUpdated = NO;
 
-    NSLog(@"[%@] Map request for window %u", NSStringFromClass([self class]), anEvent->window);
+    //NSLog(@"[%@] Map request for window %u", NSStringFromClass([self class]), anEvent->window);
 
     /** if already managed map it **/
 
     if (window != nil)
     {
-        NSLog(@"Window %u already managed by the window manager.", [window window]);
+        //NSLog(@"Window %u already managed by the window manager.", [window window]);
         isManaged = YES;
 
         // Check if this window has a frame parent (meaning it was decorated)
@@ -704,20 +704,20 @@ static XCBConnection *sharedInstance;
             XCBFrame *frame = (XCBFrame *)[window parentWindow];
             XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
 
-            NSLog(@"[MapRequest] Window has frame parent %u", [frame window]);
+            //NSLog(@"[MapRequest] Window has frame parent %u", [frame window]);
 
             // If the frame is minimized, this is a restoration request
             if ([frame isMinimized] || [window isMinimized])
             {
-                NSLog(@"[MapRequest] Restoring minimized window from GNUstep");
+                //NSLog(@"[MapRequest] Restoring minimized window from GNUstep");
 
                 // Check if this window belongs to a group (has a leader)
                 XCBWindow *leader = [window leaderWindow];
 
                 if (leader && [leader window] != XCB_NONE)
                 {
-                    NSLog(@"[MapRequest] Window %u has leader %u, restoring all grouped windows",
-                          [window window], [leader window]);
+                    //NSLog(@"[MapRequest] Window %u has leader %u, restoring all grouped windows",
+                    //      [window window], [leader window]);
 
                     // Find and restore all windows with the same leader
                     NSArray *allWindows = [windowsMap allValues];
@@ -732,7 +732,7 @@ static XCBConnection *sharedInstance;
                             continue;
 
                         // This window is part of the group and minimized - restore it
-                        NSLog(@"[MapRequest] Restoring grouped window %u", [groupedWindow window]);
+                        //NSLog(@"[MapRequest] Restoring grouped window %u", [groupedWindow window]);
 
                         XCBFrame *groupedFrame = nil;
                         XCBTitleBar *groupedTitleBar = nil;
@@ -798,7 +798,7 @@ static XCBConnection *sharedInstance;
                 else
                 {
                     // No leader/group - restore just this window
-                    NSLog(@"[MapRequest] No window group, restoring single window");
+                    //NSLog(@"[MapRequest] No window group, restoring single window");
 
                     [self mapWindow:frame];
 
@@ -847,7 +847,7 @@ static XCBConnection *sharedInstance;
                     [window focus];
                 }
 
-                NSLog(@"[MapRequest] Restoration complete");
+                //NSLog(@"[MapRequest] Restoration complete");
             }
             else
             {
@@ -901,24 +901,24 @@ static XCBConnection *sharedInstance;
                             // Delete the property so it doesn't interfere with future operations
                             xcb_delete_property(conn, win, birthAtom);
 
-                            NSLog(@"[MapRequest] Found birth property: src={%d, %d, %hu, %hu} dst={%d, %d, %hu, %hu} type=%d",
-                                  (int)animStartRect.position.x, (int)animStartRect.position.y,
-                                  animStartRect.size.width, animStartRect.size.height,
-                                  (int)birthTargetRect.position.x, (int)birthTargetRect.position.y,
-                                  birthTargetRect.size.width, birthTargetRect.size.height,
-                                  animType);
+                            //NSLog(@"[MapRequest] Found birth property: src={%d, %d, %hu, %hu} dst={%d, %d, %hu, %hu} type=%d",
+                            //      (int)animStartRect.position.x, (int)animStartRect.position.y,
+                            //      animStartRect.size.width, animStartRect.size.height,
+                            //      (int)birthTargetRect.position.x, (int)birthTargetRect.position.y,
+                            //      birthTargetRect.size.width, birthTargetRect.size.height,
+                            //      animType);
 
                             // If animation type is NoAnimation, skip the animation
                             if (animType == 1) {
-                                NSLog(@"[MapRequest] Birth animation suppressed by animation type (NoAnimation)");
+                                //NSLog(@"[MapRequest] Birth animation suppressed by animation type (NoAnimation)");
                                 hasAnimationRect = NO;
                             }
                         } else {
-                            NSLog(@"[MapRequest] Birth property present but length=%d (expected %d)", len, GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN);
+                            //NSLog(@"[MapRequest] Birth property present but length=%d (expected %d)", len, GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN);
                         }
                         free(reply);
                     } else {
-                        NSLog(@"[MapRequest] No reply reading birth property");
+                        //NSLog(@"[MapRequest] No reply reading birth property");
                     }
                 }
                 
@@ -945,10 +945,10 @@ static XCBConnection *sharedInstance;
                         if (compositor) {
                             BOOL compActive = [compositor compositingActive];
                             XCBRect endRect = [frame windowRect];
-                            NSLog(@"[MapRequest] compositor present. compositingActive=%d, startRect={%d,%d,%hu,%hu}, endRect={%d,%d,%hu,%hu}",
-                                  compActive,
-                                  (int)animStartRect.position.x, (int)animStartRect.position.y, animStartRect.size.width, animStartRect.size.height,
-                                  (int)endRect.position.x, (int)endRect.position.y, endRect.size.width, endRect.size.height);
+                            //NSLog(@"[MapRequest] compositor present. compositingActive=%d, startRect={%d,%d,%hu,%hu}, endRect={%d,%d,%hu,%hu}",
+                            //      compActive,
+                            //      (int)animStartRect.position.x, (int)animStartRect.position.y, animStartRect.size.width, animStartRect.size.height,
+                            //      (int)endRect.position.x, (int)endRect.position.y, endRect.size.width, endRect.size.height);
 
                             if (compActive) {
                                 // Compositing mode: use birth animation
@@ -957,7 +957,7 @@ static XCBConnection *sharedInstance;
                                                              toRect:endRect
                                                            duration:0.8
                                                                fade:YES];
-                                NSLog(@"[MapRequest] Composited birth animation for window %u", [frame window]);
+                                //NSLog(@"[MapRequest] Composited birth animation for window %u", [frame window]);
                             } else {
                                 // Non-compositing mode: use fast zoom rect animation
                                 XCBScreen *screenObj = [[self screens] objectAtIndex:0];
@@ -968,10 +968,10 @@ static XCBConnection *sharedInstance;
                                                               connection:self
                                                                   screen:screen
                                                                 duration:0.2];
-                                NSLog(@"[MapRequest] Completed zoom rect window open animation");
+                                //NSLog(@"[MapRequest] Completed zoom rect window open animation");
                             }
                         } else {
-                            NSLog(@"[MapRequest] No compositor available; falling back to non-compositing behavior");
+                            //NSLog(@"[MapRequest] No compositor available; falling back to non-compositing behavior");
                             XCBRect endRect = [frame windowRect];
                             XCBScreen *screenObj = [[self screens] objectAtIndex:0];
                             xcb_screen_t *screen = [screenObj screen];
@@ -981,9 +981,9 @@ static XCBConnection *sharedInstance;
                                 // Use objc_msgSend to call class method with multiple args
                                 void (*msg)(id, SEL, XCBRect, XCBRect, id, xcb_screen_t*, NSTimeInterval) = (void *)objc_msgSend;
                                 msg(compClassDynamic, @selector(animateZoomRectsFromRect:toRect:connection:screen:duration:), animStartRect, endRect, self, screen, 0.2);
-                                NSLog(@"[MapRequest] Called dynamic animator animateZoomRectsFromRect");
+                                //NSLog(@"[MapRequest] Called dynamic animator animateZoomRectsFromRect");
                             } else {
-                                NSLog(@"[MapRequest] No animator class/method available for zoom rects");
+                                //NSLog(@"[MapRequest] No animator class/method available for zoom rects");
                             }
                         }
                     }
@@ -992,7 +992,7 @@ static XCBConnection *sharedInstance;
         }
         else
         {
-            NSLog(@"[MapRequest] Window has no frame parent, mapping directly");
+            //NSLog(@"[MapRequest] Window has no frame parent, mapping directly");
             // No frame, consider applying golden ratio if it would otherwise be
             // placed at the bottom-left (GNUstep default origin).
             XCBRect winRect = [window windowRect];
@@ -1028,12 +1028,12 @@ static XCBConnection *sharedInstance;
                                 // Dialogs: centered horizontally, golden ratio vertically
                                 xPos = (screenWidth - reqW) / 2;
                                 yPos = (screenHeight - reqH) * 0.381966;
-                                NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
+                                //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
                             } else {
                                 // Other windows: 22 px from left, 44 px from top
                                 xPos = 22;
                                 yPos = 44;
-                                NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
+                                //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
                             }
                             XCBRect newRect = winRect;
                             newRect.position.x = xPos;
@@ -1053,12 +1053,12 @@ static XCBConnection *sharedInstance;
                             // Dialogs: centered horizontally, golden ratio vertically
                             xPos = (screenWidth - reqW) / 2;
                             yPos = (screenHeight - reqH) * 0.381966;
-                            NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
+                            //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
                         } else {
                             // Other windows: 22 px from left, 44 px from top
                             xPos = 22;
                             yPos = 44;
-                            NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
+                            //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
                         }
                         XCBRect newRect = winRect;
                         newRect.position.x = xPos;
@@ -1081,7 +1081,7 @@ static XCBConnection *sharedInstance;
 
     if ([window decorated] && isManaged)
     {
-        NSLog(@"Window with id %u already decorated", [window window]);
+        //NSLog(@"Window with id %u already decorated", [window window]);
 
         [self mapWindow:window];
         window = nil;
@@ -1137,7 +1137,7 @@ static XCBConnection *sharedInstance;
         });
 
 
-        NSLog(@"Window Type %@ and window: %u", [ewmhService EWMHWMWindowType], [window window]);
+        //NSLog(@"Window Type %@ and window: %u", [ewmhService EWMHWMWindowType], [window window]);
         void *windowTypeReply = [ewmhService getProperty:[ewmhService EWMHWMWindowType]
                                             propertyType:XCB_ATOM_ATOM
                                                forWindow:window
@@ -1152,11 +1152,11 @@ static XCBConnection *sharedInstance;
             XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self];
 
             name = [atomService atomNameFromAtom:*atom];
-            NSLog(@"Name: %@", name);
+            //NSLog(@"Name: %@", name);
 
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDock]])
             {
-                NSLog(@"Dock window %u to be registered", [window window]);
+                //NSLog(@"Dock window %u to be registered", [window window]);
                 
                 // Select PropertyChange events on dock windows to track strut changes
                 uint32_t dockMask[] = {XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_PROPERTY_CHANGE};
@@ -1211,7 +1211,7 @@ static XCBConnection *sharedInstance;
 
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeMenu]])
             {
-                NSLog(@"Menu window %u to be registered", [window window]);
+                //NSLog(@"Menu window %u to be registered", [window window]);
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
@@ -1231,7 +1231,7 @@ static XCBConnection *sharedInstance;
 
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypePopupMenu]])
             {
-                NSLog(@"PopupMenu window %u to be registered", [window window]);
+                //NSLog(@"PopupMenu window %u to be registered", [window window]);
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
@@ -1251,7 +1251,7 @@ static XCBConnection *sharedInstance;
 
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDropdownMenu]])
             {
-                NSLog(@"DropdownMenu window %u to be registered", [window window]);
+                //NSLog(@"DropdownMenu window %u to be registered", [window window]);
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
@@ -1271,7 +1271,7 @@ static XCBConnection *sharedInstance;
 
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDesktop]])
             {
-                NSLog(@"Desktop window %u to be registered", [window window]);
+                //NSLog(@"Desktop window %u to be registered", [window window]);
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
@@ -1284,7 +1284,7 @@ static XCBConnection *sharedInstance;
                 // Grab button on desktop window so we can track focus changes
                 // This ensures _NET_ACTIVE_WINDOW is updated when clicking on desktop
                 [window grabButton];
-                NSLog(@"[MapRequest] Grabbed button on desktop window %u for focus tracking", [window window]);
+                //NSLog(@"[MapRequest] Grabbed button on desktop window %u for focus tracking", [window window]);
 
                 window = nil;
                 ewmhService = nil;
@@ -1296,7 +1296,7 @@ static XCBConnection *sharedInstance;
 
             /*if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDialog]])
             {
-                NSLog(@"Dialog window %u to be registered", [window window]);
+                //NSLog(@"Dialog window %u to be registered", [window window]);
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
@@ -1334,7 +1334,7 @@ static XCBConnection *sharedInstance;
             
             if (atom[0] == 3 && atom[1] == 0 && atom[2] == 0 && atom[3] == 0 && atom[4] == 0)
             {
-                NSLog(@"Motif undecorated window: %d", [window window]);
+                //NSLog(@"Motif undecorated window: %d", [window window]);
                 free(motifHints);
                 XCBGeometryReply *geometry = [window geometries];
                 [window setWindowRect:[geometry rect]];  
@@ -1348,7 +1348,7 @@ static XCBConnection *sharedInstance;
                 // Grab button on undecorated window so we can track focus changes
                 // This is needed for _NET_ACTIVE_WINDOW to be updated when clicking
                 [window grabButton];
-                NSLog(@"[MapRequest] Grabbed button on undecorated window %u for focus tracking", [window window]);
+                //NSLog(@"[MapRequest] Grabbed button on undecorated window %u for focus tracking", [window window]);
 
                 window = nil;
                 ewmhService = nil;
@@ -1420,7 +1420,7 @@ static XCBConnection *sharedInstance;
             argbVisualId = findARGBVisual([screen screen], &argbVisualType);
 
             if (argbVisualId != 0 && argbVisualType != NULL) {
-                NSLog(@"[XCBConnection] Creating frame with 32-bit ARGB visual (0x%x) for compositor alpha", argbVisualId);
+                //NSLog(@"[XCBConnection] Creating frame with 32-bit ARGB visual (0x%x) for compositor alpha", argbVisualId);
 
                 // Create colormap for ARGB visual (required for 32-bit windows)
                 argbColormap = xcb_generate_id(connection);
@@ -1443,7 +1443,7 @@ static XCBConnection *sharedInstance;
                 values[2] = FRAMEMASK;  // event_mask
                 values[3] = argbColormap;  // colormap
             } else {
-                NSLog(@"[XCBConnection] No ARGB visual found, using standard 24-bit frame");
+                //NSLog(@"[XCBConnection] No ARGB visual found, using standard 24-bit frame");
                 values[0] = borderPixel;  // border color
                 values[1] = FRAMEMASK;
             }
@@ -1524,10 +1524,10 @@ static XCBConnection *sharedInstance;
                 }
             }
         } else {
-            NSLog(@"[MapRequest] GNUstep window %u — skipping WM placement override", [window window]);
+            //NSLog(@"[MapRequest] GNUstep window %u — skipping WM placement override", [window window]);
         }
     } else {
-        NSLog(@"[MapRequest] Skipping WM placement override for adopted window %u", [window window]);
+        //NSLog(@"[MapRequest] Skipping WM placement override for adopted window %u", [window window]);
     }
 
     // Determine if this window is a dialog via _NET_WM_WINDOW_TYPE.
@@ -1546,7 +1546,7 @@ static XCBConnection *sharedInstance;
     uint16_t winWidth = reqW + 2 * (uint16_t)cb;
     uint16_t winHeight = reqH + titleHeight + (uint16_t)cb;
 
-    NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
+    //NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
     if (shouldReposition && screen) {
         uint16_t screenWidth = [screen screen]->width_in_pixels;
@@ -1556,12 +1556,12 @@ static XCBConnection *sharedInstance;
             // Dialogs: centered horizontally, golden ratio vertically
             xPos = (screenWidth - winWidth) / 2;
             yPos = (screenHeight - winHeight) * 0.381966; // Golden ratio from top
-            NSLog(@"[MapRequest] Applying golden ratio placement for dialog window %u: %d, %d", [window window], xPos, yPos);
+            //NSLog(@"[MapRequest] Applying golden ratio placement for dialog window %u: %d, %d", [window window], xPos, yPos);
         } else {
             // Other windows: 22 px from left, 44 px from top
             xPos = 22;
             yPos = 44;
-            NSLog(@"[MapRequest] Applying default placement for window %u: %d, %d", [window window], xPos, yPos);
+            //NSLog(@"[MapRequest] Applying default placement for window %u: %d, %d", [window window], xPos, yPos);
         }
 
         // Keep the client rect in root coordinates while frame uses xPos/yPos.
@@ -1599,7 +1599,7 @@ static XCBConnection *sharedInstance;
     if (depth == 32 && argbColormap != XCB_NONE) {
         [frame setUse32BitDepth:YES];
         [frame setArgbVisualId:argbVisualId];
-        NSLog(@"[XCBConnection] Configured frame for 32-bit ARGB rendering");
+        //NSLog(@"[XCBConnection] Configured frame for 32-bit ARGB rendering");
     }
 
     // Ensure icccmService is valid
@@ -1625,7 +1625,7 @@ static XCBConnection *sharedInstance;
     /*[self mapWindow:frame];
     [self registerWindow:window];*/
 
-    NSLog(@"Client window decorated with id %u at %d,%d", [window window], xPos, yPos);
+    //NSLog(@"Client window decorated with id %u at %d,%d", [window window], xPos, yPos);
     [frame initCursor];  // Must init cursor BEFORE decorateClientWindow - resize zones need it
     // Map the frame BEFORE decorating so that a pre-existing mapped client is reparented into
     // an already-mapped parent. Reparenting a mapped window into an *unmapped* frame causes the
@@ -1682,10 +1682,10 @@ static XCBConnection *sharedInstance;
                         // Delete so it doesn't persist past birth
                         xcb_delete_property([self connection], [window window], birthAtom);
 
-                        NSLog(@"[MapRequest] Birth rect on NEW window %u: src={%d,%d,%hu,%hu}",
-                              [window window],
-                              (int)animStartRect.position.x, (int)animStartRect.position.y,
-                              animStartRect.size.width, animStartRect.size.height);
+                        //NSLog(@"[MapRequest] Birth rect on NEW window %u: src={%d,%d,%hu,%hu}",
+                        //      [window window],
+                        //      (int)animStartRect.position.x, (int)animStartRect.position.y,
+                        //      animStartRect.size.width, animStartRect.size.height);
 
                         // Trigger compositor animation
                         Class compositorClass = NSClassFromString(@"URSCompositingManager");
@@ -1702,7 +1702,7 @@ static XCBConnection *sharedInstance;
                                                                  toRect:endRect
                                                                duration:0.8
                                                                    fade:YES];
-                                    NSLog(@"[MapRequest] Composited birth animation for NEW window %u", [frame window]);
+                                    //NSLog(@"[MapRequest] Composited birth animation for NEW window %u", [frame window]);
                                 } else {
                                     XCBScreen *screenObj = [[self screens] objectAtIndex:0];
                                     xcb_screen_t *screen = [screenObj screen];
@@ -1711,14 +1711,14 @@ static XCBConnection *sharedInstance;
                                                                   connection:self
                                                                       screen:screen
                                                                     duration:0.2];
-                                    NSLog(@"[MapRequest] Zoom-rect birth animation for NEW window %u", [frame window]);
+                                    //NSLog(@"[MapRequest] Zoom-rect birth animation for NEW window %u", [frame window]);
                                 }
                             }
                         }
                     } else {
                         // NoAnimation — still delete the property
                         xcb_delete_property([self connection], [window window], birthAtom);
-                        NSLog(@"[MapRequest] Birth rect suppressed (NoAnimation) for NEW window %u", [window window]);
+                        //NSLog(@"[MapRequest] Birth rect suppressed (NoAnimation) for NEW window %u", [window window]);
                     }
                 }
                 free(reply);
@@ -1740,7 +1740,7 @@ static XCBConnection *sharedInstance;
 - (void)handleUnmapRequest:(xcb_unmap_window_request_t *)anEvent
 {
     XCBWindow *window = [self windowForXCBId:anEvent->window];
-    NSLog(@"[%@] Unmap request for window %u", NSStringFromClass([self class]), [window window]);
+    //NSLog(@"[%@] Unmap request for window %u", NSStringFromClass([self class]), [window window]);
     [self unmapWindow:window];
     [self setNeedFlush:YES];
     window = nil;
@@ -1972,7 +1972,7 @@ static XCBConnection *sharedInstance;
             if (detectedZone != self.pendingSnapZone) {
                 // Entered a new zone (or left all zones)
                 if (detectedZone != SnapZoneNone) {
-                    NSLog(@"[Snap] Entered zone %ld (was %ld)", (long)detectedZone, (long)self.pendingSnapZone);
+                    //NSLog(@"[Snap] Entered zone %ld (was %ld)", (long)detectedZone, (long)self.pendingSnapZone);
                 }
                 self.pendingSnapZone = detectedZone;
                 self.snapZoneEntryTime = anEvent->time;
@@ -1984,7 +1984,7 @@ static XCBConnection *sharedInstance;
                 // Still in the same zone - check if linger time has elapsed
                 xcb_timestamp_t elapsed = anEvent->time - self.snapZoneEntryTime;
                 if (elapsed >= SNAP_LINGER_TIME && !self.snapPreviewShown) {
-                    NSLog(@"[Snap] Linger time elapsed, showing preview for zone %ld", (long)detectedZone);
+                    //NSLog(@"[Snap] Linger time elapsed, showing preview for zone %ld", (long)detectedZone);
                     [self showSnapPreviewForZone:detectedZone frame:frame];
                     self.snapPreviewShown = YES;
                 }
@@ -2209,10 +2209,10 @@ static XCBConnection *sharedInstance;
         
         XCBWindow *rootWindow = [screen rootWindow];
         if ([ewmhService readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight]) {
-            NSLog(@"[Maximize] Using workarea: x=%d, y=%d, width=%u, height=%u", 
-                  workareaX, workareaY, workareaWidth, workareaHeight);
+            //NSLog(@"[Maximize] Using workarea: x=%d, y=%d, width=%u, height=%u", 
+            //      workareaX, workareaY, workareaWidth, workareaHeight);
         } else {
-            NSLog(@"[Maximize] No workarea set, using full screen: %u x %u", workareaWidth, workareaHeight);
+            //NSLog(@"[Maximize] No workarea set, using full screen: %u x %u", workareaWidth, workareaHeight);
         }
 
         XCBRect startRect = [frame windowRect];
@@ -2224,7 +2224,7 @@ static XCBConnection *sharedInstance;
         /*** Use programmatic resize that follows the same code path as manual resize ***/
         XCBRect targetRect = XCBMakeRect(XCBMakePoint(workareaX, workareaY),
                                           XCBMakeSize(workareaWidth, workareaHeight));
-        NSLog(@"[Maximize] frame=%u startRect=(%d,%d %u x %u) target=(%d,%d %u x %u)", [frame window], (int)startRect.position.x, (int)startRect.position.y, (unsigned)startRect.size.width, (unsigned)startRect.size.height, (int)targetRect.position.x, (int)targetRect.position.y, (unsigned)targetRect.size.width, (unsigned)targetRect.size.height);
+        //NSLog(@"[Maximize] frame=%u startRect=(%d,%d %u x %u) target=(%d,%d %u x %u)", [frame window], (int)startRect.position.x, (int)startRect.position.y, (unsigned)startRect.size.width, (unsigned)startRect.size.height, (int)targetRect.position.x, (int)targetRect.position.y, (unsigned)targetRect.size.width, (unsigned)targetRect.size.height);
         [frame programmaticResizeToRect:targetRect];
         [frame setFullScreen:YES];
         [frame setIsMaximized:YES];
@@ -2253,17 +2253,17 @@ static XCBConnection *sharedInstance;
         [frame updateAllResizeZonePositions];
 
         // Log geometry right before flushing and applying shape masks
-        NSLog(@"[Maximize] pre-flush geometry frameRect=(%d,%d %u x %u) titleRect=(%d,%d %u x %u) clientRect=(%d,%d %u x %u)",
-              (int)[frame windowRect].position.x, (int)[frame windowRect].position.y, (unsigned)[frame windowRect].size.width, (unsigned)[frame windowRect].size.height,
-              (int)[titleBar windowRect].position.x, (int)[titleBar windowRect].position.y, (unsigned)[titleBar windowRect].size.width, (unsigned)[titleBar windowRect].size.height,
-              (int)[clientWindow windowRect].position.x, (int)[clientWindow windowRect].position.y, (unsigned)[clientWindow windowRect].size.width, (unsigned)[clientWindow windowRect].size.height);
+        //NSLog(@"[Maximize] pre-flush geometry frameRect=(%d,%d %u x %u) titleRect=(%d,%d %u x %u) clientRect=(%d,%d %u x %u)",
+        //      (int)[frame windowRect].position.x, (int)[frame windowRect].position.y, (unsigned)[frame windowRect].size.width, (unsigned)[frame windowRect].size.height,
+        //      (int)[titleBar windowRect].position.x, (int)[titleBar windowRect].position.y, (unsigned)[titleBar windowRect].size.width, (unsigned)[titleBar windowRect].size.height,
+        //      (int)[clientWindow windowRect].position.x, (int)[clientWindow windowRect].position.y, (unsigned)[clientWindow windowRect].size.width, (unsigned)[clientWindow windowRect].size.height);
 
         /*** Flush to ensure X server has processed configure requests ***/
         xcb_flush([self connection]);
 
         /*** Update shape mask for new dimensions ***/
         [frame applyRoundedCornersShapeMask];
-        NSLog(@"[Maximize] applied rounded corners for frame %u", [frame window]);
+        //NSLog(@"[Maximize] applied rounded corners for frame %u", [frame window]);
 
         ewmhService = nil;
         rootWindow = nil;
@@ -2309,8 +2309,8 @@ static XCBConnection *sharedInstance;
         self.expectedFocusWindow = [clientWindow window];
         self.expectedFocusTimestamp = anEvent->time;
         EWMHService *ewmhActiveService = [EWMHService sharedInstanceWithConnection:self];
-        NSLog(@"[handleButtonPress] Setting _NET_ACTIVE_WINDOW to client 0x%x (clicked 0x%x)",
-              [clientWindow window], [window window]);
+        //NSLog(@"[handleButtonPress] Setting _NET_ACTIVE_WINDOW to client 0x%x (clicked 0x%x)",
+        //      [clientWindow window], [window window]);
         [ewmhActiveService updateNetActiveWindow:clientWindow];
         ewmhActiveService = nil;
     }
@@ -2700,13 +2700,13 @@ static XCBConnection *sharedInstance;
 
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDesktop]])
             {
-                NSLog(@"PropertyNotify: Window %u identified as desktop type - stacking below", anEvent->window);
+                //NSLog(@"PropertyNotify: Window %u identified as desktop type - stacking below", anEvent->window);
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDesktop]];
                 [window stackBelow];
             }
             else if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDock]])
             {
-                NSLog(@"PropertyNotify: Window %u identified as dock type - stacking above", anEvent->window);
+                //NSLog(@"PropertyNotify: Window %u identified as dock type - stacking above", anEvent->window);
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDock]];
                 [window stackAbove];
 
@@ -2746,7 +2746,7 @@ static XCBConnection *sharedInstance;
     XCBWindow *rootWindow = [screen rootWindow];
     if ([name isEqualToString:[ewmhService EWMHWorkarea]] && anEvent->window == [rootWindow window])
     {
-        NSLog(@"PropertyNotify: _NET_WORKAREA changed on root window - updating cached workarea");
+        //NSLog(@"PropertyNotify: _NET_WORKAREA changed on root window - updating cached workarea");
         if (screen && rootWindow) {
             self.workareaValid = [ewmhService readWorkareaForRootWindow:rootWindow 
                                                                       x:&_cachedWorkareaX 
@@ -2818,37 +2818,37 @@ static XCBConnection *sharedInstance;
 
     // Handle Gershwin-specific window commands
     if ([atomMessageName isEqualToString:@"_GERSHWIN_CENTER_WINDOW"]) {
-        NSLog(@"[ClientMessage] Center Window requested");
+        //NSLog(@"[ClientMessage] Center Window requested");
         [self centerActiveWindow];
         return;
     }
     if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_LEFT"]) {
-        NSLog(@"[ClientMessage] Tile Left requested");
+        //NSLog(@"[ClientMessage] Tile Left requested");
         [self tileActiveWindowLeft];
         return;
     }
     if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_RIGHT"]) {
-        NSLog(@"[ClientMessage] Tile Right requested");
+        //NSLog(@"[ClientMessage] Tile Right requested");
         [self tileActiveWindowRight];
         return;
     }
     if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_TOP_LEFT"]) {
-        NSLog(@"[ClientMessage] Tile Top Left requested");
+        //NSLog(@"[ClientMessage] Tile Top Left requested");
         [self tileActiveWindowToZone:SnapZoneTopLeft];
         return;
     }
     if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_TOP_RIGHT"]) {
-        NSLog(@"[ClientMessage] Tile Top Right requested");
+        //NSLog(@"[ClientMessage] Tile Top Right requested");
         [self tileActiveWindowToZone:SnapZoneTopRight];
         return;
     }
     if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_BOTTOM_LEFT"]) {
-        NSLog(@"[ClientMessage] Tile Bottom Left requested");
+        //NSLog(@"[ClientMessage] Tile Bottom Left requested");
         [self tileActiveWindowToZone:SnapZoneBottomLeft];
         return;
     }
     if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_BOTTOM_RIGHT"]) {
-        NSLog(@"[ClientMessage] Tile Bottom Right requested");
+        //NSLog(@"[ClientMessage] Tile Bottom Right requested");
         [self tileActiveWindowToZone:SnapZoneBottomRight];
         return;
     }
@@ -2925,7 +2925,7 @@ static XCBConnection *sharedInstance;
         anEvent->data.data32[0] == ICCCM_WM_STATE_ICONIC &&
         ![frame isMinimized])
     {
-        NSLog(@"[WM_CHANGE_STATE] Minimizing window %u", anEvent->window);
+        //NSLog(@"[WM_CHANGE_STATE] Minimizing window %u", anEvent->window);
 
         XCBWindow *targetWindow = frame ? (XCBWindow *)frame : window;
         if (targetWindow) {
@@ -2981,14 +2981,14 @@ static XCBConnection *sharedInstance;
             }
         }
 
-        NSLog(@"[WM_CHANGE_STATE] Window minimized (hidden)");
+        //NSLog(@"[WM_CHANGE_STATE] Window minimized (hidden)");
     }
     else if ([frame isMinimized] &&
              anEvent->type == [atomService atomFromCachedAtomsWithKey:[icccmService WMChangeState]] &&
              anEvent->format == 32 &&
              anEvent->data.data32[0] != ICCCM_WM_STATE_ICONIC)
     {
-        NSLog(@"[WM_CHANGE_STATE] Restoring window %u", anEvent->window);
+        //NSLog(@"[WM_CHANGE_STATE] Restoring window %u", anEvent->window);
 
         if (frame != nil)
         {
@@ -3034,7 +3034,7 @@ static XCBConnection *sharedInstance;
         [clientWindow focus];
         [self drawAllTitleBarsExcept:titleBar];
 
-        NSLog(@"[WM_CHANGE_STATE] Window restored");
+        //NSLog(@"[WM_CHANGE_STATE] Window restored");
     }
 
     window = nil;
@@ -3143,7 +3143,7 @@ static XCBConnection *sharedInstance;
             if (!parent || ![parent isKindOfClass:[XCBFrame class]])
             {
                 [window grabButton];
-                NSLog(@"[EnterNotify] Grabbed button on undecorated window %u", [window window]);
+                //NSLog(@"[EnterNotify] Grabbed button on undecorated window %u", [window window]);
             }
         }
     }
@@ -3237,7 +3237,7 @@ static XCBConnection *sharedInstance;
     /*if ([window isKindOfClass:[XCBWindow class]] && [[window parentWindow] isKindOfClass:[XCBFrame class]])
     {
         //TODO: frame needs a pixmap too.
-        NSLog(@"EXPOSE EVENT FOR WINDOW: %u of kind: %@", [window window], NSStringFromClass([window class]));
+        //NSLog(@"EXPOSE EVENT FOR WINDOW: %u of kind: %@", [window window], NSStringFromClass([window class]));
         XCBFrame *frame = (XCBFrame*)window;
         position = XCBMakePoint(anEvent->x, anEvent->y);
         size = XCBMakeSize(anEvent->width, anEvent->height);
@@ -3508,7 +3508,7 @@ static XCBConnection *sharedInstance;
 
                 if ([clientWindow alwaysOnTop])
                 {
-                    NSLog(@"Always on top");
+                    //NSLog(@"Always on top");
                     windows = nil;
                     tmp = nil;
                     frame = nil;
@@ -3599,7 +3599,7 @@ static XCBConnection *sharedInstance;
             }
         }
 
-        NSLog(@"Subtructure redirect was set to the root window");
+        //NSLog(@"Subtructure redirect was set to the root window");
 
         rootWindow = nil;
         screen = nil;
@@ -3607,7 +3607,7 @@ static XCBConnection *sharedInstance;
         return YES;
     }
 
-    NSLog(@"Replacing window manager");
+    //NSLog(@"Replacing window manager");
 
     NSString *atomName = [NSString stringWithFormat:@"WM_S%d", screenId];
 
@@ -3636,7 +3636,7 @@ static XCBConnection *sharedInstance;
         }
     }
 
-    NSLog(@"Registered as window manager");
+    //NSLog(@"Registered as window manager");
 
     screen = nil;
     rootWindow = nil;
@@ -3735,14 +3735,14 @@ static XCBConnection *sharedInstance;
 - (void) handleCirculateRequest: (xcb_circulate_request_event_t*)anEvent
 {
     // Handle window circulation requests (bring to front/send to back)
-    NSLog(@"[%@] Circulate request for window %u, place: %s",
-          NSStringFromClass([self class]),
-          anEvent->window,
-          anEvent->place == XCB_CIRCULATE_RAISE_LOWEST ? "raise" : "lower");
+    //NSLog(@"[%@] Circulate request for window %u, place: %s",
+    //      NSStringFromClass([self class]),
+    //      anEvent->window,
+    //      anEvent->place == XCB_CIRCULATE_RAISE_LOWEST ? "raise" : "lower");
 
     XCBWindow *window = [self windowForXCBId:anEvent->window];
     if (!window) {
-        NSLog(@"Window %u not found for circulate request", anEvent->window);
+        //NSLog(@"Window %u not found for circulate request", anEvent->window);
         return;
     }
 
@@ -3751,11 +3751,11 @@ static XCBConnection *sharedInstance;
         // Raise the lowest window to the top
         [window stackAbove];
         [self restackDockWindowsAbove];
-        NSLog(@"Raised window %u to top", anEvent->window);
+        //NSLog(@"Raised window %u to top", anEvent->window);
     } else if (anEvent->place == XCB_CIRCULATE_LOWER_HIGHEST) {
         // Lower the highest window to the bottom
         [window stackBelow];
-        NSLog(@"Lowered window %u to bottom", anEvent->window);
+        //NSLog(@"Lowered window %u to bottom", anEvent->window);
     }
 
     // If this is a frame window, also handle its children
@@ -3780,7 +3780,7 @@ static XCBConnection *sharedInstance;
         if (!screen) {
             // Fallback: use first screen if frame doesn't have one
             screen = [screens firstObject];
-            NSLog(@"[Snap] ensureWorkareaCache: frame has no screen, using first screen");
+            //NSLog(@"[Snap] ensureWorkareaCache: frame has no screen, using first screen");
         }
         if (screen) {
             XCBWindow *rootWindow = [screen rootWindow];
@@ -3848,14 +3848,14 @@ static XCBConnection *sharedInstance;
 
 - (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame {
     if (!frame || zone == SnapZoneNone) {
-        NSLog(@"[Snap] executeSnapForZone: no frame or zone is None");
+        //NSLog(@"[Snap] executeSnapForZone: no frame or zone is None");
         return;
     }
 
     [self ensureWorkareaCache:frame];
-    NSLog(@"[Snap] executeSnapForZone: zone=%ld workarea=(%d,%d,%u,%u) valid=%d",
-          (long)zone, _cachedWorkareaX, _cachedWorkareaY,
-          _cachedWorkareaWidth, _cachedWorkareaHeight, self.workareaValid);
+    //NSLog(@"[Snap] executeSnapForZone: zone=%ld workarea=(%d,%d,%u,%u) valid=%d",
+    //      (long)zone, _cachedWorkareaX, _cachedWorkareaY,
+    //      _cachedWorkareaWidth, _cachedWorkareaHeight, self.workareaValid);
 
     // Save current rect for restore
     [frame setOldRect:[frame windowRect]];
@@ -3868,7 +3868,7 @@ static XCBConnection *sharedInstance;
                 XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
                 XCBMakeSize(_cachedWorkareaWidth, _cachedWorkareaHeight));
             [frame setIsMaximized:YES];
-            NSLog(@"[Snap] Maximizing window to workarea");
+            //NSLog(@"[Snap] Maximizing window to workarea");
             break;
 
         case SnapZoneLeft:
@@ -3876,7 +3876,7 @@ static XCBConnection *sharedInstance;
             targetRect = XCBMakeRect(
                 XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
                 XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight));
-            NSLog(@"[Snap] Tiling window to left half");
+            //NSLog(@"[Snap] Tiling window to left half");
             break;
 
         case SnapZoneRight:
@@ -3884,7 +3884,7 @@ static XCBConnection *sharedInstance;
             targetRect = XCBMakeRect(
                 XCBMakePoint(_cachedWorkareaX + _cachedWorkareaWidth / 2, _cachedWorkareaY),
                 XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight));
-            NSLog(@"[Snap] Tiling window to right half");
+            //NSLog(@"[Snap] Tiling window to right half");
             break;
 
         case SnapZoneTopLeft:
@@ -3892,7 +3892,7 @@ static XCBConnection *sharedInstance;
             targetRect = XCBMakeRect(
                 XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
                 XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
-            NSLog(@"[Snap] Tiling window to top-left quarter");
+            //NSLog(@"[Snap] Tiling window to top-left quarter");
             break;
 
         case SnapZoneTopRight:
@@ -3900,7 +3900,7 @@ static XCBConnection *sharedInstance;
             targetRect = XCBMakeRect(
                 XCBMakePoint(_cachedWorkareaX + _cachedWorkareaWidth / 2, _cachedWorkareaY),
                 XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
-            NSLog(@"[Snap] Tiling window to top-right quarter");
+            //NSLog(@"[Snap] Tiling window to top-right quarter");
             break;
 
         case SnapZoneBottomLeft:
@@ -3908,7 +3908,7 @@ static XCBConnection *sharedInstance;
             targetRect = XCBMakeRect(
                 XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY + _cachedWorkareaHeight / 2),
                 XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
-            NSLog(@"[Snap] Tiling window to bottom-left quarter");
+            //NSLog(@"[Snap] Tiling window to bottom-left quarter");
             break;
 
         case SnapZoneBottomRight:
@@ -3916,7 +3916,7 @@ static XCBConnection *sharedInstance;
             targetRect = XCBMakeRect(
                 XCBMakePoint(_cachedWorkareaX + _cachedWorkareaWidth / 2, _cachedWorkareaY + _cachedWorkareaHeight / 2),
                 XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
-            NSLog(@"[Snap] Tiling window to bottom-right quarter");
+            //NSLog(@"[Snap] Tiling window to bottom-right quarter");
             break;
 
         default:
@@ -3958,7 +3958,7 @@ static XCBConnection *sharedInstance;
 }
 
 - (void)showSnapPreviewForZone:(SnapZone)zone frame:(XCBFrame *)frame {
-    NSLog(@"[Snap] showSnapPreviewForZone called with zone=%ld", (long)zone);
+    //NSLog(@"[Snap] showSnapPreviewForZone called with zone=%ld", (long)zone);
 
     if (zone == SnapZoneNone) {
         [self hideSnapPreview];
@@ -4047,9 +4047,9 @@ static XCBConnection *sharedInstance;
                 return;
         }
 
-        NSLog(@"[Snap] Showing preview for zone=%ld rect=(%.0f,%.0f,%.0f,%.0f)",
-              (long)zone, previewRect.origin.x, previewRect.origin.y,
-              previewRect.size.width, previewRect.size.height);
+        //NSLog(@"[Snap] Showing preview for zone=%ld rect=(%.0f,%.0f,%.0f,%.0f)",
+        //      (long)zone, previewRect.origin.x, previewRect.origin.y,
+        //      previewRect.size.width, previewRect.size.height);
 
         if ([overlay respondsToSelector:@selector(showPreviewForRect:)]) {
             // Defer out of the XCB event processing loop so that orderFront:nil
@@ -4125,7 +4125,7 @@ static XCBConnection *sharedInstance;
     XCBFrame *frame = [self getActiveFrame];
 
     if (!frame) {
-        NSLog(@"[Tile] No active window to tile");
+        //NSLog(@"[Tile] No active window to tile");
         return;
     }
 
@@ -4136,7 +4136,7 @@ static XCBConnection *sharedInstance;
     XCBFrame *frame = [self getActiveFrame];
 
     if (!frame) {
-        NSLog(@"[Tile] No active window to tile");
+        //NSLog(@"[Tile] No active window to tile");
         return;
     }
 
@@ -4147,7 +4147,7 @@ static XCBConnection *sharedInstance;
     XCBFrame *frame = [self getActiveFrame];
 
     if (!frame) {
-        NSLog(@"[Tile] No active window to tile");
+        //NSLog(@"[Tile] No active window to tile");
         return;
     }
 
@@ -4158,7 +4158,7 @@ static XCBConnection *sharedInstance;
     XCBFrame *frame = [self getActiveFrame];
 
     if (!frame) {
-        NSLog(@"[Center] No active window to center");
+        //NSLog(@"[Center] No active window to center");
         return;
     }
 
@@ -4181,7 +4181,7 @@ static XCBConnection *sharedInstance;
         XCBMakePoint(centerX, centerY),
         XCBMakeSize(windowWidth, windowHeight));
 
-    NSLog(@"[Center] Centering window to (%d, %d)", centerX, centerY);
+    //NSLog(@"[Center] Centering window to (%d, %d)", centerX, centerY);
 
     // Save current rect for restore
     [frame setOldRect:currentRect];
@@ -4195,7 +4195,7 @@ static XCBConnection *sharedInstance;
 
 - (void)centerFrame:(XCBFrame *)frame {
     if (!frame) {
-        NSLog(@"[Center] No frame to center");
+        //NSLog(@"[Center] No frame to center");
         return;
     }
 
@@ -4215,7 +4215,7 @@ static XCBConnection *sharedInstance;
         XCBMakePoint(centerX, centerY),
         XCBMakeSize(windowWidth, windowHeight));
 
-    NSLog(@"[Center] Centering frame to (%d, %d)", centerX, centerY);
+    //NSLog(@"[Center] Centering frame to (%d, %d)", centerX, centerY);
 
     [frame setOldRect:currentRect];
 

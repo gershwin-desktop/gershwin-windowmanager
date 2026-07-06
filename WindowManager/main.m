@@ -28,7 +28,7 @@ static void signalHandler(int sig)
         default: signame = "UNKNOWN"; break;
     }
     
-    NSLog(@"[WindowManager] Received signal %d (%s), initiating clean shutdown...", sig, signame);
+    //NSLog(@"[WindowManager] Received signal %d (%s), initiating clean shutdown...", sig, signame);
     
     if (globalEventHandler) {
         [globalEventHandler cleanupBeforeExit];
@@ -60,7 +60,7 @@ static void setupSignalHandlers(void)
     // (e.g., when launched without a terminal) don't kill the process.
     signal(SIGPIPE, SIG_IGN);
     
-    NSLog(@"[WindowManager] Signal handlers installed for clean shutdown");
+    //NSLog(@"[WindowManager] Signal handlers installed for clean shutdown");
 }
 
 int main(int argc, const char * argv[])
@@ -72,7 +72,7 @@ int main(int argc, const char * argv[])
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "-dc") == 0 || strcmp(argv[i], "--disable-compositing") == 0) {
                 enableCompositing = NO;
-                NSLog(@"[WindowManager] Compositing mode disabled via command-line flag");
+                //NSLog(@"[WindowManager] Compositing mode disabled via command-line flag");
                 break;
             } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
                 printf("WindowManager - Objective-C Window Manager\n");
@@ -101,7 +101,7 @@ int main(int argc, const char * argv[])
         [settings setMaximizePosition:maximizePosition];
 
         // Initialize GSTheme for titlebar decorations
-        NSLog(@"Initializing GSTheme titlebar integration...");
+        //NSLog(@"Initializing GSTheme titlebar integration...");
         [URSThemeIntegration initializeGSTheme];
         [URSThemeIntegration enableGSThemeTitleBars];
 

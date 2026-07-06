@@ -290,7 +290,7 @@
         _gaussianMap = make_gaussian_map((double)SHADOW_RADIUS, &_gaussianSize);
         if (_gaussianMap) {
             [self presumGaussianMap];
-            NSLog(@"[CompositingManager] Initialized Gaussian shadow map (size=%d)", _gaussianSize);
+            //NSLog(@"[CompositingManager] Initialized Gaussian shadow map (size=%d)", _gaussianSize);
         } else {
             NSLog(@"[CompositingManager] WARNING: Failed to create Gaussian map");
         }
@@ -307,11 +307,11 @@
     }
     
     self.connection = connection;
-    NSLog(@"[CompositingManager] Checking for required X extensions...");
+    //NSLog(@"[CompositingManager] Checking for required X extensions...");
     
     if (![self checkExtensions]) {
         NSLog(@"[CompositingManager] Required extensions not available");
-        NSLog(@"[CompositingManager] Falling back to non-compositing mode");
+        //NSLog(@"[CompositingManager] Falling back to non-compositing mode");
         return NO;
     }
     
@@ -350,7 +350,7 @@
 
     self.extensionsAvailable = YES;
     self.compositingEnabled = YES;
-    NSLog(@"[CompositingManager] Initialization successful - compositing available");
+    //NSLog(@"[CompositingManager] Initialization successful - compositing available");
     return YES;
 }
 
@@ -377,8 +377,8 @@
                 xcb_composite_query_version_reply(conn, version_cookie, NULL);
             
             if (version_reply) {
-                NSLog(@"[CompositingManager] COMPOSITE v%d.%d available", 
-                      version_reply->major_version, version_reply->minor_version);
+                //NSLog(@"[CompositingManager] COMPOSITE v%d.%d available", 
+                      //version_reply->major_version, version_reply->minor_version);
                 // Need at least 0.2 for NameWindowPixmap
                 if (version_reply->major_version == 0 && version_reply->minor_version < 2) {
                     NSLog(@"[CompositingManager] COMPOSITE version too old (need >= 0.2)");
@@ -397,7 +397,7 @@
             allExtensionsOK = NO;
         } else {
             self.renderOpcode = render_ext->major_opcode;
-            NSLog(@"[CompositingManager] RENDER extension available");
+            //NSLog(@"[CompositingManager] RENDER extension available");
         }
         
         // Check DAMAGE extension
@@ -418,10 +418,10 @@
             xcb_damage_query_version_reply_t *damage_version_reply =
                 xcb_damage_query_version_reply(conn, damage_version_cookie, NULL);
             if (damage_version_reply) {
-                NSLog(@"[CompositingManager] DAMAGE v%d.%d available (event base: %u)", 
-                      damage_version_reply->major_version,
-                      damage_version_reply->minor_version,
-                      self.damageEventBase);
+                //NSLog(@"[CompositingManager] DAMAGE v%d.%d available (event base: %u)", 
+                      //damage_version_reply->major_version,
+                      //damage_version_reply->minor_version,
+                      //self.damageEventBase);
                 free(damage_version_reply);
             }
         }
@@ -443,8 +443,8 @@
             xcb_xfixes_query_version_reply_t *xfixes_reply =
                 xcb_xfixes_query_version_reply(conn, xfixes_cookie, NULL);
             if (xfixes_reply) {
-                NSLog(@"[CompositingManager] XFIXES v%d.%d available", 
-                      xfixes_reply->major_version, xfixes_reply->minor_version);
+                //NSLog(@"[CompositingManager] XFIXES v%d.%d available", 
+                      //xfixes_reply->major_version, xfixes_reply->minor_version);
                 free(xfixes_reply);
             }
         }
@@ -459,13 +459,13 @@
                 xcb_shm_query_version_reply(conn, shm_cookie, NULL);
             if (shm_reply) {
                 self.shmAvailable = YES;
-                NSLog(@"[CompositingManager] MIT-SHM v%d.%d available (shared pixmaps: %s)", 
-                      shm_reply->major_version, shm_reply->minor_version,
-                      shm_reply->shared_pixmaps ? "yes" : "no");
+                //NSLog(@"[CompositingManager] MIT-SHM v%d.%d available (shared pixmaps: %s)", 
+                      //shm_reply->major_version, shm_reply->minor_version,
+                      //shm_reply->shared_pixmaps ? "yes" : "no");
                 free(shm_reply);
             }
         } else {
-            NSLog(@"[CompositingManager] MIT-SHM not available (using standard transfers)");
+            //NSLog(@"[CompositingManager] MIT-SHM not available (using standard transfers)");
         }
 
         // Check X Present extension (vblank-synced compositing)
@@ -474,10 +474,10 @@
         if (present_ext && present_ext->present) {
             self.presentEventBase = present_ext->first_event;
             self.presentAvailable = YES;
-            NSLog(@"[CompositingManager] X Present vblank sync available (event base: %u)",
-                  self.presentEventBase);
+            //NSLog(@"[CompositingManager] X Present vblank sync available (event base: %u)",
+                  //self.presentEventBase);
         } else {
-            NSLog(@"[CompositingManager] X Present not available — using direct composite");
+            //NSLog(@"[CompositingManager] X Present not available — using direct composite");
         }
 
         return allExtensionsOK;
@@ -536,15 +536,15 @@
                 // But accept any 8-bit ARGB format if we don't have one yet
                 if (self.argbFormat == XCB_NONE || fmt->direct.alpha_shift == 24) {
                     self.argbFormat = fmt->id;
-                    NSLog(@"[Render] Selected ARGB32 format: id=%u, shifts: R=%d G=%d B=%d A=%d, masks: R=0x%x G=0x%x B=0x%x A=0x%x",
-                          fmt->id, fmt->direct.red_shift, fmt->direct.green_shift, 
-                          fmt->direct.blue_shift, fmt->direct.alpha_shift,
-                          fmt->direct.red_mask, fmt->direct.green_mask,
-                          fmt->direct.blue_mask, fmt->direct.alpha_mask);
+                    //NSLog(@"[Render] Selected ARGB32 format: id=%u, shifts: R=%d G=%d B=%d A=%d, masks: R=0x%x G=0x%x B=0x%x A=0x%x",
+                          //fmt->id, fmt->direct.red_shift, fmt->direct.green_shift, 
+                          //fmt->direct.blue_shift, fmt->direct.alpha_shift,
+                          //fmt->direct.red_mask, fmt->direct.green_mask,
+                          //fmt->direct.blue_mask, fmt->direct.alpha_mask);
                 }
             } else {
-                NSLog(@"[Render] Skipping non-8bit ARGB32 format: id=%u, alpha_mask=0x%x",
-                      fmt->id, fmt->direct.alpha_mask);
+                //NSLog(@"[Render] Skipping non-8bit ARGB32 format: id=%u, alpha_mask=0x%x",
+                      //fmt->id, fmt->direct.alpha_mask);
             }
         }
     }
@@ -568,9 +568,9 @@
         }
     }
     
-    NSLog(@"[CompositingManager] Cached %lu visual formats, %lu depth formats", 
-          (unsigned long)[self.visualFormatCache count],
-          (unsigned long)[self.depthFormatCache count]);
+    //NSLog(@"[CompositingManager] Cached %lu visual formats, %lu depth formats", 
+          //(unsigned long)[self.visualFormatCache count],
+          //(unsigned long)[self.depthFormatCache count]);
     
     free(formats_reply);
     
@@ -579,8 +579,8 @@
         return NO;
     }
     
-    NSLog(@"[CompositingManager] Found render formats - root: %u, argb: %u", 
-          self.rootFormat, self.argbFormat);
+    //NSLog(@"[CompositingManager] Found render formats - root: %u, argb: %u", 
+          //self.rootFormat, self.argbFormat);
     return YES;
 }
 
@@ -644,21 +644,21 @@
                 if (direct->alpha_mask == 0xFF && direct->red_mask == 0 && 
                     direct->green_mask == 0 && direct->blue_mask == 0) {
                     result = fmt->id;
-                    NSLog(@"[Shadow] Found A8 format: id=%u alpha_shift=%d alpha_mask=0x%x", 
-                          fmt->id, direct->alpha_shift, direct->alpha_mask);
+                    //NSLog(@"[Shadow] Found A8 format: id=%u alpha_shift=%d alpha_mask=0x%x", 
+                          //fmt->id, direct->alpha_shift, direct->alpha_mask);
                     break;
                 }
             } else {
                 result = fmt->id;
-                NSLog(@"[Shadow] Found format for depth %d: id=%u type=%d", depth, fmt->id, fmt->type);
+                //NSLog(@"[Shadow] Found format for depth %d: id=%u type=%d", depth, fmt->id, fmt->type);
                 break;
             }
         }
     }
     
-    if (result == XCB_NONE) {
-        NSLog(@"[Shadow] WARNING: No suitable format found for depth %d", depth);
-    }
+    //if (result == XCB_NONE) {
+        //NSLog(@"[Shadow] WARNING: No suitable format found for depth %d", depth);
+    //}
     
     free(formats_reply);
     return result;
@@ -668,17 +668,17 @@
 
 - (BOOL)activateCompositing {
     if (!self.compositingEnabled) {
-        NSLog(@"[CompositingManager] Cannot activate - not initialized properly");
+        //NSLog(@"[CompositingManager] Cannot activate - not initialized properly");
         return NO;
     }
     
     if (self.compositingActive) {
-        NSLog(@"[CompositingManager] Compositing already active");
+        //NSLog(@"[CompositingManager] Compositing already active");
         return YES;
     }
     
     @try {
-        NSLog(@"[CompositingManager] Activating compositing...");
+        //NSLog(@"[CompositingManager] Activating compositing...");
         
         // Redirect all windows for compositing
         if (![self redirectWindows]) {
@@ -704,7 +704,7 @@
         [self addAllWindows];
         
         self.compositingActive = YES;
-        NSLog(@"[CompositingManager] Compositing activated successfully");
+        //NSLog(@"[CompositingManager] Compositing activated successfully");
         
         // Damage entire screen to trigger initial paint
         [self damageScreen];
@@ -728,13 +728,13 @@
         error = xcb_request_check(conn, cookie);
         
         if (error) {
-            NSLog(@"[CompositingManager] Error redirecting windows: %d", error->error_code);
+            //NSLog(@"[CompositingManager] Error redirecting windows: %d", error->error_code);
             free(error);
             return NO;
         }
         
         [self.connection flush];
-        NSLog(@"[CompositingManager] Windows redirected to offscreen buffers");
+        //NSLog(@"[CompositingManager] Windows redirected to offscreen buffers");
         return YES;
         
     } @catch (NSException *exception) {
@@ -761,7 +761,7 @@
         self.overlayWindow = overlay_reply->overlay_win;
         free(overlay_reply);
         
-        NSLog(@"[CompositingManager] Got overlay window: %u", self.overlayWindow);
+        //NSLog(@"[CompositingManager] Got overlay window: %u", self.overlayWindow);
         
         // Map the overlay window first
         xcb_map_window(conn, self.overlayWindow);
@@ -797,8 +797,8 @@
         xcb_map_window(conn, self.outputWindow);
         [self.connection flush];
         
-        NSLog(@"[CompositingManager] Overlay window created with output child: overlay=%u, output=%u", 
-              self.overlayWindow, self.outputWindow);
+        //NSLog(@"[CompositingManager] Overlay window created with output child: overlay=%u, output=%u", 
+              //self.overlayWindow, self.outputWindow);
         return YES;
         
     } @catch (NSException *exception) {
@@ -835,12 +835,12 @@
         if (self.blackPicture == XCB_NONE) {
             NSLog(@"[CompositingManager] WARNING: Failed to create black picture for shadows");
         } else {
-            NSLog(@"[CompositingManager] Created black picture 0x%x for shadows", self.blackPicture);
+            //NSLog(@"[CompositingManager] Created black picture 0x%x for shadows", self.blackPicture);
         }
         
         [self.connection flush];
-        NSLog(@"[CompositingManager] Root buffer created (%dx%d)",
-              self.screenWidth, self.screenHeight);
+        //NSLog(@"[CompositingManager] Root buffer created (%dx%d)",
+              //self.screenWidth, self.screenHeight);
 
         // Create present pixmaps for vblank-synced display (flip chain)
         if (self.presentAvailable) {
@@ -861,7 +861,7 @@
             xcb_render_create_picture(conn, self.presentPicture1,
                                      self.presentPixmap1, self.rootFormat, 0, NULL);
             self.currentPresentIndex = 0;
-            NSLog(@"[CompositingManager] Present flip chain created (2 pixmaps)");
+            //NSLog(@"[CompositingManager] Present flip chain created (2 pixmaps)");
         }
 
         return YES;
@@ -1616,9 +1616,9 @@
         // if windowExtents returns stale geometry.  This is especially important
         // for unframed windows (menus, popups) whose extents may not be correct
         // at map time.
-        NSLog(@"[Compositor] mapWindow: %u viewable at (%d,%d) %dx%d parent=0x%x redirected=%d",
-              windowId, cw.x, cw.y, cw.width, cw.height,
-              (unsigned int)cw.parentWindowId, (int)cw.redirected);
+        //NSLog(@"[Compositor] mapWindow: %u viewable at (%d,%d) %dx%d parent=0x%x redirected=%d",
+              //windowId, cw.x, cw.y, cw.width, cw.height,
+              //(unsigned int)cw.parentWindowId, (int)cw.redirected);
         [self damageScreen];
         // OPTIMIZATION: Window mapping can change stacking order
         self.stackingOrderDirty = YES;
@@ -2205,15 +2205,15 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                      minimizing:(BOOL)minimizing
                          duration:(NSTimeInterval)duration
                                  fade:(BOOL)fade {
-    NSLog(@"[Compositor] animateWindow called for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f fade=%d minimizing=%d compositingActive=%d",
-          windowId,
-          (int)startRect.position.x, (int)startRect.position.y, startRect.size.width, startRect.size.height,
-          (int)endRect.position.x, (int)endRect.position.y, endRect.size.width, endRect.size.height,
-          duration, (int)fade, (int)minimizing, (int)self.compositingActive);
+    //NSLog(@"[Compositor] animateWindow called for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f fade=%d minimizing=%d compositingActive=%d",
+          //windowId,
+          //(int)startRect.position.x, (int)startRect.position.y, startRect.size.width, startRect.size.height,
+          //(int)endRect.position.x, (int)endRect.position.y, endRect.size.width, endRect.size.height,
+          //duration, (int)fade, (int)minimizing, (int)self.compositingActive);
 
     if (!self.compositingActive || windowId == XCB_NONE) {
-        NSLog(@"[Compositor] animateWindow aborted: compositingActive=%d, windowId=%u",
-              (int)self.compositingActive, windowId);
+        //NSLog(@"[Compositor] animateWindow aborted: compositingActive=%d, windowId=%u",
+              //(int)self.compositingActive, windowId);
         return;
     }
 
@@ -2257,7 +2257,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 
     BOOL wasMinimized = cw.animatingMinimize;
 
-    NSLog(@"[Compositor] Animation finished for window %u (wasMinimize=%d)", cw.windowId, (int)wasMinimized);
+    //NSLog(@"[Compositor] Animation finished for window %u (wasMinimize=%d)", cw.windowId, (int)wasMinimized);
 
     cw.animating = NO;
     cw.animatingMinimize = NO;
@@ -2756,13 +2756,13 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
 
         // Log the first frame of animation to help debugging (not spammy)
-        if (t < 0.02) {
-            NSLog(@"[Compositor] Animation started for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f isBirth=%d",
-                  cw.windowId,
-                  (int)cw.animationStartRect.position.x, (int)cw.animationStartRect.position.y, cw.animationStartRect.size.width, cw.animationStartRect.size.height,
-                  (int)cw.animationEndRect.position.x, (int)cw.animationEndRect.position.y, cw.animationEndRect.size.width, cw.animationEndRect.size.height,
-                  cw.animationDuration, (int)isBirthAnimation);
-        }
+        //if (t < 0.02) {
+            //NSLog(@"[Compositor] Animation started for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f isBirth=%d",
+                  //cw.windowId,
+                  //(int)cw.animationStartRect.position.x, (int)cw.animationStartRect.position.y, cw.animationStartRect.size.width, cw.animationStartRect.size.height,
+                  //(int)cw.animationEndRect.position.x, (int)cw.animationEndRect.position.y, cw.animationEndRect.size.width, cw.animationEndRect.size.height,
+                  //cw.animationDuration, (int)isBirthAnimation);
+        //}
 
         double startW = fmax(1.0, (double)cw.animationStartRect.size.width);
         double startH = fmax(1.0, (double)cw.animationStartRect.size.height);
@@ -3163,7 +3163,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         return;
     }
     
-    NSLog(@"[CompositingManager] Deactivating compositing...");
+    //NSLog(@"[CompositingManager] Deactivating compositing...");
     
     @try {
         xcb_connection_t *conn = [self.connection connection];
@@ -3174,7 +3174,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         
         [self cleanup];
         self.compositingActive = NO;
-        NSLog(@"[CompositingManager] Compositing deactivated");
+        //NSLog(@"[CompositingManager] Compositing deactivated");
         
     } @catch (NSException *exception) {
         NSLog(@"[CompositingManager] EXCEPTION deactivating: %@", exception.reason);
@@ -3278,7 +3278,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
 
         [self.connection flush];
-        NSLog(@"[CompositingManager] Cleanup complete");
+        //NSLog(@"[CompositingManager] Cleanup complete");
         
     } @catch (NSException *exception) {
         NSLog(@"[CompositingManager] EXCEPTION during cleanup: %@", exception.reason);

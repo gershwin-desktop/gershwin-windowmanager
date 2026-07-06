@@ -960,7 +960,7 @@
 
     if (reply == NULL)
     {
-        NSLog(@"Reply is NULL");
+        //NSLog(@"Reply is NULL");
 
         if (error)
         {
@@ -1001,7 +1001,7 @@
 
 - (void) refreshBorder
 {
-    NSLog(@"Refreshing borders");
+    //NSLog(@"Refreshing borders");
     uint32_t values[] = {0};
     xcb_configure_window([connection connection], window, XCB_CONFIG_WINDOW_BORDER_WIDTH, values);
 }
@@ -1065,7 +1065,7 @@
             config_title_vals[title_i++] = anEvent->width + 2 * cb;
             frameRect.size.width = anEvent->width + 2 * cb;
         } else {
-            NSDebugLog(@"Ignoring width change request in ConfigureRequest for non-resizable window %u", window);
+            //NSDebugLog(@"Ignoring width change request in ConfigureRequest for non-resizable window %u", window);
         }
     }
 
@@ -1078,7 +1078,7 @@
             config_win_vals[win_i++] = anEvent->height;
             frameRect.size.height = anEvent->height + titleHeight + cb;
         } else {
-            NSDebugLog(@"Ignoring height change request in ConfigureRequest for non-resizable window %u", window);
+            //NSDebugLog(@"Ignoring height change request in ConfigureRequest for non-resizable window %u", window);
         }
     }
 
@@ -1101,7 +1101,7 @@
 
         uint32_t stack_mode = anEvent->stack_mode;
         if (isDesktopWindow && stack_mode == XCB_STACK_MODE_ABOVE) {
-            NSLog(@"Decorated desktop window %u attempted to stack above - forcing below", window);
+            //NSLog(@"Decorated desktop window %u attempted to stack above - forcing below", window);
             stack_mode = XCB_STACK_MODE_BELOW;
         }
 

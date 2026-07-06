@@ -39,7 +39,7 @@
     @try {
         GSTheme *theme = [self currentTheme];
         if (!theme) {
-            NSLog(@"GSThemeTitleBar: No theme available, skipping rendering");
+            //NSLog(@"GSThemeTitleBar: No theme available, skipping rendering");
             return;
         }
 
@@ -215,7 +215,7 @@
         BOOL supportsDelete = [icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow];
 
         if (![clientWindow canClose] || !supportsDelete) {
-            NSLog(@"GSThemeTitleBar: Client %u reports canClose=NO or lacks WM_DELETE_WINDOW - omitting control buttons", [clientWindow window]);
+            //NSLog(@"GSThemeTitleBar: Client %u reports canClose=NO or lacks WM_DELETE_WINDOW - omitting control buttons", [clientWindow window]);
             return styleMask; // Only title
         }
 

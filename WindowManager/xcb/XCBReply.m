@@ -114,8 +114,8 @@
         NSLog(@"Error: %@", errorMessage);
     }
     
-    if (!isError)
-        NSLog(@"Reply address: %ld", (long)&reply);
+    //if (!isError)
+    //    NSLog(@"Reply address: %ld", (long)&reply);
     
 }
 

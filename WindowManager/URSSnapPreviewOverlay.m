@@ -109,7 +109,7 @@ static const CGFloat kBorderWidth = 3.0;
         URSCompositingManager *compositor = [URSCompositingManager sharedManager];
         [compositor setSkipShadowForWindow:_overlayX11Window];
 
-        NSLog(@"[SnapPreviewOverlay] Initialized (X11 window: %u)", _overlayX11Window);
+        //NSLog(@"[SnapPreviewOverlay] Initialized (X11 window: %u)", _overlayX11Window);
     }
 
     return self;
@@ -142,10 +142,10 @@ static const CGFloat kBorderWidth = 3.0;
     // Show the overlay
     [self orderFront:nil];
 
-    NSLog(@"[SnapPreviewOverlay] Showing preview at (%.0f, %.0f) size %.0f x %.0f, rounded: %d",
-          targetRect.origin.x, targetRect.origin.y,
-          targetRect.size.width, targetRect.size.height,
-          view.useRoundedCorners);
+    //NSLog(@"[SnapPreviewOverlay] Showing preview at (%.0f, %.0f) size %.0f x %.0f, rounded: %d",
+//          targetRect.origin.x, targetRect.origin.y,
+//          targetRect.size.width, targetRect.size.height,
+//          view.useRoundedCorners);
 }
 
 - (void)hide {
@@ -157,7 +157,7 @@ static const CGFloat kBorderWidth = 3.0;
         [compositor clearSkipShadowForWindow:_overlayX11Window];
     }
 
-    NSLog(@"[SnapPreviewOverlay] Hidden");
+    //NSLog(@"[SnapPreviewOverlay] Hidden");
 }
 
 @end
