@@ -10,10 +10,13 @@
 #import "XCBConnection.h"
 #import "URSWindowSwitcher.h"
 
+@class URSFocusManager;
+
 @interface URSKeyboardManager : NSObject
 
 @property (weak, nonatomic) XCBConnection *connection;
 @property (weak, nonatomic) URSWindowSwitcher *windowSwitcher;
+@property (weak, nonatomic) URSFocusManager *focusManager;
 @property (assign, nonatomic) BOOL altKeyPressed;
 @property (assign, nonatomic) BOOL shiftKeyPressed;
 

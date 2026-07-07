@@ -82,6 +82,7 @@
                                                     selectionWindow:nil]; // set after registerAsWindowManager
     self.keyboardManager = [[URSKeyboardManager alloc] initWithConnection:connection
                                                           windowSwitcher:self.windowSwitcher];
+    self.keyboardManager.focusManager = self.focusManager;
     self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
     self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
     self.titlebarController.workareaManager = self.workareaManager;

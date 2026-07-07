@@ -7,6 +7,8 @@
 //
 
 #import "URSKeyboardManager.h"
+#import "URSFocusManager.h"
+#import "XCBWindow.h"
 #import "XCBScreen.h"
 #import <xcb/xcb.h>
 #import <X11/keysym.h>
@@ -16,6 +18,7 @@
 @property (strong, nonatomic) NSTimer *altReleasePollTimer;
 @property (assign, nonatomic) xcb_keycode_t tabKeycode;
 @property (assign, nonatomic) xcb_keycode_t escapeKeycode;
+@property (assign, nonatomic) xcb_keycode_t wKeycode;
 @end
 
 @implementation URSKeyboardManager
@@ -34,6 +37,7 @@
     _altReleasePollTimer = nil;
     _tabKeycode = 23; /* fallback; overwritten by setupKeyboardGrabbing */
     _escapeKeycode = 0; /* 0 = XCB_NONE / not found; set by setupKeyboardGrabbing */
+    _wKeycode = 0;
 
     return self;
 }
@@ -126,6 +130,27 @@
                 // focused application normally. During Alt-Tab switching, the
                 // keyboard grab (xcb_grab_keyboard) captures it for us.
             }
+
+            if (keysyms[i] == XK_w || keysyms[i] == XK_W) {
+                xcb_keycode_t keycode =
+                    setup->min_keycode + (i / reply->keysyms_per_keycode);
+
+                if (self.wKeycode == 0) {
+                    self.wKeycode = keycode;
+                }
+
+                uint16_t lockMasks[] = {
+                    0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2,
+                    XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2
+                };
+                for (int j = 0; j < 4; j++) {
+                    xcb_grab_key(conn, 0, root,
+                                 XCB_MOD_MASK_1 | lockMasks[j],
+                                 keycode,
+                                 XCB_GRAB_MODE_ASYNC,
+                                 XCB_GRAB_MODE_ASYNC);
+                }
+            }
         }
 
         // Query modifier mapping to find all keycodes assigned to Mod1
@@ -168,7 +193,7 @@
 
         free(reply);
         [self.connection flush];
-        //NSLog(@"[Alt-Tab] Successfully grabbed Alt+Tab and Shift+Alt+Tab");
+        //NSLog(@"[Alt-Tab] Successfully grabbed keyboard");
 
     } @catch (NSException *exception) {
         NSLog(@"[Alt-Tab] Exception in setupKeyboardGrabbing: %@", exception.reason);
@@ -240,6 +265,17 @@
                 xcb_ungrab_key(conn, 23, root, XCB_MOD_MASK_1 | fbLockMasks2[j]);
                 xcb_ungrab_key(conn, 23, root,
                                XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | fbLockMasks2[j]);
+            }
+        }
+
+        if (self.wKeycode != 0) {
+            uint16_t lockMasks[] = {
+                0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2,
+                XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2
+            };
+            for (int j = 0; j < 4; j++) {
+                xcb_ungrab_key(conn, self.wKeycode, root,
+                               XCB_MOD_MASK_1 | lockMasks[j]);
             }
         }
 
@@ -325,6 +361,16 @@
 
             [self.windowSwitcher cancelSwitching];
             [self stopAltReleasePoll];
+        }
+
+        // Handle W key with Alt modifier — close focused window if closable
+        if (event->detail == self.wKeycode && altPressed
+            && !self.windowSwitcher.isSwitching) {
+            XCBWindow *clientWindow =
+                [self.connection windowForXCBId:self.focusManager.lastFocusedWindowId];
+            if (clientWindow && [clientWindow canClose]) {
+                [clientWindow close];
+            }
         }
 
     } @catch (NSException *exception) {
