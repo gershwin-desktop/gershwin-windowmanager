@@ -363,13 +363,50 @@
             [self stopAltReleasePoll];
         }
 
-        // Handle W key with Alt modifier — close focused window if closable
+        // Handle W key with Alt modifier — close focused window if closable.
+        // Query the actual X11 input focus (same window that Alt+F4 targets)
+        // rather than relying on the WM's focus tracking.
         if (event->detail == self.wKeycode && altPressed
             && !self.windowSwitcher.isSwitching) {
-            XCBWindow *clientWindow =
-                [self.connection windowForXCBId:self.focusManager.lastFocusedWindowId];
-            if (clientWindow && [clientWindow canClose]) {
-                [clientWindow close];
+            xcb_connection_t *conn = [self.connection connection];
+            xcb_get_input_focus_cookie_t focCookie = xcb_get_input_focus(conn);
+            xcb_get_input_focus_reply_t *focReply =
+                xcb_get_input_focus_reply(conn, focCookie, NULL);
+            xcb_window_t targetId = XCB_NONE;
+            if (focReply) {
+                targetId = focReply->focus;
+                free(focReply);
+            }
+            NSLog(@"[Alt-W] X11 input focus=0x%x", targetId);
+            XCBWindow *clientWindow = nil;
+            if (targetId != XCB_NONE && targetId != XCB_WINDOW_NONE) {
+                clientWindow = [self.connection windowForXCBId:targetId];
+                // If the focus window is not directly tracked (frame/client),
+                // resolve through the focus manager
+                if (!clientWindow) {
+                    XCBWindow *resolved = [self.focusManager windowForClientWindowId:targetId];
+                    if (resolved) {
+                        clientWindow = resolved;
+                    }
+                }
+                // If it's a frame, get the client window inside it
+                if ([clientWindow isKindOfClass:[XCBFrame class]]) {
+                    XCBFrame *frame = (XCBFrame *)clientWindow;
+                    XCBWindow *frameClient = [frame childWindowForKey:ClientWindow];
+                    if (frameClient) {
+                        clientWindow = frameClient;
+                    }
+                }
+            }
+            if (clientWindow) {
+                if ([clientWindow canClose]) {
+                    NSLog(@"[Alt-W] closing window 0x%x", [clientWindow window]);
+                    [clientWindow close];
+                } else {
+                    NSLog(@"[Alt-W] window 0x%x found but canClose=NO", [clientWindow window]);
+                }
+            } else {
+                NSLog(@"[Alt-W] no window for input focus 0x%x", targetId);
             }
         }
 

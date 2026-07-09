@@ -66,7 +66,12 @@ static void setupSignalHandlers(void)
 int main(int argc, const char * argv[])
 {
     @autoreleasepool {
-        
+
+        // Suppress the GNUstep application icon window (NSIconWindow) so the
+        // WindowManager does not appear as an application entry in the Dock.
+        // Must be set before any AppKit initialization.
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GSSuppressAppIcon"];
+
         // Parse command-line arguments for compositing mode
         BOOL enableCompositing = YES;
         for (int i = 1; i < argc; i++) {
