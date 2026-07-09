@@ -123,6 +123,31 @@
 
     // Wire selectionManagerWindow into the focus manager now that it exists
     self.focusManager.selectionManagerWindow = self.selectionManagerWindow;
+
+    // Hide the GNUstep application icon window (NSIconWindow) from the Dock.
+    // The WM itself must not appear as an application entry.
+    {
+        NSArray *appWindows = [NSApp windows];
+        for (NSWindow *win in appWindows) {
+            if ([[win className] isEqualToString:@"NSIconWindow"]) {
+                xcb_window_t xid = (xcb_window_t)[win windowNumber];
+                EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
+                xcb_atom_t atoms[2];
+                atoms[0] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipTaskbar]];
+                atoms[1] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipPager]];
+                xcb_change_property([connection connection],
+                                   XCB_PROP_MODE_REPLACE,
+                                   xid,
+                                   [[ewmh atomService] cacheAtom:[ewmh EWMHWMState]],
+                                   XCB_ATOM_ATOM,
+                                   32,
+                                   2,
+                                   atoms);
+                [connection flush];
+                break;
+            }
+        }
+    }
     
     // Initialize compositing if requested
     if (self.compositingRequested) {
@@ -226,6 +251,10 @@
                                                     withValueList:NULL
                                                   registerWindow:YES];
 
+    [selectionManagerWindow setSkipTaskBar:YES];
+    [selectionManagerWindow setSkipPager:YES];
+    [selectionManagerWindow setDecorated:NO];
+
     //NSLog(@"[WindowManager] Attempting to become WM (replace existing if needed)...");
     BOOL registered = [connection registerAsWindowManager:YES screenId:0 selectionWindow:selectionManagerWindow];
 
@@ -242,6 +271,7 @@
     //NSLog(@"[WindowManager] Successfully registered as window manager");
 
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    [ewmhService updateNetWmState:selectionManagerWindow];
     [ewmhService putPropertiesForRootWindow:[screen rootWindow] andWmWindow:selectionManagerWindow];
     
     // Set initial workarea to full screen (no struts yet)
