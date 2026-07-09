@@ -2030,6 +2030,29 @@
         
         //NSLog(@"[WindowManager] Found %lu frames to clean up", (unsigned long)[framesToCleanup count]);
         
+        // Preserve original stacking order before undecorating.
+        // Query the current X tree to get bottom-to-top order of managed windows.
+        NSMutableArray *clientStackOrder = [NSMutableArray array];
+        {
+            xcb_query_tree_cookie_t treeCookie = xcb_query_tree([connection connection], [rootWindow window]);
+            xcb_query_tree_reply_t *treeReply = xcb_query_tree_reply([connection connection], treeCookie, NULL);
+            if (treeReply) {
+                xcb_window_t *children = xcb_query_tree_children(treeReply);
+                int numChildren = xcb_query_tree_children_length(treeReply);
+                for (int i = 0; i < numChildren; i++) {
+                    XCBWindow *win = [connection windowForXCBId:children[i]];
+                    if ([win isKindOfClass:[XCBFrame class]]) {
+                        XCBWindow *client = [(XCBFrame *)win childWindowForKey:ClientWindow];
+                        if (client)
+                            [clientStackOrder addObject:client];
+                    } else if (win) {
+                        [clientStackOrder addObject:win];
+                    }
+                }
+                free(treeReply);
+            }
+        }
+        
         // Clean up each frame
         for (XCBFrame *frame in framesToCleanup) {
             @try {
@@ -2085,6 +2108,15 @@
             } @catch (NSException *exception) {
                 NSLog(@"[WindowManager] Exception cleaning up frame %u: %@", [frame window], exception.reason);
             }
+        }
+        
+        // Restore original stacking order for client windows.
+        // After reparenting, each window ends up on top, reversing their order.
+        // Apply XCB_STACK_MODE_BELOW from bottom to top to restore the original layout.
+        for (XCBWindow *client in clientStackOrder) {
+            uint32_t values[] = {XCB_STACK_MODE_BELOW};
+            xcb_configure_window([connection connection], [client window],
+                                 XCB_CONFIG_WINDOW_STACK_MODE, values);
         }
         
         [connection flush];

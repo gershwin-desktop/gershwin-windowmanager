@@ -1172,7 +1172,8 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDock]];
-                [window stackAbove];
+                if (!self.adoptingExistingWindows)
+                    [window stackAbove];
 
                 // Only skip drop shadow for the Dock panel (identified by _NET_WM_NAME "Dock"),
                 // not all DOCK-type windows (some may be opaque panels that need shadows)
@@ -1219,7 +1220,8 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeMenu]];
-                [window stackAbove];
+                if (!self.adoptingExistingWindows)
+                    [window stackAbove];
 
                 window = nil;
                 ewmhService = nil;
@@ -1239,7 +1241,8 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypePopupMenu]];
-                [window stackAbove];
+                if (!self.adoptingExistingWindows)
+                    [window stackAbove];
 
                 window = nil;
                 ewmhService = nil;
@@ -1259,7 +1262,8 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDropdownMenu]];
-                [window stackAbove];
+                if (!self.adoptingExistingWindows)
+                    [window stackAbove];
 
                 window = nil;
                 ewmhService = nil;
@@ -1275,7 +1279,8 @@ static XCBConnection *sharedInstance;
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
-                [window stackBelow];
+                if (!self.adoptingExistingWindows)
+                    [window stackBelow];
                 XCBWindow *parentWindow = [[XCBWindow alloc] initWithXCBWindow:anEvent->parent andConnection:self];
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
@@ -1648,11 +1653,14 @@ static XCBConnection *sharedInstance;
         [window setSkipTaskBar:YES];
         [window setSkipPager:YES];
         [ewmhService updateNetWmState:window];
-        [frame stackBelow];
+        if (!self.adoptingExistingWindows)
+            [frame stackBelow];
     } else {
-        [frame stackAbove];
-        [frame raiseResizeHandle];
-        [self restackDockWindowsAbove];
+        if (!self.adoptingExistingWindows) {
+            [frame stackAbove];
+            [frame raiseResizeHandle];
+            [self restackDockWindowsAbove];
+        }
     }
     [[frame childWindowForKey:TitleBar] setIsAbove:YES];
     [self drawAllTitleBarsExcept:(XCBTitleBar*)[frame childWindowForKey:TitleBar]];
