@@ -2147,20 +2147,15 @@
         //NSLog(@"[WindowManager] Releasing WM_S0 selection ownership");
         
         XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
-        xcb_atom_t wmS0Atom = [atomService atomFromCachedAtomsWithKey:@"WM_S0"];
+        xcb_atom_t wmS0Atom = [atomService cacheAtom:@"WM_S0"];
         
-        if (wmS0Atom != XCB_ATOM_NONE) {
-            // Set selection owner to None (releases ownership)
-            xcb_set_selection_owner([connection connection],
-                                   XCB_NONE,
-                                   wmS0Atom,
-                                   XCB_CURRENT_TIME);
-            
-            [connection flush];
-            //NSLog(@"[WindowManager] WM_S0 selection released");
-        } else {
-            NSLog(@"[WindowManager] Warning: Could not find WM_S0 atom");
-        }
+        // Set selection owner to None (releases ownership)
+        xcb_set_selection_owner([connection connection],
+                               XCB_NONE,
+                               wmS0Atom,
+                               XCB_CURRENT_TIME);
+        
+        [connection flush];
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowManager] Exception releasing WM selection: %@", exception.reason);
@@ -2170,7 +2165,7 @@
 - (void)handleSelectionClear:(xcb_selection_clear_event_t *)event
 {
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
-    xcb_atom_t wmS0Atom = [atomService atomFromCachedAtomsWithKey:@"WM_S0"];
+    xcb_atom_t wmS0Atom = [atomService cacheAtom:@"WM_S0"];
     
     // Check if this is the WM_S0 selection being cleared (we're being replaced)
     if (event->selection == wmS0Atom) {

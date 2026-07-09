@@ -1280,6 +1280,9 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDesktop]];
+                [window setSkipTaskBar:YES];
+                [window setSkipPager:YES];
+                [ewmhService updateNetWmState:window];
                 
                 // Grab button on desktop window so we can track focus changes
                 // This ensures _NET_ACTIVE_WINDOW is updated when clicking on desktop
@@ -1642,6 +1645,9 @@ static XCBConnection *sharedInstance;
     [frame setNormalState];
 
     if ([[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]]) {
+        [window setSkipTaskBar:YES];
+        [window setSkipPager:YES];
+        [ewmhService updateNetWmState:window];
         [frame stackBelow];
     } else {
         [frame stackAbove];
@@ -2705,6 +2711,9 @@ static XCBConnection *sharedInstance;
                 //NSLog(@"PropertyNotify: Window %u identified as desktop type - stacking below", anEvent->window);
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDesktop]];
                 [window stackBelow];
+                [window setSkipTaskBar:YES];
+                [window setSkipPager:YES];
+                [ewmhService updateNetWmState:window];
             }
             else if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDock]])
             {
