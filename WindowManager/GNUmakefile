@@ -117,12 +117,10 @@ endif
 
 include $(GNUSTEP_MAKEFILES)/application.make
 
-# Patch Info-gnustep.plist to use custom NSPrincipalClass
+# Patch Info-gnustep.plist: custom principal class + GSSuppressAppIcon
 after-WindowManager-all::
-	@echo "Modifying Info-gnustep.plist to use custom principal class..."
-	@sed -i.bak 's/NSPrincipalClass = "NSApplication";/NSPrincipalClass = "UROSWMApplication";/' WindowManager.app/Resources/Info-gnustep.plist
-
-# Custom target to modify Info-gnustep.plist after it's generated
-after-WindowManager-all::
-	@echo "Modifying Info-gnustep.plist to use custom principal class..."
-	@sed -i.bak 's/NSPrincipalClass = "NSApplication";/NSPrincipalClass = "UROSWMApplication";/' WindowManager.app/Resources/Info-gnustep.plist
+	@echo "Patching Info-gnustep.plist: principal class and GSSuppressAppIcon..."
+	@sed -i.bak \
+	  -e 's/NSPrincipalClass = "NSApplication";/NSPrincipalClass = "UROSWMApplication";/' \
+	  -e 's/\(NSPrincipalClass = "UROSWMApplication";\)/\1 GSSuppressAppIcon = YES;/' \
+	  WindowManager.app/Resources/Info-gnustep.plist
