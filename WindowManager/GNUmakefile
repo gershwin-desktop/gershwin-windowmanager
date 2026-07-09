@@ -1,7 +1,8 @@
 PACKAGE_NAME = uroswm
 
 include $(GNUSTEP_MAKEFILES)/common.make
-GNUSTEP_APPS = $(GNUSTEP_SYSTEM_SERVICES)
+WindowManager_INSTALL_DIR = /System/Library/CoreServices/Applications
+WindowManager_PRINCIPAL_CLASS = UROSWMApplication
 
 VERSION = 0.1.0
 
@@ -12,8 +13,6 @@ export APP_NAME
 
 # Include paths for the xcb abstraction layer
 $(APP_NAME)_INCLUDE_DIRS = -Ixcb -Ixcb/services -Ixcb/enums -Ixcb/utils
-
-# ── Window Manager sources ──────────────────────────────────────────
 
 $(APP_NAME)_OBJC_FILES = \
 		main.m \
@@ -117,10 +116,3 @@ endif
 
 include $(GNUSTEP_MAKEFILES)/application.make
 
-# Patch Info-gnustep.plist: custom principal class + GSSuppressAppIcon
-after-WindowManager-all::
-	@echo "Patching Info-gnustep.plist: principal class and GSSuppressAppIcon..."
-	@sed -i.bak \
-	  -e 's/NSPrincipalClass = "NSApplication";/NSPrincipalClass = "UROSWMApplication";/' \
-	  -e 's/\(NSPrincipalClass = "UROSWMApplication";\)/\1 GSSuppressAppIcon = YES;/' \
-	  WindowManager.app/Resources/Info-gnustep.plist
