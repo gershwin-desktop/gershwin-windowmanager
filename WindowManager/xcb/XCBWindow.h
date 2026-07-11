@@ -117,6 +117,12 @@ typedef NS_ENUM(NSInteger, WindowState)
 @property (nonatomic, assign) BOOL use32BitDepth;           // Use 32-bit depth for pixmaps (compositor mode)
 @property (nonatomic, assign) xcb_visualid_t argbVisualId;  // 32-bit ARGB visual ID (0 = not set)
 
+// Close-tracking: timer that fires a force-quit dialog if the window doesn't
+// respond to WM_DELETE_WINDOW within the timeout.
+@property (nonatomic, strong) NSTimer *closeTimer;
+
+- (void) cancelCloseTimer;
+
 - (xcb_window_t) window;
 - (void) setWindow:(xcb_window_t) aWindow;
 - (NSString*) windowIdStringValue;

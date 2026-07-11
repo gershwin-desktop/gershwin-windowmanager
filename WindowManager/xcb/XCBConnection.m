@@ -3397,6 +3397,9 @@ static XCBConnection *sharedInstance;
         clientWindow = [frameWindow childWindowForKey:ClientWindow];
     }
 
+    // Cancel any pending force-quit timer on the client window
+    [clientWindow cancelCloseTimer];
+
     if (frameWindow != nil &&
         [frameWindow needDestroy]) /*evaluete if the check on destroy window is necessary or not */
     {

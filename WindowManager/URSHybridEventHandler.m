@@ -418,6 +418,14 @@
                      watcher:self
                      forMode:NSEventTrackingRunLoopMode];
 
+    // NSAlert's -runModal runs its event loop in NSModalPanelRunLoopMode.
+    // Without this, the MapRequest for the alert's own window is never
+    // processed and the X server waits forever — deadlock.
+    [currentRunLoop addEvent:(void*)(uintptr_t)xcbFD
+                        type:ET_RDESC
+                     watcher:self
+                     forMode:NSModalPanelRunLoopMode];
+
     self.xcbEventsIntegrated = YES;
 
     // Start monitoring for XCB events immediately
@@ -2449,6 +2457,10 @@
             [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
                                    type:ET_RDESC
                                 forMode:NSEventTrackingRunLoopMode
+                                   all:YES];
+            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
+                                   type:ET_RDESC
+                                forMode:NSModalPanelRunLoopMode
                                    all:YES];
         }
     }

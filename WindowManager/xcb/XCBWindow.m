@@ -7,6 +7,7 @@
 //
 
 #include <unistd.h>
+#include <signal.h>
 #import <dispatch/dispatch.h>
 
 #import "XCBWindow.h"
@@ -17,6 +18,7 @@
 #import "EIcccm.h"
 #import "Transformers.h"
 #import "TitleBarSettingsService.h"
+#import <AppKit/NSAlert.h>
 
 #define BUTTONMASK  (XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE)
 
@@ -76,6 +78,7 @@
 @synthesize pid;
 @synthesize use32BitDepth;
 @synthesize argbVisualId;
+@synthesize closeTimer;
 
 
 - (id)initWithXCBWindow:(xcb_window_t)aWindow
@@ -806,6 +809,90 @@
 
     atomService = nil;
     icccmService = nil;
+
+    // Start a 5-second watchdog timer.  If the window is still alive when it
+    // fires we show a force-quit dialog.  Cancelled in handleDestroyNotify:
+    // via cancelCloseTimer.
+    [self cancelCloseTimer];
+    closeTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                  target:self
+                                                selector:@selector(closeTimerFired:)
+                                                userInfo:nil
+                                                 repeats:NO];
+}
+
+- (void)cancelCloseTimer
+{
+    if (closeTimer != nil)
+    {
+        [closeTimer invalidate];
+        closeTimer = nil;
+    }
+}
+
+- (void)forceQuit
+{
+    xcb_kill_client([connection connection], window);
+    [connection setNeedFlush:YES];
+
+    if (pid > 0)
+    {
+        kill(pid, SIGKILL);
+    }
+}
+
+- (void)closeTimerFired:(NSTimer *)timer
+{
+    XCBWindow *existingWindow = [connection windowForXCBId:window];
+    if (existingWindow != self)
+    {
+        closeTimer = nil;
+        return;
+    }
+
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    NSString *windowTitle = nil;
+
+    xcb_get_property_reply_t *reply = [ewmhService getProperty:[ewmhService EWMHWMName]
+                                                  propertyType:XCB_GET_PROPERTY_TYPE_ANY
+                                                     forWindow:self
+                                                        delete:NO
+                                                        length:UINT32_MAX];
+    if (reply)
+    {
+        char *value = xcb_get_property_value(reply);
+        int len = xcb_get_property_value_length(reply);
+        if (len > 0)
+            windowTitle = [[NSString alloc] initWithBytes:value length:len encoding:NSUTF8StringEncoding];
+        free(reply);
+    }
+
+    if ([windowTitle length] == 0)
+    {
+        ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
+        windowTitle = [icccmService getWmNameForWindow:self];
+    }
+
+    if ([windowTitle length] == 0)
+        windowTitle = [NSString stringWithFormat:@"0x%x", window];
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setMessageText:NSLocalizedString(@"Force Quit Application", nil)];
+    NSString *infoText = [NSString stringWithFormat:
+        NSLocalizedString(@"The window \"%@\" has not closed.\n"
+                          @"Do you want to force quit the application?", nil),
+        windowTitle];
+    [alert setInformativeText:infoText];
+    [alert addButtonWithTitle:NSLocalizedString(@"Force Quit", nil)];
+    [alert addButtonWithTitle:NSLocalizedString(@"Wait", nil)];
+    [alert setAlertStyle:NSWarningAlertStyle];
+
+    NSInteger result = [alert runModal];
+
+    if (result == NSAlertFirstButtonReturn)
+    {
+        [self forceQuit];
+    }
 }
 
 - (void)stackAbove
@@ -1249,6 +1336,7 @@
 
 - (void)dealloc
 {
+    [self cancelCloseTimer];
     parentWindow = nil;
     aboveWindow = nil;
     [allowedActions removeAllObjects]; //not needed probably
