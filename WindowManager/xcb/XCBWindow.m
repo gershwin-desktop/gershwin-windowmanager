@@ -850,6 +850,36 @@
         return;
     }
 
+    // Only show the dialog if this window is still the frontmost window.
+    // The user might have switched away after clicking close, in which
+    // case the close was probably handled and we should not bother them.
+    {
+        xcb_get_input_focus_cookie_t focCookie = xcb_get_input_focus([connection connection]);
+        xcb_get_input_focus_reply_t *focReply = xcb_get_input_focus_reply([connection connection], focCookie, NULL);
+        BOOL frontmost = NO;
+        if (focReply)
+        {
+            xcb_window_t fw = focReply->focus;
+            frontmost = (fw == window);
+            if (!frontmost && [parentWindow isKindOfClass:[XCBFrame class]])
+            {
+                XCBFrame *frame = (XCBFrame *)parentWindow;
+                frontmost = (fw == [frame window]);
+                if (!frontmost)
+                {
+                    XCBTitleBar *tb = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+                    frontmost = (tb != nil && fw == [tb window]);
+                }
+            }
+            free(focReply);
+        }
+        if (!frontmost)
+        {
+            closeTimer = nil;
+            return;
+        }
+    }
+
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
     NSString *windowTitle = nil;
 
