@@ -202,6 +202,7 @@
 - (void) updateNetSupported:(NSArray*)atomsArray forRootWindow:(XCBWindow*)aRootWindow;
 - (void) updateNetWmState:(XCBWindow*) aWindow;
 - (uint32_t) netWMPidForWindow:(XCBWindow *)aWindow;
+- (void) toggleFullscreenForWindow:(XCBWindow *)aWindow;
 
 // ICCCM/EWMH Strut and Workarea support
 - (BOOL) readStrutForWindow:(XCBWindow*)aWindow strut:(uint32_t[4])outStrut;

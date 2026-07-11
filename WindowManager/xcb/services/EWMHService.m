@@ -1016,74 +1016,171 @@
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateFullscreen] ||
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateFullscreen])
         {
-            BOOL fullscr = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow isMaximized]);
-            XCBScreen *screen = [aWindow screen];
-            XCBFrame *frame;
-            XCBTitleBar *titleBar;
-            XCBSize size;
-            XCBPoint position;
+            BOOL fullscr = (action == _NET_WM_STATE_ADD)
+                        || (action == _NET_WM_STATE_TOGGLE && ![aWindow fullScreen]);
 
-            // Read workarea to respect struts (fullscreen should also respect workarea)
-            int32_t workareaX = 0, workareaY = 0;
-            uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
-            XCBWindow *rootWindow = [screen rootWindow];
-            [self readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
+            XCBScreen *screen = [aWindow screen];
+            uint32_t scrW = [screen width], scrH = [screen height];
 
             if (fullscr)
             {
+                // --- ENTER FULLSCREEN ---
                 if ([aWindow isMinimized])
                     [aWindow restoreFromIconified];
 
+                // Save geometry only on first entry (not on redundant calls)
+                if (![aWindow fullScreen])
+                {
+                    [aWindow setOldRect:[aWindow windowRect]];
+                    if ([aWindow decorated])
+                    {
+                        XCBFrame *frame = (XCBFrame *)[aWindow parentWindow];
+                        [frame setOldRect:[frame windowRect]];
+                    }
+                }
+
                 if ([aWindow decorated])
                 {
-                    frame = (XCBFrame*)[aWindow parentWindow];
-                    titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
+                    XCBFrame *frame = (XCBFrame *)[aWindow parentWindow];
+                    XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+                    XCBWindow *clientWin = [frame childWindowForKey:ClientWindow];
 
-                    // Save pre-maximize rect for restore
-                    [frame setOldRect:[frame windowRect]];
-
-                    // Respect client resizability: do nothing if the client is non-resizable
-                    //XCBWindow *clientWin = (XCBWindow*)[frame childWindowForKey:ClientWindow];
-                    //if (clientWin && ![clientWin canResize]) {
-                    //    NSLog(@"[EWMH] Skipping fullscreen/maximize for non-resizable client %u", [clientWin window]);
-                    //} else
+                    // Hide decorations — resize titlebar to zero so no
+                    // UnmapNotify fires (handleUnMapNotify would otherwise
+                    // follow the parent chain and destroy the whole frame).
                     {
-                        /*** Use programmaticResizeToRect - fullscreen to workarea ***/
-                        XCBRect targetRect = XCBMakeRect(
-                            XCBMakePoint(workareaX, workareaY),
-                            XCBMakeSize(workareaWidth, workareaHeight));
-                        [frame programmaticResizeToRect:targetRect];
-                        [frame setIsMaximized:YES];
-                        [frame setMaximizedHorizontally:YES];
-                        [frame setMaximizedVertically:YES];
-
-                        // Update resize zones and shape mask
-                        [frame updateAllResizeZonePositions];
-                        [frame applyRoundedCornersShapeMask];
-
-                        [titleBar drawTitleBarComponents];
+                        uint32_t zvals[2] = {0, 0};
+                        xcb_configure_window([connection connection], [titleBar window],
+                                             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                             zvals);
                     }
+                    [frame destroyResizeZones];
+
+                    // Resize frame to fill the whole screen
+                    XCBRect targetRect = XCBMakeRect(XCBMakePoint(0, 0),
+                                                      XCBMakeSize(scrW, scrH));
+                    uint32_t fvals[4] = {0, 0, scrW, scrH};
+                    xcb_configure_window([connection connection], [frame window],
+                                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
+                                         | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                         fvals);
+                    [frame setWindowRect:targetRect];
+
+                    // Resize client to fill the entire frame (no titlebar offset)
+                    uint32_t cvals[4] = {0, 0, scrW, scrH};
+                    xcb_configure_window([connection connection], [clientWin window],
+                                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
+                                         | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                         cvals);
+                    [clientWin setWindowRect:XCBMakeRect(XCBMakePoint(0, 0),
+                                                          XCBMakeSize(scrW, scrH))];
+
+                    [aWindow setFullScreen:YES];
+
+                    // Raise above panels by bumping stacking
+                    [frame stackAbove];
+                    [connection flush];
 
                     frame = nil;
                     titleBar = nil;
+                    clientWin = nil;
                 }
                 else
                 {
-                    //if (![aWindow canResize]) {
-                    //    NSLog(@"[EWMH] Skipping fullscreen for non-resizable undecorated client %u", [aWindow window]);
-                    //} else
-                    {
-                        size = XCBMakeSize(workareaWidth, workareaHeight);
-                        position = XCBMakePoint(workareaX, workareaY);
-                        [aWindow maximizeToSize:size andPosition:position];
-                    }
+                    // Undecorated window: resize to fill the whole screen
+                    uint32_t vals[4] = {0, 0, scrW, scrH};
+                    xcb_configure_window([connection connection], [aWindow window],
+                                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
+                                         | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                         vals);
+                    [aWindow setWindowRect:XCBMakeRect(XCBMakePoint(0, 0),
+                                                        XCBMakeSize(scrW, scrH))];
+                    [aWindow setFullScreen:YES];
+                    [connection flush];
                 }
+            }
+            else
+            {
+                // --- EXIT FULLSCREEN ---
+                XCBRect restoredRect = [aWindow oldRect];
 
-                [aWindow setFullScreen:fullscr];
-                screen = nil;
+                if ([aWindow decorated])
+                {
+                    XCBFrame *frame = (XCBFrame *)[aWindow parentWindow];
+                    XCBWindow *clientWin = [frame childWindowForKey:ClientWindow];
+
+                    // Restore frame rect from saved geometry
+                    XCBRect frameRect = [frame oldRect];
+                    uint32_t fvals[4] = {(uint32_t)frameRect.position.x,
+                                         (uint32_t)frameRect.position.y,
+                                         frameRect.size.width,
+                                         frameRect.size.height};
+                    xcb_configure_window([connection connection], [frame window],
+                                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
+                                         | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                         fvals);
+                    [frame setWindowRect:frameRect];
+
+                    // Resize titlebar back to full width (was set to 0x0 on
+                    // fullscreen enter — it was never unmapped).
+                    XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+                    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+                    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+                    {
+                        uint32_t tvals[2] = {frameRect.size.width, titleHgt};
+                        xcb_configure_window([connection connection], [titleBar window],
+                                             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                             tvals);
+                    }
+
+                    // Recalculate client position inside the frame (below titlebar)
+                    int cb = [frame clientBorder];
+                    XCBRect clientRect = XCBMakeRect(XCBMakePoint(cb, titleHgt),
+                                                      XCBMakeSize(frameRect.size.width - 2 * cb,
+                                                                   frameRect.size.height - titleHgt - cb));
+                    uint32_t cvals[4] = {(uint32_t)clientRect.position.x,
+                                         (uint32_t)clientRect.position.y,
+                                         clientRect.size.width,
+                                         clientRect.size.height};
+                    xcb_configure_window([connection connection], [clientWin window],
+                                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
+                                         | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                         cvals);
+                    [clientWin setWindowRect:clientRect];
+
+                    // Recreate resize zones and shape mask
+                    if ([clientWin canResize])
+                        [frame createResizeZonesFromTheme];
+                    [frame applyRoundedCornersShapeMask];
+
+                    [aWindow setFullScreen:NO];
+                    [connection flush];
+
+                    frame = nil;
+                    clientWin = nil;
+                }
+                else
+                {
+                    // Restore undecorated window to saved rect
+                    if (restoredRect.size.width > 0 && restoredRect.size.height > 0)
+                    {
+                        uint32_t vals[4] = {(uint32_t)restoredRect.position.x,
+                                             (uint32_t)restoredRect.position.y,
+                                             restoredRect.size.width,
+                                             restoredRect.size.height};
+                        xcb_configure_window([connection connection], [aWindow window],
+                                             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
+                                             | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                             vals);
+                        [aWindow setWindowRect:restoredRect];
+                    }
+                    [aWindow setFullScreen:NO];
+                    [connection flush];
+                }
             }
 
             [self updateNetWmState:aWindow];
+            screen = nil;
         }
 
         /*** TODO: test and complete it, but shading support has really low priority ***/
@@ -1153,6 +1250,18 @@
 */
     }
 
+}
+
+- (void) toggleFullscreenForWindow:(XCBWindow *)aWindow
+{
+    xcb_client_message_data_t data;
+    data.data32[0] = _NET_WM_STATE_TOGGLE;
+    data.data32[1] = [atomService atomFromCachedAtomsWithKey:EWMHWMStateFullscreen];
+    data.data32[2] = XCB_NONE;
+    data.data32[3] = 1; // source indication: 1 = application
+    data.data32[4] = 0;
+
+    [self handleClientMessage:EWMHWMState forWindow:aWindow data:data];
 }
 
 - (void) updateNetWmState:(XCBWindow*)aWindow

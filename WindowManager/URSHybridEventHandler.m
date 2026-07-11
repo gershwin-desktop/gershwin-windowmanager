@@ -820,6 +820,37 @@
             // Apply GSTheme immediately with no delay
             [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:mapRequestEvent->window]];
 
+            // If the window has _NET_WM_STATE_FULLSCREEN set in its properties
+            // (e.g. browser video fullscreen), immediately enter fullscreen mode.
+            {
+                EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
+                void *fullReply = [ewmh getProperty:[ewmh EWMHWMState]
+                                      propertyType:XCB_ATOM_ATOM
+                                         forWindow:mappedClient
+                                            delete:NO
+                                            length:UINT32_MAX];
+                BOOL wantsFullscreen = NO;
+                if (fullReply)
+                {
+                    xcb_atom_t *atoms = (xcb_atom_t *)xcb_get_property_value(fullReply);
+                    uint32_t len = xcb_get_property_value_length(fullReply) / sizeof(xcb_atom_t);
+                    xcb_atom_t fsAtom = [[ewmh atomService] atomFromCachedAtomsWithKey:[ewmh EWMHWMStateFullscreen]];
+                    for (uint32_t i = 0; i < len; i++)
+                    {
+                        if (atoms[i] == fsAtom)
+                        {
+                            wantsFullscreen = YES;
+                            break;
+                        }
+                    }
+                    free(fullReply);
+                }
+                if (wantsFullscreen)
+                {
+                    [ewmh toggleFullscreenForWindow:mappedClient];
+                }
+            }
+
             // Try to focus the client window if it's focusable
             // This ensures dialogs, alerts, sheets and other special windows get focused too
             if ([self.focusManager isWindowFocusable:mappedClient allowDesktop:NO]) {

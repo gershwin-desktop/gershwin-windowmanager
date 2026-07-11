@@ -330,6 +330,16 @@ static XCBConnection *sharedInstance;
         }
     }
 
+    // Fullscreen windows must stay above docks/panels even after restack.
+    for (XCBWindow *aWindow in [windowsMap allValues])
+    {
+        if ([aWindow fullScreen] && [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+        {
+            XCBFrame *fsFrame = (XCBFrame *)[aWindow parentWindow];
+            [fsFrame stackAbove];
+        }
+    }
+
     // Notify compositor that stacking order has changed
     Class compositorClass = NSClassFromString(@"URSCompositingManager");
     if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])

@@ -686,7 +686,6 @@
     isMaximized = YES;
     maximizedVertically = YES;
     maximizedHorizontally = YES;
-    fullScreen = YES;
 
     return;
 }

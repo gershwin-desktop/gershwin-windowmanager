@@ -11,6 +11,7 @@
 #import "XCBWindow.h"
 #import "XCBFrame.h"
 #import "XCBScreen.h"
+#import "EWMHService.h"
 #import <xcb/xcb.h>
 #import <X11/keysym.h>
 
@@ -20,6 +21,7 @@
 @property (assign, nonatomic) xcb_keycode_t tabKeycode;
 @property (assign, nonatomic) xcb_keycode_t escapeKeycode;
 @property (assign, nonatomic) xcb_keycode_t wKeycode;
+@property (assign, nonatomic) xcb_keycode_t returnKeycode;
 @end
 
 @implementation URSKeyboardManager
@@ -39,6 +41,7 @@
     _tabKeycode = 23;
     _escapeKeycode = 0;
     _wKeycode = 0;
+    _returnKeycode = 0;
 
     return self;
 }
@@ -135,6 +138,28 @@
                 for (int j = 0; j < 4; j++) {
                     xcb_grab_key(conn, 0, root,
                                  XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | lockMasks[j],
+                                 keycode,
+                                 XCB_GRAB_MODE_ASYNC,
+                                 XCB_GRAB_MODE_ASYNC);
+                }
+            }
+
+            if (keysyms[i] == XK_Return || keysyms[i] == XK_KP_Enter) {
+                xcb_keycode_t keycode =
+                    setup->min_keycode + (i / reply->keysyms_per_keycode);
+
+                if (self.returnKeycode == 0) {
+                    self.returnKeycode = keycode;
+                }
+
+                // Alt+Return — toggle fullscreen on the focused window
+                uint16_t lockMasks[] = {
+                    0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2,
+                    XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2
+                };
+                for (int j = 0; j < 4; j++) {
+                    xcb_grab_key(conn, 0, root,
+                                 XCB_MOD_MASK_1 | lockMasks[j],
                                  keycode,
                                  XCB_GRAB_MODE_ASYNC,
                                  XCB_GRAB_MODE_ASYNC);
@@ -253,9 +278,19 @@
                 XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2
             };
             for (int j = 0; j < 4; j++) {
-                // Alt+W was never grabbed; just ungrab Shift+Alt+W
                 xcb_ungrab_key(conn, self.wKeycode, root,
                                XCB_MOD_MASK_1 | XCB_MOD_MASK_SHIFT | lockMasks[j]);
+            }
+        }
+
+        if (self.returnKeycode != 0) {
+            uint16_t lockMasks[] = {
+                0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2,
+                XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2
+            };
+            for (int j = 0; j < 4; j++) {
+                xcb_ungrab_key(conn, self.returnKeycode, root,
+                               XCB_MOD_MASK_1 | lockMasks[j]);
             }
         }
 
@@ -360,6 +395,40 @@
             }
             if (clientWindow && [clientWindow canClose]) {
                 [clientWindow close];
+            }
+        }
+
+        // Alt+Return — toggle fullscreen on the focused window.
+        if (event->detail == self.returnKeycode && altPressed
+            && !self.windowSwitcher.isSwitching) {
+            xcb_connection_t *conn = [self.connection connection];
+            xcb_get_input_focus_cookie_t focCookie = xcb_get_input_focus(conn);
+            xcb_get_input_focus_reply_t *focReply =
+                xcb_get_input_focus_reply(conn, focCookie, NULL);
+            xcb_window_t targetId = XCB_NONE;
+            if (focReply) {
+                targetId = focReply->focus;
+                free(focReply);
+            }
+
+            XCBWindow *clientWindow = nil;
+            if (targetId != XCB_NONE && targetId != XCB_WINDOW_NONE) {
+                clientWindow = [self.connection windowForXCBId:targetId];
+                if (!clientWindow) {
+                    XCBWindow *resolved = [self.focusManager windowForClientWindowId:targetId];
+                    if (resolved)
+                        clientWindow = resolved;
+                }
+                if ([clientWindow isKindOfClass:[XCBFrame class]]) {
+                    XCBFrame *frame = (XCBFrame *)clientWindow;
+                    XCBWindow *frameClient = [frame childWindowForKey:ClientWindow];
+                    if (frameClient)
+                        clientWindow = frameClient;
+                }
+            }
+            if (clientWindow && [clientWindow canFullscreen]) {
+                EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+                [ewmh toggleFullscreenForWindow:clientWindow];
             }
         }
 
