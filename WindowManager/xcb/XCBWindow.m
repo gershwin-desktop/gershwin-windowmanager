@@ -7,7 +7,6 @@
 //
 
 #include <unistd.h>
-#include <signal.h>
 #import <dispatch/dispatch.h>
 
 #import "XCBWindow.h"
@@ -832,13 +831,8 @@
 
 - (void)forceQuit
 {
-    xcb_kill_client([connection connection], window);
+    xcb_destroy_window([connection connection], window);
     [connection setNeedFlush:YES];
-
-    if (pid > 0)
-    {
-        kill(pid, SIGKILL);
-    }
 }
 
 - (void)closeTimerFired:(NSTimer *)timer
