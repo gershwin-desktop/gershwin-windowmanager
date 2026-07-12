@@ -807,20 +807,39 @@
             }
         }
 
-        [aWindow focus];
+        // Don't steal focus or raise if the window is already the topmost.
+        // Without this check, _NET_ACTIVE_WINDOW during a dropdown menu
+        // would focus+raise the main window, hiding the transient menu.
+        xcb_connection_t *xcb = [connection connection];
+        XCBScreen *scr = [[connection screens] firstObject];
+        xcb_window_t rootWin = [[scr rootWindow] window];
+        xcb_query_tree_cookie_t qtC = xcb_query_tree(xcb, rootWin);
+        xcb_query_tree_reply_t *qtR = xcb_query_tree_reply(xcb, qtC, NULL);
+        BOOL alreadyTop = NO;
+        if (qtR) {
+            int n = xcb_query_tree_children_length(qtR);
+            xcb_window_t *kids = xcb_query_tree_children(qtR);
+            xcb_window_t checkWin = [aWindow decorated] ? [[aWindow parentWindow] window] : [aWindow window];
+            if (n > 0 && kids[n - 1] == checkWin)
+                alreadyTop = YES;
+            free(qtR);
+        }
 
-        if ([[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
-        {
-            frame = (XCBFrame *) [aWindow parentWindow];
-            titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar];
-            [frame stackAbove];
-            [connection restackDockWindowsAbove];
-            if (![titleBar isGSThemeActive]) {
-                [titleBar drawTitleBarComponents];
-                [connection drawAllTitleBarsExcept:titleBar];
+        if (!alreadyTop) {
+            [aWindow focus];
+            if ([[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+            {
+                frame = (XCBFrame *) [aWindow parentWindow];
+                titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar];
+                [frame stackAbove];
+                [connection restackDockWindowsAbove];
+                if (![titleBar isGSThemeActive]) {
+                    [titleBar drawTitleBarComponents];
+                    [connection drawAllTitleBarsExcept:titleBar];
+                }
+                frame = nil;
+                titleBar = nil;
             }
-            frame = nil;
-            titleBar = nil;
         }
 
         return;

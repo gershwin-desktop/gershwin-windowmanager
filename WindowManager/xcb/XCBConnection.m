@@ -340,6 +340,27 @@ static XCBConnection *sharedInstance;
         }
     }
 
+    // All undecorated (auxiliary) windows of the focused application must
+    // stay above their parent after any restack operation.  Broad check:
+    // any window with the same PID that is not itself an XCBFrame.
+    uint32_t fpid = 0;
+    xcb_get_input_focus_cookie_t focC = xcb_get_input_focus(connection);
+    xcb_get_input_focus_reply_t *focR = xcb_get_input_focus_reply(connection, focC, NULL);
+    if (focR) {
+        XCBWindow *fw = [self windowForXCBId:focR->focus];
+        free(focR);
+        if (fw) fpid = [fw pid];
+    }
+    if (fpid > 0) {
+        for (XCBWindow *aWindow in [windowsMap allValues]) {
+            if ([aWindow pid] != fpid) continue;
+            if ([aWindow isKindOfClass:[XCBFrame class]]) continue;
+            if (![aWindow decorated]) {
+                [aWindow stackAbove];
+            }
+        }
+    }
+
     // Notify compositor that stacking order has changed
     Class compositorClass = NSClassFromString(@"URSCompositingManager");
     if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
@@ -1222,10 +1243,10 @@ static XCBConnection *sharedInstance;
 
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeMenu]])
             {
-                //NSLog(@"Menu window %u to be registered", [window window]);
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
+                [window updatePid];
                 XCBWindow *parentWindow = [[XCBWindow alloc] initWithXCBWindow:anEvent->parent andConnection:self];
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
@@ -1243,10 +1264,10 @@ static XCBConnection *sharedInstance;
 
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypePopupMenu]])
             {
-                //NSLog(@"PopupMenu window %u to be registered", [window window]);
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
+                [window updatePid];
                 XCBWindow *parentWindow = [[XCBWindow alloc] initWithXCBWindow:anEvent->parent andConnection:self];
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
@@ -1264,10 +1285,10 @@ static XCBConnection *sharedInstance;
 
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDropdownMenu]])
             {
-                //NSLog(@"DropdownMenu window %u to be registered", [window window]);
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
+                [window updatePid];
                 XCBWindow *parentWindow = [[XCBWindow alloc] initWithXCBWindow:anEvent->parent andConnection:self];
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
@@ -2369,19 +2390,70 @@ static XCBConnection *sharedInstance;
         [clientWindow focus];
         // Don't raise desktop windows - they should always stay at the bottom
         if (!isDesktopWindow) {
-            [frame stackAbove];
-            [frame raiseResizeHandle];
-            [self restackDockWindowsAbove];
+            // Check if this window is already the topmost — if so, skip raising.
+            BOOL alreadyTopmost = NO;
+            xcb_window_t rootWin = [[[[self screens] firstObject] rootWindow] window];
+            xcb_query_tree_cookie_t qtC = xcb_query_tree(connection, rootWin);
+            xcb_query_tree_reply_t *qtR = xcb_query_tree_reply(connection, qtC, NULL);
+            if (qtR) {
+                int n = xcb_query_tree_children_length(qtR);
+                xcb_window_t *kids = xcb_query_tree_children(qtR);
+                if (n > 0 && kids[n - 1] == [frame window])
+                    alreadyTopmost = YES;
+                free(qtR);
+            }
+
+            if (!alreadyTopmost) {
+                [frame stackAbove];
+                [frame raiseResizeHandle];
+                [self restackDockWindowsAbove];
+                // Re-raise all undecorated windows of the same PID
+                // (menus, dialogs, popups, etc.) above the parent frame.
+                uint32_t winPid = [clientWindow pid];
+                if (winPid > 0) {
+                    for (XCBWindow *w in [windowsMap allValues]) {
+                        if ([w pid] != winPid) continue;
+                        if ([w isKindOfClass:[XCBFrame class]]) continue;
+                        if (![w decorated]) {
+                            [w stackAbove];
+                        }
+                    }
+                }
+            }
         }
     } else if (window && [window isKindOfClass:[XCBWindow class]]) {
         // Fallback: If we couldn't find client/frame but have a window, focus it directly
         [window focus];
         // Don't raise desktop windows - they should always stay at the bottom
         if (!isDesktopWindow) {
-            uint32_t values[] = { XCB_STACK_MODE_ABOVE };
-            xcb_configure_window(connection, [window window], XCB_CONFIG_WINDOW_STACK_MODE, values);
-            [self flush];
-            [self restackDockWindowsAbove];
+            BOOL alreadyTopmost = NO;
+            xcb_window_t rootWin2 = [[[[self screens] firstObject] rootWindow] window];
+            xcb_query_tree_cookie_t qtC = xcb_query_tree(connection, rootWin2);
+            xcb_query_tree_reply_t *qtR = xcb_query_tree_reply(connection, qtC, NULL);
+            if (qtR) {
+                int n = xcb_query_tree_children_length(qtR);
+                xcb_window_t *kids = xcb_query_tree_children(qtR);
+                if (n > 0 && kids[n - 1] == [window window])
+                    alreadyTopmost = YES;
+                free(qtR);
+            }
+            if (alreadyTopmost) { [self flush]; }
+            else {
+                uint32_t values[] = { XCB_STACK_MODE_ABOVE };
+                xcb_configure_window(connection, [window window], XCB_CONFIG_WINDOW_STACK_MODE, values);
+                [self flush];
+                [self restackDockWindowsAbove];
+            }
+            uint32_t winPid = [window pid];
+            if (winPid > 0) {
+                for (XCBWindow *w in [windowsMap allValues]) {
+                    if ([w pid] != winPid) continue;
+                    if ([w isKindOfClass:[XCBFrame class]]) continue;
+                    if (![w decorated]) {
+                        [w stackAbove];
+                    }
+                }
+            }
         }
     } else {
         // Last resort: ungrab keyboard to prevent being stuck
@@ -2913,9 +2985,6 @@ static XCBConnection *sharedInstance;
             if ([[window parentWindow] isKindOfClass:[XCBFrame class]]) //TODO: debUg to see if this is still necessary!!
             {
                 frame = (XCBFrame *) [window parentWindow];
-                [frame stackAbove];
-                [frame raiseResizeHandle];
-                [self restackDockWindowsAbove];
                 titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar]; //TODO: Can i put all this in a single method?
                 if (![titleBar isGSThemeActive]) {
                     [titleBar drawTitleBarComponents];
