@@ -101,7 +101,7 @@ $(APP_NAME)_HEADER_FILES = \
 		xcb/utils/Transformers.h
 
 $(APP_NAME)_GUI_LIBS = \
-		$(shell pkg-config --libs xcb xcb-icccm xcb-xfixes xcb-aux xcb-cursor xcb-shape) \
+		$(shell pkg-config --libs xcb xcb-icccm xcb-xfixes xcb-aux xcb-cursor xcb-shape xcb-randr) \
 		-lxcb-util -lX11 -lXcomposite -lXext \
 		-lxcb-composite -lxcb-render -lxcb-damage -lxcb-shm -lxcb-present \
 		-ldispatch

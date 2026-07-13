@@ -10,6 +10,7 @@
 #import <Foundation/Foundation.h>
 #import "XCBConnection.h"
 #import "XCBTypes.h"
+#import <xcb/randr.h>
 
 
 @interface URSCompositingManager : NSObject
@@ -95,12 +96,16 @@
 // Handle damage events
 - (void)handleDamageNotify:(xcb_window_t)window;
 
+// Handle RANDR screen-change events
+- (void)handleScreenChange:(xcb_randr_screen_change_notify_event_t *)event;
+
 // Handle expose events - forces pixmap recreation for exposed windows
 - (void)handleExposeEvent:(xcb_window_t)window;
 
 // Extension event base access (for event routing)
 - (uint8_t)damageEventBase;
 - (uint8_t)presentEventBase;
+- (uint8_t)randrEventBase;
 
 // X Present extension events (vblank sync)
 - (void)handlePresentComplete:(void *)event;

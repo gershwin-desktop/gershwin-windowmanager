@@ -26,6 +26,7 @@
 #import <xcb/xcb_aux.h>
 #import <xcb/damage.h>
 #import <xcb/present.h>
+#import <xcb/randr.h>
 #import <xcb/xproto.h>
 #import <X11/keysym.h>
 #import "EWMHService.h"
@@ -1058,6 +1059,15 @@
         
         // The drawable field contains the window that was damaged
         [self.compositingManager handleDamageNotify:damageEvent->drawable];
+        return;
+    }
+
+    // RANDR screen-change events
+    uint8_t randrEventBase = [self.compositingManager randrEventBase];
+    if (randrEventBase > 0 && responseType == randrEventBase + XCB_RANDR_SCREEN_CHANGE_NOTIFY) {
+        xcb_randr_screen_change_notify_event_t *rEvent =
+            (xcb_randr_screen_change_notify_event_t *)event;
+        [self.compositingManager handleScreenChange:rEvent];
     }
 }
 

@@ -20,6 +20,9 @@
 #import <xcb/damage.h>
 #import <xcb/present.h>
 #import <xcb/shm.h>
+#import <xcb/randr.h>
+#import "XCBFrame.h"
+#import "EWMHService.h"
 #import <sys/shm.h>
 #import <unistd.h>  // for usleep
 #import <sys/ipc.h>
@@ -148,6 +151,7 @@
 @property (assign, nonatomic) uint8_t renderOpcode;
 @property (assign, nonatomic) uint8_t damageEventBase;
 @property (assign, nonatomic) uint8_t fixesOpcode;
+@property (assign, nonatomic) uint8_t randrEventBase;
 
 // Throttling to prevent excessive recomposites
 @property (assign, nonatomic) BOOL repairScheduled;
@@ -272,6 +276,7 @@
         _shmAvailable = NO;
         _presentAvailable = NO;
         _presentEventBase = 0;
+        _randrEventBase = 0;
         _presentPixmap0 = XCB_NONE;
         _presentPixmap1 = XCB_NONE;
         _presentPicture0 = XCB_NONE;
@@ -478,6 +483,19 @@
                   //self.presentEventBase);
         } else {
             //NSLog(@"[CompositingManager] X Present not available — using direct composite");
+        }
+
+        // Check RANDR extension and select for screen-change events.
+        const xcb_query_extension_reply_t *randr_ext =
+            xcb_get_extension_data(conn, &xcb_randr_id);
+        if (randr_ext && randr_ext->present) {
+            self.randrEventBase = randr_ext->first_event;
+            xcb_randr_select_input(conn, self.rootWindow,
+                                   XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE);
+            //NSLog(@"[CompositingManager] RANDR extension available (event base: %u)",
+                  //self.randrEventBase);
+        } else {
+            //NSLog(@"[CompositingManager] RANDR not available — screen resize events ignored");
         }
 
         return allExtensionsOK;
@@ -3146,6 +3164,136 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 
 - (uint8_t)presentEventBase {
     return _presentEventBase;
+}
+
+- (uint8_t)randrEventBase {
+    return _randrEventBase;
+}
+
+- (void)handleScreenChange:(xcb_randr_screen_change_notify_event_t *)event {
+    xcb_connection_t *conn = [self.connection connection];
+    if (!conn) return;
+
+    uint16_t newW = event->width;
+    uint16_t newH = event->height;
+    if (newW == self.screenWidth && newH == self.screenHeight)
+        return;
+
+    NSLog(@"[CompositingManager] Screen size changed: %ux%u → %ux%u",
+          self.screenWidth, self.screenHeight, newW, newH);
+
+    // Refresh the screen dimensions on XCBScreen
+    XCBScreen *screen = [[self.connection screens] firstObject];
+    if (screen) {
+        [screen setWidth:newW];
+        [screen setHeight:newH];
+    }
+
+    // Update cached compositor dimensions
+    self.screenWidth = newW;
+    self.screenHeight = newH;
+
+    // Recreate the backing pixmap and root buffer at the new size
+    if (self.rootPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, self.rootPixmap);
+        self.rootPixmap = XCB_NONE;
+    }
+    if (self.rootBuffer != XCB_NONE) {
+        xcb_render_free_picture(conn, self.rootBuffer);
+        self.rootBuffer = XCB_NONE;
+    }
+    self.rootPixmap = xcb_generate_id(conn);
+    xcb_create_pixmap(conn, [screen screen]->root_depth,
+                      self.rootPixmap, self.rootWindow,
+                      newW, newH);
+    self.rootBuffer = xcb_generate_id(conn);
+    xcb_render_create_picture(conn, self.rootBuffer, self.rootPixmap,
+                              self.rootFormat, 0, NULL);
+
+    // Recreate output window at the new size
+    if (self.outputWindow != XCB_NONE) {
+        uint32_t vals[2] = {newW, newH};
+        xcb_configure_window(conn, self.outputWindow,
+                             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                             vals);
+    }
+
+    // Recreate present pixmaps (if using X Present)
+    if (self.presentAvailable) {
+        // Free old
+        if (self.presentPixmap0 != XCB_NONE)
+            xcb_free_pixmap(conn, self.presentPixmap0);
+        if (self.presentPixmap1 != XCB_NONE)
+            xcb_free_pixmap(conn, self.presentPixmap1);
+        if (self.presentPicture0 != XCB_NONE)
+            xcb_render_free_picture(conn, self.presentPicture0);
+        if (self.presentPicture1 != XCB_NONE)
+            xcb_render_free_picture(conn, self.presentPicture1);
+
+        // Create new
+        self.presentPixmap0 = xcb_generate_id(conn);
+        xcb_create_pixmap(conn, [screen screen]->root_depth,
+                          self.presentPixmap0, self.rootWindow, newW, newH);
+        self.presentPixmap1 = xcb_generate_id(conn);
+        xcb_create_pixmap(conn, [screen screen]->root_depth,
+                          self.presentPixmap1, self.rootWindow, newW, newH);
+        self.presentPicture0 = xcb_generate_id(conn);
+        xcb_render_create_picture(conn, self.presentPicture0,
+                                  self.presentPixmap0, self.rootFormat, 0, NULL);
+        self.presentPicture1 = xcb_generate_id(conn);
+        xcb_render_create_picture(conn, self.presentPicture1,
+                                  self.presentPixmap1, self.rootFormat, 0, NULL);
+    }
+
+    // Reposition windows that are off-screen
+    for (NSNumber *key in [self.connection windowsMap]) {
+        XCBWindow *w = [self.connection windowForXCBId:[key unsignedIntValue]];
+        if (!w) continue;
+        if ([w isKindOfClass:[XCBFrame class]]) {
+            XCBRect r = [w windowRect];
+            BOOL moved = NO;
+            if (r.position.x + (int16_t)r.size.width > (int16_t)newW) {
+                r.position.x = (int16_t)newW - (int16_t)r.size.width - 10;
+                moved = YES;
+            }
+            if (r.position.y + (int16_t)r.size.height > (int16_t)newH) {
+                r.position.y = (int16_t)newH - (int16_t)r.size.height - 10;
+                moved = YES;
+            }
+            if (r.position.x < 0) { r.position.x = 0; moved = YES; }
+            if (r.position.y < 0) { r.position.y = 0; moved = YES; }
+            if (moved) {
+                uint32_t vals[2] = {(uint32_t)r.position.x, (uint32_t)r.position.y};
+                xcb_configure_window(conn, [w window],
+                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
+                [w setWindowRect:r];
+            }
+        }
+    }
+
+    [self.connection flush];
+
+    // Invalidate workarea cache so it is recalculated on next query
+    self.connection.workareaValid = NO;
+
+    // Update _NET_DESKTOP_GEOMETRY
+    {
+        EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+        XCBScreen *scr = [[self.connection screens] firstObject];
+        XCBWindow *scrRootWin = [scr rootWindow];
+        uint32_t geom[2] = {newW, newH};
+        [ewmh changePropertiesForWindow:scrRootWin
+                               withMode:XCB_PROP_MODE_REPLACE
+                           withProperty:[ewmh EWMHDesktopGeometry]
+                               withType:XCB_ATOM_CARDINAL
+                             withFormat:32
+                         withDataLength:2
+                               withData:geom];
+    }
+
+    // Full screen repaint
+    [self damageScreen];
+    [self scheduleRepair];
 }
 
 - (void)handlePresentComplete:(void *)event {
