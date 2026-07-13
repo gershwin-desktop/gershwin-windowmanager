@@ -98,6 +98,7 @@
 
 // Handle RANDR screen-change events
 - (void)handleScreenChange:(xcb_randr_screen_change_notify_event_t *)event;
+- (void)handleScreenSizeChange:(uint16_t)newW height:(uint16_t)newH;
 
 // Handle expose events - forces pixmap recreation for exposed windows
 - (void)handleExposeEvent:(xcb_window_t)window;

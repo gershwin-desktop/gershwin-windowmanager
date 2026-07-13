@@ -52,6 +52,7 @@
 @synthesize workareaManager;
 @synthesize titlebarController;
 @synthesize snappingMenuController;
+@synthesize randrEventBase = _randrEventBase;
 
 #pragma mark - Initialization
 
@@ -68,6 +69,7 @@
     self.xcbEventsIntegrated = NO;
     self.nsRunLoopActive = NO;
     self.eventCount = 0;
+    _randrEventBase = 0;
 
     // Initialize XCB connection
     connection = [XCBConnection sharedConnectionAsWindowManager:YES];
@@ -161,6 +163,9 @@
 
     // Setup XCB event integration with NSRunLoop
     [self setupXCBEventIntegration];
+
+    // Setup RANDR screen-change monitoring (always, independent of compositing)
+    [self setupRANDR];
 
     // Setup keyboard grabbing for Alt-Tab
     [self.keyboardManager setupKeyboardGrabbing];
@@ -1030,17 +1035,137 @@
     }
 }
 
+- (void)setupRANDR
+{
+    xcb_connection_t *conn = [connection connection];
+    if (!conn) return;
+
+    const xcb_query_extension_reply_t *randr_ext =
+        xcb_get_extension_data(conn, &xcb_randr_id);
+    if (randr_ext && randr_ext->present) {
+        _randrEventBase = randr_ext->first_event;
+
+        XCBScreen *screen = [[connection screens] firstObject];
+        if (screen) {
+            xcb_window_t rootWindow = [screen screen]->root;
+            xcb_randr_select_input(conn, rootWindow,
+                XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE |
+                XCB_RANDR_NOTIFY_MASK_CRTC_CHANGE |
+                XCB_RANDR_NOTIFY_MASK_OUTPUT_CHANGE);
+            [connection flush];
+        }
+    }
+}
+
+- (void)handleRandrGeometryChange:(uint16_t)newW height:(uint16_t)newH
+{
+    XCBScreen *screen = [[connection screens] firstObject];
+    if (!screen) return;
+
+    if ([screen width] == newW && [screen height] == newH)
+        return;
+
+    NSLog(@"[WindowManager] Screen size changed: %ux%u -> %ux%u",
+          [screen width], [screen height], newW, newH);
+
+    [screen setWidth:newW];
+    [screen setHeight:newH];
+
+    xcb_connection_t *conn = [connection connection];
+
+    // Reposition windows that extend beyond the new screen bounds
+    for (NSNumber *key in [connection windowsMap]) {
+        XCBWindow *w = [connection windowForXCBId:[key unsignedIntValue]];
+        if (!w) continue;
+        if ([w isKindOfClass:[XCBFrame class]] || ![w decorated]) {
+            XCBRect r = [w windowRect];
+            BOOL moved = NO;
+            if (r.position.x + (int16_t)r.size.width > (int16_t)newW) {
+                r.position.x = (int16_t)newW - (int16_t)r.size.width - 10;
+                moved = YES;
+            }
+            if (r.position.y + (int16_t)r.size.height > (int16_t)newH) {
+                r.position.y = (int16_t)newH - (int16_t)r.size.height - 10;
+                moved = YES;
+            }
+            if (r.position.x < 0) { r.position.x = 0; moved = YES; }
+            if (r.position.y < 0) { r.position.y = 0; moved = YES; }
+            if (moved) {
+                uint32_t vals[2] = {(uint32_t)r.position.x, (uint32_t)r.position.y};
+                xcb_configure_window(conn, [w window],
+                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
+                [w setWindowRect:r];
+            }
+        }
+    }
+
+    [connection flush];
+
+    // Invalidate workarea cache so it is recalculated on next query
+    connection.workareaValid = NO;
+
+    // Update _NET_DESKTOP_GEOMETRY
+    {
+        EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
+        XCBWindow *scrRootWin = [screen rootWindow];
+        uint32_t geom[2] = {newW, newH};
+        [ewmh changePropertiesForWindow:scrRootWin
+                               withMode:XCB_PROP_MODE_REPLACE
+                           withProperty:[ewmh EWMHDesktopGeometry]
+                               withType:XCB_ATOM_CARDINAL
+                             withFormat:32
+                         withDataLength:2
+                               withData:geom];
+    }
+
+    // Recalculate workarea (updates _NET_WORKAREA from new screen dims)
+    [self.workareaManager recalculateWorkarea];
+
+    // Notify compositor if active so it can recreate backing pixmaps etc.
+    if (self.compositingManager && [self.compositingManager compositingActive]) {
+        [self.compositingManager handleScreenSizeChange:newW height:newH];
+    }
+}
+
 - (void)handleExtensionEvent:(xcb_generic_event_t*)event
 {
-    // Handle extension events (DAMAGE, etc.)
+    uint8_t responseType = event->response_type & ~0x80;
+
+    // RANDR events are handled regardless of compositing state
+    if (_randrEventBase > 0) {
+        if (responseType == _randrEventBase + XCB_RANDR_SCREEN_CHANGE_NOTIFY) {
+            xcb_randr_screen_change_notify_event_t *rEvent =
+                (xcb_randr_screen_change_notify_event_t *)event;
+            [self handleRandrGeometryChange:rEvent->width height:rEvent->height];
+            return;
+        }
+        if (responseType == _randrEventBase + XCB_RANDR_NOTIFY) {
+            xcb_connection_t *conn = [connection connection];
+            XCBScreen *screen = [[connection screens] firstObject];
+            if (screen && conn) {
+                xcb_window_t root = [screen screen]->root;
+                xcb_get_geometry_cookie_t gc =
+                    xcb_get_geometry(conn, root);
+                xcb_get_geometry_reply_t *geom =
+                    xcb_get_geometry_reply(conn, gc, NULL);
+                if (geom) {
+                    [self handleRandrGeometryChange:geom->width
+                                             height:geom->height];
+                    free(geom);
+                }
+            }
+            return;
+        }
+    }
+
+    // Remaining extension events (DAMAGE, Present) require compositing
     if (!self.compositingManager) {
         return;
     }
-    
-    uint8_t responseType = event->response_type & ~0x80;
+
     uint8_t damageEventBase = [self.compositingManager damageEventBase];
     uint8_t presentEventBase = [self.compositingManager presentEventBase];
-    
+
     // X Present extension: vblank-synced composite complete
     if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_COMPLETE_NOTIFY) {
         [self.compositingManager handlePresentComplete:event];
@@ -1050,26 +1175,12 @@
         [self.compositingManager handlePresentIdle];
         return;
     }
-    
+
     // DAMAGE notify events are at base_event + XCB_DAMAGE_NOTIFY (0)
-    // Check if this is a DAMAGE event
     if (responseType == damageEventBase + XCB_DAMAGE_NOTIFY) {
-        // This is a DAMAGE notify event
         xcb_damage_notify_event_t *damageEvent = (xcb_damage_notify_event_t *)event;
-        
-        // The drawable field contains the window that was damaged
         [self.compositingManager handleDamageNotify:damageEvent->drawable];
         return;
-    }
-
-    // RANDR screen-change events
-    uint8_t randrEventBase = [self.compositingManager randrEventBase];
-    if (randrEventBase > 0 && responseType == randrEventBase + XCB_RANDR_SCREEN_CHANGE_NOTIFY) {
-        xcb_randr_screen_change_notify_event_t *rEvent =
-            (xcb_randr_screen_change_notify_event_t *)event;
-        [self.compositingManager handleScreenChange:rEvent];
-        // Recalculate workarea (updates _NET_WORKAREA from new screen dims)
-        [self.workareaManager recalculateWorkarea];
     }
 }
 

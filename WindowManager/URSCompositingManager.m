@@ -485,18 +485,8 @@
             //NSLog(@"[CompositingManager] X Present not available — using direct composite");
         }
 
-        // Check RANDR extension and select for screen-change events.
-        const xcb_query_extension_reply_t *randr_ext =
-            xcb_get_extension_data(conn, &xcb_randr_id);
-        if (randr_ext && randr_ext->present) {
-            self.randrEventBase = randr_ext->first_event;
-            xcb_randr_select_input(conn, self.rootWindow,
-                                   XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE);
-            //NSLog(@"[CompositingManager] RANDR extension available (event base: %u)",
-                  //self.randrEventBase);
-        } else {
-            //NSLog(@"[CompositingManager] RANDR not available — screen resize events ignored");
-        }
+        // RANDR event subscription is now managed by URSHybridEventHandler (setupRANDR)
+        // so it works regardless of compositing state.
 
         return allExtensionsOK;
         
@@ -3171,27 +3161,22 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 }
 
 - (void)handleScreenChange:(xcb_randr_screen_change_notify_event_t *)event {
-    xcb_connection_t *conn = [self.connection connection];
-    if (!conn) return;
+    [self handleScreenSizeChange:event->width height:event->height];
+}
 
-    uint16_t newW = event->width;
-    uint16_t newH = event->height;
+- (void)handleScreenSizeChange:(uint16_t)newW height:(uint16_t)newH {
     if (newW == self.screenWidth && newH == self.screenHeight)
         return;
 
-    NSLog(@"[CompositingManager] Screen size changed: %ux%u → %ux%u",
+    NSLog(@"[CompositingManager] Screen size changed: %ux%u -> %ux%u",
           self.screenWidth, self.screenHeight, newW, newH);
-
-    // Refresh the screen dimensions on XCBScreen
-    XCBScreen *screen = [[self.connection screens] firstObject];
-    if (screen) {
-        [screen setWidth:newW];
-        [screen setHeight:newH];
-    }
 
     // Update cached compositor dimensions
     self.screenWidth = newW;
     self.screenHeight = newH;
+
+    xcb_connection_t *conn = [self.connection connection];
+    if (!conn) return;
 
     // Recreate the backing pixmap and root buffer at the new size
     if (self.rootPixmap != XCB_NONE) {
@@ -3202,13 +3187,15 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         xcb_render_free_picture(conn, self.rootBuffer);
         self.rootBuffer = XCB_NONE;
     }
-    self.rootPixmap = xcb_generate_id(conn);
-    xcb_create_pixmap(conn, [screen screen]->root_depth,
-                      self.rootPixmap, self.rootWindow,
-                      newW, newH);
-    self.rootBuffer = xcb_generate_id(conn);
-    xcb_render_create_picture(conn, self.rootBuffer, self.rootPixmap,
-                              self.rootFormat, 0, NULL);
+    if (self.compositingActive) {
+        self.rootPixmap = xcb_generate_id(conn);
+        xcb_create_pixmap(conn, [[[self.connection screens] firstObject] screen]->root_depth,
+                          self.rootPixmap, self.rootWindow,
+                          newW, newH);
+        self.rootBuffer = xcb_generate_id(conn);
+        xcb_render_create_picture(conn, self.rootBuffer, self.rootPixmap,
+                                  self.rootFormat, 0, NULL);
+    }
 
     // Recreate output window at the new size
     if (self.outputWindow != XCB_NONE) {
@@ -3220,7 +3207,6 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 
     // Recreate present pixmaps (if using X Present)
     if (self.presentAvailable) {
-        // Free old
         if (self.presentPixmap0 != XCB_NONE)
             xcb_free_pixmap(conn, self.presentPixmap0);
         if (self.presentPixmap1 != XCB_NONE)
@@ -3230,7 +3216,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         if (self.presentPicture1 != XCB_NONE)
             xcb_render_free_picture(conn, self.presentPicture1);
 
-        // Create new
+        XCBScreen *screen = [[self.connection screens] firstObject];
         self.presentPixmap0 = xcb_generate_id(conn);
         xcb_create_pixmap(conn, [screen screen]->root_depth,
                           self.presentPixmap0, self.rootWindow, newW, newH);
@@ -3245,55 +3231,13 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
                                   self.presentPixmap1, self.rootFormat, 0, NULL);
     }
 
-    // Reposition all windows that extend beyond the new screen bounds
-    for (NSNumber *key in [self.connection windowsMap]) {
-        XCBWindow *w = [self.connection windowForXCBId:[key unsignedIntValue]];
-        if (!w) continue;
-        if ([w isKindOfClass:[XCBFrame class]] || ![w decorated]) {
-            XCBRect r = [w windowRect];
-            BOOL moved = NO;
-            if (r.position.x + (int16_t)r.size.width > (int16_t)newW) {
-                r.position.x = (int16_t)newW - (int16_t)r.size.width - 10;
-                moved = YES;
-            }
-            if (r.position.y + (int16_t)r.size.height > (int16_t)newH) {
-                r.position.y = (int16_t)newH - (int16_t)r.size.height - 10;
-                moved = YES;
-            }
-            if (r.position.x < 0) { r.position.x = 0; moved = YES; }
-            if (r.position.y < 0) { r.position.y = 0; moved = YES; }
-            if (moved) {
-                uint32_t vals[2] = {(uint32_t)r.position.x, (uint32_t)r.position.y};
-                xcb_configure_window(conn, [w window],
-                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
-                [w setWindowRect:r];
-            }
-        }
-    }
-
     [self.connection flush];
 
-    // Invalidate workarea cache so it is recalculated on next query
-    self.connection.workareaValid = NO;
-
-    // Update _NET_DESKTOP_GEOMETRY
-    {
-        EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
-        XCBScreen *scr = [[self.connection screens] firstObject];
-        XCBWindow *scrRootWin = [scr rootWindow];
-        uint32_t geom[2] = {newW, newH};
-        [ewmh changePropertiesForWindow:scrRootWin
-                               withMode:XCB_PROP_MODE_REPLACE
-                           withProperty:[ewmh EWMHDesktopGeometry]
-                               withType:XCB_ATOM_CARDINAL
-                             withFormat:32
-                         withDataLength:2
-                               withData:geom];
+    // Full screen repaint (compositor-only)
+    if (self.compositingActive) {
+        [self damageScreen];
+        [self scheduleRepair];
     }
-
-    // Full screen repaint
-    [self damageScreen];
-    [self scheduleRepair];
 }
 
 - (void)handlePresentComplete:(void *)event {

@@ -30,6 +30,9 @@
 @property (strong, nonatomic) XCBConnection *connection;
 @property (strong, nonatomic) XCBWindow *selectionManagerWindow;
 
+// RANDR extension event base (for xrandr event routing)
+@property (assign, nonatomic) uint8_t randrEventBase;
+
 // Event loop bookkeeping
 @property (assign, nonatomic) BOOL xcbEventsIntegrated;
 @property (assign, nonatomic) BOOL nsRunLoopActive;
