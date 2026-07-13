@@ -787,6 +787,15 @@
 
 - (void) close
 {
+    // If close was already requested (timer is running), the app ignored
+    // the first request — show the force-quit dialog immediately.
+    if (closeTimer != nil)
+    {
+        [self cancelCloseTimer];
+        [self closeTimerFired:nil];
+        return;
+    }
+
     xcb_client_message_event_t event;
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
@@ -812,7 +821,6 @@
     // Start a 5-second watchdog timer.  If the window is still alive when it
     // fires we show a force-quit dialog.  Cancelled in handleDestroyNotify:
     // via cancelCloseTimer.
-    [self cancelCloseTimer];
     closeTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
                                                   target:self
                                                 selector:@selector(closeTimerFired:)

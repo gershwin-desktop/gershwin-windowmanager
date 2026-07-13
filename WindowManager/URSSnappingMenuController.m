@@ -118,6 +118,8 @@
         { @"Snap Top Right",           @selector(snapMenuSnapTopRight:) },
         { @"Snap Bottom Left",         @selector(snapMenuSnapBottomLeft:) },
         { @"Snap Bottom Right",        @selector(snapMenuSnapBottomRight:) },
+        { nil, nil },  // separator
+        { @"Close",                    @selector(snapMenuClose:) },
     };
 
     for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
@@ -243,6 +245,16 @@
     XCBFrame *frame = [sender representedObject];
     if (frame && [self.connection windowForXCBId:[frame window]]) {
         [self.connection executeSnapForZone:SnapZoneBottomRight frame:frame];
+    }
+}
+
+- (void)snapMenuClose:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (!frame) return;
+    XCBWindow *clientWin = [frame childWindowForKey:ClientWindow];
+    if (clientWin) {
+        [clientWin close];
     }
 }
 
