@@ -1068,6 +1068,8 @@
         xcb_randr_screen_change_notify_event_t *rEvent =
             (xcb_randr_screen_change_notify_event_t *)event;
         [self.compositingManager handleScreenChange:rEvent];
+        // Recalculate workarea (updates _NET_WORKAREA from new screen dims)
+        [self.workareaManager recalculateWorkarea];
     }
 }
 

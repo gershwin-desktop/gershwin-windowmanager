@@ -3245,11 +3245,11 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
                                   self.presentPixmap1, self.rootFormat, 0, NULL);
     }
 
-    // Reposition windows that are off-screen
+    // Reposition all windows that extend beyond the new screen bounds
     for (NSNumber *key in [self.connection windowsMap]) {
         XCBWindow *w = [self.connection windowForXCBId:[key unsignedIntValue]];
         if (!w) continue;
-        if ([w isKindOfClass:[XCBFrame class]]) {
+        if ([w isKindOfClass:[XCBFrame class]] || ![w decorated]) {
             XCBRect r = [w windowRect];
             BOOL moved = NO;
             if (r.position.x + (int16_t)r.size.width > (int16_t)newW) {
