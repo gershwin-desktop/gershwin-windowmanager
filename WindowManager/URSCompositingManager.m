@@ -2339,6 +2339,51 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
 }
 
+// Paint the Menu.app shadow at the bottom of the z-order so it appears
+// below all other windows (only the desktop background is lower).
+- (void)paintMenuShadow:(URSCompositeWindow *)cw {
+    xcb_connection_t *conn = [self.connection connection];
+
+    // Ensure the shadow picture exists (paintWindow: skips creation when it
+    // recognizes the Menu.app, so we must create it here).
+    if (cw.shadowPicture == XCB_NONE && ![self.connection resizeState]) {
+        [self createShadowForWindow:cw];
+    }
+    if (cw.shadowPicture == XCB_NONE) return;
+
+    int16_t screenX = cw.x;
+    int16_t screenY = cw.y;
+    int16_t shadowX = screenX + cw.shadowOffsetX;
+    int16_t shadowY = screenY + cw.shadowOffsetY;
+    uint16_t winW = cw.width + 2 * cw.borderWidth;
+    uint16_t winH = cw.height + 2 * cw.borderWidth;
+
+    xcb_rectangle_t shadowRect = { shadowX, shadowY, cw.shadowWidth, cw.shadowHeight };
+    xcb_rectangle_t winRect = { screenX, screenY, winW, winH };
+
+    xcb_xfixes_region_t shadowRegion = xcb_generate_id(conn);
+    xcb_xfixes_create_region(conn, shadowRegion, 1, &shadowRect);
+    xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
+    xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
+    xcb_xfixes_region_t clipRegion = xcb_generate_id(conn);
+    xcb_xfixes_create_region(conn, clipRegion, 0, NULL);
+    xcb_xfixes_subtract_region(conn, clipRegion, shadowRegion, winRegion);
+
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, 0, 0, clipRegion);
+
+    xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                         cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                         0, 0, 0, 0,
+                         shadowX, shadowY,
+                         cw.shadowWidth, cw.shadowHeight);
+
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, 0, 0, XCB_NONE);
+
+    xcb_xfixes_destroy_region(conn, clipRegion);
+    xcb_xfixes_destroy_region(conn, winRegion);
+    xcb_xfixes_destroy_region(conn, shadowRegion);
+}
+
 - (void)paintAll:(xcb_xfixes_region_t)region {
     URS_PROFILE_BEGIN(paintAll);
     xcb_connection_t *conn = [self.connection connection];
@@ -2365,6 +2410,23 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
     xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
                                self.rootBuffer, bg_color, 1, &bg_rect);
+
+    // Find Menu.app and ensure its shadow is created early so we can
+    // paint it at the desktop z-order (below all other windows).
+    URSCompositeWindow *menuCW = nil;
+    for (NSUInteger i = 0; i < num_windows && !menuCW; i++) {
+        URSCompositeWindow *cw = [self findCWindow:
+            [self.windowStackingOrder[i] unsignedIntValue]];
+        if (cw && cw.y == 0 && cw.width == self.screenWidth && cw.height < 50) {
+            menuCW = cw;
+        }
+    }
+    // Ensure shadow exists before the main loop (paintWindow: skips
+    // shadow creation for the Menu.app due to the skip condition).
+    if (menuCW && menuCW.shadowPicture == XCB_NONE && ![self.connection resizeState]) {
+        [self createShadowForWindow:menuCW];
+    }
+    BOOL menuShadowPainted = NO;
 
     // Paint windows from bottom to top (so higher z-order windows are on top)
     for (NSUInteger i = 0; i < num_windows; i++) {
@@ -2398,6 +2460,16 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         }
         
         [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:region];
+
+        // Paint Menu.app shadow right after the first (bottommost) window,
+        // typically the desktop, so the shadow sits below all other windows
+        // but above the desktop/background.
+        if (!menuShadowPainted && menuCW
+            && menuCW.shadowPicture != XCB_NONE
+            && ![self.noShadowWindows containsObject:@(menuCW.windowId)]) {
+            [self paintMenuShadow:menuCW];
+            menuShadowPainted = YES;
+        }
     }
 
     // Reset the clip region on rootBuffer so no stale clip affects
@@ -2864,8 +2936,10 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     }
 
     // Draw shadow whenever available (including during resize),
-    // except for explicitly excluded windows (e.g. snap preview overlay).
-    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)];
+    // except for explicitly excluded windows (e.g. snap preview overlay)
+    // and the Menu.app top panel (its shadow is painted separately at the bottom).
+    BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
+    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
     if (cw.shadowPicture != XCB_NONE && !animating && !skipShadow) {
         int16_t shadowX = screenX + cw.shadowOffsetX;
         int16_t shadowY = screenY + cw.shadowOffsetY;
