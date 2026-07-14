@@ -2895,18 +2895,46 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             }
         }
         
-        // Composite ARGB32 shadow with proper alpha blending
-        xcb_render_composite(conn,
-                            XCB_RENDER_PICT_OP_OVER,
-                            cw.shadowPicture,       // Source: ARGB32 shadow with alpha
-                            XCB_NONE,               // No mask
-                            self.rootBuffer,        // Destination
-                            0, 0,                   // src x, y
-                            0, 0,                   // mask x, y (unused)
-                            shadowX,                // dst x
-                            shadowY,                // dst y
-                            drawShadowWidth,
-                            drawShadowHeight);
+        // Clip the shadow to exclude the window area so we never waste
+        // fill rate rendering shadow behind the window content.
+        {
+            xcb_rectangle_t shadowRect = { (int16_t)shadowX, (int16_t)shadowY,
+                                            drawShadowWidth, drawShadowHeight };
+            uint16_t winClipW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
+            uint16_t winClipH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
+            xcb_rectangle_t winRect = { (int16_t)screenX, (int16_t)screenY,
+                                         winClipW, winClipH };
+
+            xcb_xfixes_region_t shadowRegion = xcb_generate_id(conn);
+            xcb_xfixes_create_region(conn, shadowRegion, 1, &shadowRect);
+
+            xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
+            xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
+
+            xcb_xfixes_region_t clipRegion = xcb_generate_id(conn);
+            xcb_xfixes_create_region(conn, clipRegion, 0, NULL);
+            xcb_xfixes_subtract_region(conn, clipRegion, shadowRegion, winRegion);
+
+            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer,
+                                               0, 0, clipRegion);
+
+            // Composite ARGB32 shadow with proper alpha blending
+            xcb_render_composite(conn,
+                                XCB_RENDER_PICT_OP_OVER,
+                                cw.shadowPicture,
+                                XCB_NONE,
+                                self.rootBuffer,
+                                0, 0, 0, 0,
+                                shadowX, shadowY,
+                                drawShadowWidth, drawShadowHeight);
+
+            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer,
+                                               0, 0, XCB_NONE);
+
+            xcb_xfixes_destroy_region(conn, clipRegion);
+            xcb_xfixes_destroy_region(conn, winRegion);
+            xcb_xfixes_destroy_region(conn, shadowRegion);
+        }
 
         if (appliedShadowScale) {
             xcb_render_transform_t resetShadow = URSIdentityTransform();
