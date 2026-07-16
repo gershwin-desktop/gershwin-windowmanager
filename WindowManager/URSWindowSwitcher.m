@@ -393,9 +393,8 @@
     @try {
         xcb_connection_t *conn = [self.connection connection];
         
-        // Set WM_STATE to Normal first
-        ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:self.connection];
-        [icccmService setWMStateForWindow:frame state:ICCCM_WM_STATE_NORMAL];
+        // Clear minimized state: sets isMinimized=NO and WM_STATE=Normal
+        [frame setNormalState];
         
         // Ensure proper stacking before mapping
         // Get the root window and raise frame above it
@@ -460,6 +459,7 @@
             }
             
             xcb_map_window(conn, [clientWindow window]);
+            [clientWindow setNormalState];
             
             // Send expose event to client so it repaints
             xcb_expose_event_t exposeEvent;

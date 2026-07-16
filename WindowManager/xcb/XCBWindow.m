@@ -726,6 +726,13 @@
     XCBWindow *rootWindow = [[self onScreen] rootWindow];
     XCBFrame *frame;
 
+    // oldRect is only valid if it was saved during maximize.  Minimize never
+    // saves to oldRect, so fall back to the current windowRect when invalid.
+    if (!FnCheckXCBRectIsValid(oldRect)) {
+        [self setNormalState];
+        return;
+    }
+
     if ([[frame parentWindow] window] != [rootWindow window])
     {
         frame = (XCBFrame*)self;
