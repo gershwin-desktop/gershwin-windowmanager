@@ -1808,11 +1808,13 @@
             }
         }
 
-        // If we couldn't find a frame, the window may be undecorated (dialogs, alerts, sheets).
-        // Attempt a direct focus on the client window as a fallback.
+        // If we couldn't find a frame, the window may be undecorated (dialogs, alerts, sheets, docks).
+        // Undecorated windows have no titlebars, so GSTheme is not applicable — skip silently.
         XCBWindow *directWindow = [self.connection windowForXCBId:windowId];
         if (directWindow) {
-            //NSLog(@"[Focus] No frame found for %u; attempting direct focus on window %u", windowId, [directWindow window]);
+            if (![directWindow decorated]) return;
+
+            // Attempt a direct focus on the client window as a fallback.
             if ([self.focusManager isWindowFocusable:directWindow allowDesktop:NO]) {
                 [self performSelector:@selector(focusWindowAfterThemeApplied:)
                            withObject:directWindow
