@@ -361,18 +361,23 @@ static XCBConnection *sharedInstance;
         }
     }
 
-    // Tooltip and notification windows must also stay above the dock
-    // so they are visible when shown near the screen edges.
+    // Transient popup windows (dialog, tooltip, notification, utility, splash)
+    // must stay above the dock so they are always visible.
     {
-        NSString *tooltipType = [ewmhService EWMHWMWindowTypeTooltip];
-        NSString *notifType = [ewmhService EWMHWMWindowTypeNotification];
+        NSSet<NSString *> *transientTypes = [NSSet setWithObjects:
+            [ewmhService EWMHWMWindowTypeDialog],
+            [ewmhService EWMHWMWindowTypeTooltip],
+            [ewmhService EWMHWMWindowTypeNotification],
+            [ewmhService EWMHWMWindowTypeUtility],
+            [ewmhService EWMHWMWindowTypeSplash],
+            nil];
+        [self flush];
         for (XCBWindow *aWindow in [windowsMap allValues]) {
-            NSString *wtype = [aWindow windowType];
-            if ([wtype isEqualToString:tooltipType] ||
-                [wtype isEqualToString:notifType]) {
+            if ([transientTypes containsObject:[aWindow windowType]]) {
                 [aWindow stackAbove];
             }
         }
+        [self flush];
     }
 
     // Notify compositor that stacking order has changed
@@ -1368,16 +1373,22 @@ static XCBConnection *sharedInstance;
                 return;
             }
 
-            /*if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDialog]])
+            if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDialog]] ||
+                *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeTooltip]] ||
+                *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeNotification]] ||
+                *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeUtility]] ||
+                *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeSplash]])
             {
-                //NSLog(@"Dialog window %u to be registered", [window window]);
                 [self registerWindow:window];
                 [self mapWindow:window];
                 [window setDecorated:NO];
+                [window updatePid];
                 XCBWindow *parentWindow = [[XCBWindow alloc] initWithXCBWindow:anEvent->parent andConnection:self];
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDialog]];
+                if (!self.adoptingExistingWindows)
+                    [window stackAbove];
 
                 window = nil;
                 ewmhService = nil;
@@ -1385,7 +1396,7 @@ static XCBConnection *sharedInstance;
                 parentWindow = nil;
                 free(windowTypeReply);
                 return;
-            }*/
+            }
 
             atom = NULL; // atom points into windowTypeReply memory, cleared to avoid dangling pointer
             free(windowTypeReply);
