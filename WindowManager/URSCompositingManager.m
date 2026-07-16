@@ -153,6 +153,12 @@
 @property (assign, nonatomic) uint8_t fixesOpcode;
 @property (assign, nonatomic) uint8_t randrEventBase;
 
+// Cached atoms for window type checks (used in shadow creation)
+@property (assign, nonatomic) xcb_atom_t wmTypeAtom;
+@property (assign, nonatomic) xcb_atom_t wmTypeDockAtom;
+@property (assign, nonatomic) xcb_atom_t wmNameAtom;    // _NET_WM_NAME
+@property (assign, nonatomic) xcb_atom_t wmUtf8Atom;    // UTF8_STRING
+
 // Throttling to prevent excessive recomposites
 @property (assign, nonatomic) BOOL repairScheduled;
 @property (assign, nonatomic) NSTimeInterval lastRepairTime;
@@ -351,6 +357,41 @@
       } else {
         self.bypassCompositorAtom = XCB_NONE;
       }
+    }
+
+    // Intern atoms for _NET_WM_WINDOW_TYPE and _NET_WM_WINDOW_TYPE_DOCK
+    // (used in createShadowForWindow: to skip shadows for dock windows).
+    {
+      xcb_connection_t *conn = [self.connection connection];
+      xcb_intern_atom_cookie_t t_c = xcb_intern_atom(conn, 0,
+          strlen("_NET_WM_WINDOW_TYPE"), "_NET_WM_WINDOW_TYPE");
+      xcb_intern_atom_reply_t *t_r = xcb_intern_atom_reply(conn, t_c, NULL);
+      self.wmTypeAtom = t_r ? t_r->atom : XCB_NONE;
+      free(t_r);
+    }
+    {
+      xcb_connection_t *conn = [self.connection connection];
+      xcb_intern_atom_cookie_t d_c = xcb_intern_atom(conn, 0,
+          strlen("_NET_WM_WINDOW_TYPE_DOCK"), "_NET_WM_WINDOW_TYPE_DOCK");
+      xcb_intern_atom_reply_t *d_r = xcb_intern_atom_reply(conn, d_c, NULL);
+      self.wmTypeDockAtom = d_r ? d_r->atom : XCB_NONE;
+      free(d_r);
+    }
+    {
+      xcb_connection_t *conn = [self.connection connection];
+      xcb_intern_atom_cookie_t n_c = xcb_intern_atom(conn, 0,
+          strlen("_NET_WM_NAME"), "_NET_WM_NAME");
+      xcb_intern_atom_reply_t *n_r = xcb_intern_atom_reply(conn, n_c, NULL);
+      self.wmNameAtom = n_r ? n_r->atom : XCB_NONE;
+      free(n_r);
+    }
+    {
+      xcb_connection_t *conn = [self.connection connection];
+      xcb_intern_atom_cookie_t u_c = xcb_intern_atom(conn, 0,
+          strlen("UTF8_STRING"), "UTF8_STRING");
+      xcb_intern_atom_reply_t *u_r = xcb_intern_atom_reply(conn, u_c, NULL);
+      self.wmUtf8Atom = u_r ? u_r->atom : XCB_NONE;
+      free(u_r);
     }
 
     self.extensionsAvailable = YES;
@@ -2735,6 +2776,49 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     // Skip shadow for explicitly excluded windows (e.g. snap preview overlay)
     if ([self.noShadowWindows containsObject:@(cw.windowId)]) {
         return;
+    }
+
+    // Skip shadow for the Dock panel (a DOCK-type window with _NET_WM_NAME "Dock").
+    // The MenuBar is also DOCK type but keeps its shadow.  Relying solely on
+    // setSkipShadowForWindow: from the connection layer can fail if the compositor
+    // singleton is not yet reachable during early MapRequest handling, so we
+    // double-check here using the cached atom.
+    if (self.wmTypeAtom != XCB_NONE && self.wmTypeDockAtom != XCB_NONE
+        && self.wmNameAtom != XCB_NONE) {
+        xcb_get_property_cookie_t typeCookie =
+            xcb_get_property(conn, 0, cw.windowId,
+                             self.wmTypeAtom, XCB_ATOM_ATOM, 0, 1024);
+        xcb_get_property_reply_t *typeReply =
+            xcb_get_property_reply(conn, typeCookie, NULL);
+        if (typeReply && typeReply->type == XCB_ATOM_ATOM
+            && typeReply->format == 32 && typeReply->length > 0) {
+            xcb_atom_t *atoms = (xcb_atom_t *)xcb_get_property_value(typeReply);
+            for (uint32_t i = 0; i < typeReply->length; i++) {
+                if (atoms[i] == self.wmTypeDockAtom) {
+                    // It is a DOCK-type window — verify _NET_WM_NAME is "Dock".
+                    xcb_get_property_cookie_t nameCookie =
+                        xcb_get_property(conn, 0, cw.windowId,
+                                         self.wmNameAtom, self.wmUtf8Atom,
+                                         0, 256);
+                    xcb_get_property_reply_t *nameReply =
+                        xcb_get_property_reply(conn, nameCookie, NULL);
+                    BOOL isDockPanel = NO;
+                    if (nameReply && nameReply->type != XCB_ATOM_NONE
+                        && nameReply->format == 8 && nameReply->length > 0) {
+                        char *name = (char *)xcb_get_property_value(nameReply);
+                        isDockPanel = (name && strncmp(name, "Dock", 4) == 0);
+                    }
+                    free(nameReply);
+                    if (isDockPanel) {
+                        [self.noShadowWindows addObject:@(cw.windowId)];
+                        free(typeReply);
+                        return;
+                    }
+                    break;
+                }
+            }
+        }
+        free(typeReply);
     }
     
     // Generate shadow image in memory
