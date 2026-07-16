@@ -361,6 +361,20 @@ static XCBConnection *sharedInstance;
         }
     }
 
+    // Tooltip and notification windows must also stay above the dock
+    // so they are visible when shown near the screen edges.
+    {
+        NSString *tooltipType = [ewmhService EWMHWMWindowTypeTooltip];
+        NSString *notifType = [ewmhService EWMHWMWindowTypeNotification];
+        for (XCBWindow *aWindow in [windowsMap allValues]) {
+            NSString *wtype = [aWindow windowType];
+            if ([wtype isEqualToString:tooltipType] ||
+                [wtype isEqualToString:notifType]) {
+                [aWindow stackAbove];
+            }
+        }
+    }
+
     // Notify compositor that stacking order has changed
     Class compositorClass = NSClassFromString(@"URSCompositingManager");
     if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
@@ -1293,6 +1307,27 @@ static XCBConnection *sharedInstance;
                 [window setParentWindow:parentWindow];
                 [icccmService wmClassForWindow:window];
                 [window setWindowType:[ewmhService EWMHWMWindowTypeDropdownMenu]];
+                if (!self.adoptingExistingWindows)
+                    [window stackAbove];
+
+                window = nil;
+                ewmhService = nil;
+                name = nil;
+                parentWindow = nil;
+                free(windowTypeReply);
+                return;
+            }
+
+            if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeTooltip]])
+            {
+                [self registerWindow:window];
+                [self mapWindow:window];
+                [window setDecorated:NO];
+                [window updatePid];
+                XCBWindow *parentWindow = [[XCBWindow alloc] initWithXCBWindow:anEvent->parent andConnection:self];
+                [window setParentWindow:parentWindow];
+                [icccmService wmClassForWindow:window];
+                [window setWindowType:[ewmhService EWMHWMWindowTypeTooltip]];
                 if (!self.adoptingExistingWindows)
                     [window stackAbove];
 
