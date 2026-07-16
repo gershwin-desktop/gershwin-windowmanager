@@ -603,7 +603,7 @@
 
     if (error)
     {
-        NSLog(@"Error: %d for window: %u", error->error_code, [aWindow window]);
+        NSLog(@"X11 error %d (resource %u)", error->error_code, error->resource_id);
         free(error);
         return NULL;
     }
