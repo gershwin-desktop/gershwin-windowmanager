@@ -158,6 +158,9 @@
 {
     xcb_icccm_wm_hints_t wmHints;
     memset(&wmHints, 0, sizeof(wmHints));
+
+    if (!aWindow) return wmHints;
+
     xcb_get_property_cookie_t cookie = xcb_icccm_get_wm_hints([[super connection] connection],
                                                               [aWindow window]);
     xcb_generic_error_t *error = NULL;
@@ -170,7 +173,7 @@
         free(error);
 
     if (!success)
-        NSLog(@"Error: Can't fill wmHints structure!");
+        NSLog(@"[ICCCM] No WM_HINTS for window %u", [aWindow window]);
 
     return wmHints;
 }

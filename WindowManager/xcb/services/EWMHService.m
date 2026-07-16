@@ -584,6 +584,8 @@
                delete:(BOOL)deleteProperty
                length:(uint32_t)len
 {
+    if (!aWindow) return NULL;
+
     xcb_atom_t property = [atomService atomFromCachedAtomsWithKey:aPropertyName];
 
     xcb_get_property_cookie_t cookie = xcb_get_property([connection connection],
