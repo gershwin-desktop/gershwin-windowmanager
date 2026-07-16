@@ -586,7 +586,7 @@ static XCBConnection *sharedInstance;
     // If we were dragging when this window unmapped, cancel the drag.
     // A missed button release (e.g., window unmapped during drag) leaves dragState stuck.
     if (dragState) {
-        NSLog(@"DRAG SAFETY: Window %u unmapped while dragState=YES — clearing drag state", anEvent->window);
+        //NSLog(@"DRAG SAFETY: Window %u unmapped while dragState=YES — clearing drag state", anEvent->window);
         dragState = NO;
         resizeState = NO;
         xcb_ungrab_pointer(connection, XCB_CURRENT_TIME);
@@ -1905,7 +1905,7 @@ static XCBConnection *sharedInstance;
         // Safety: verify mouse button 1 is actually pressed.
         // If dragState leaked from a prior interaction, cancel the drag.
         if (!(anEvent->state & XCB_KEY_BUT_MASK_BUTTON_1)) {
-            NSLog(@"DRAG SAFETY: dragState was YES but button 1 not pressed — cancelling phantom drag");
+            //NSLog(@"DRAG SAFETY: dragState was YES but button 1 not pressed — cancelling phantom drag");
             dragState = NO;
             [window ungrabPointer];
             return;
