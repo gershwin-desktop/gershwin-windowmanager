@@ -2423,8 +2423,12 @@ static XCBConnection *sharedInstance;
         }
     } else if (window && [window isKindOfClass:[XCBWindow class]]) {
         // Fallback: If we couldn't find client/frame but have a window, focus it directly
-        [window focus];
-        // Don't raise desktop windows - they should always stay at the bottom
+        // Don't focus or raise desktop windows — they must stay at the bottom.
+        // Focusing the desktop sends _NET_ACTIVE_WINDOW which prompts the workspace
+        // application to reconfigure itself above other windows.
+        if (!isDesktopWindow) {
+            [window focus];
+        }
         if (!isDesktopWindow) {
             BOOL alreadyTopmost = NO;
             xcb_window_t rootWin2 = [[[[self screens] firstObject] rootWindow] window];
