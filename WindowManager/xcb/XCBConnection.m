@@ -22,6 +22,8 @@
 #import <GNUstepGUI/GSTheme.h>
 #import <AppKit/NSColor.h>
 #import <AppKit/NSGraphics.h>
+#import <dirent.h>
+#import <unistd.h>
 
 #import <objc/message.h> // for dynamic messaging to compositor helper
 
@@ -76,6 +78,96 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     return 0;
+}
+
+// Resolve a symlink to its actual path
+static NSString *resolveSymlink(NSString *linkPath) {
+    char buffer[PATH_MAX];
+    ssize_t len = readlink([linkPath fileSystemRepresentation], buffer, sizeof(buffer) - 1);
+    if (len != -1) {
+        buffer[len] = '\0';
+        return [NSString stringWithUTF8String:buffer];
+    }
+    return nil;
+}
+
+// Resolve an executable path to its canonical absolute path when possible.
+static NSString *canonicalPathForExecutable(NSString *path)
+{
+    char resolved[PATH_MAX];
+
+    if (!path) {
+        return nil;
+    }
+
+    if (realpath([path fileSystemRepresentation], resolved) != NULL) {
+        return [NSString stringWithUTF8String:resolved];
+    }
+
+    return path;
+}
+
+// Kill any other instances of this application after we've registered as WM
+static void killOtherInstances(void) {
+    NSString *currentPath = [[NSBundle mainBundle] executablePath];
+    if (!currentPath) {
+        return;
+    }
+
+    pid_t currentPID = getpid();
+    NSString *currentRealPath = canonicalPathForExecutable(currentPath);
+
+    DIR *procDir = opendir("/proc");
+    if (!procDir) {
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(procDir)) != NULL) {
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+            continue;
+        }
+
+        pid_t otherPID = (pid_t)strtol(entry->d_name, NULL, 10);
+        if (otherPID <= 0 || otherPID == currentPID) {
+            continue;
+        }
+
+        NSString *exePath = [NSString stringWithFormat:@"/proc/%d/exe", otherPID];
+        NSString *linkedPath = resolveSymlink(exePath);
+
+        if (!linkedPath) {
+            exePath = [NSString stringWithFormat:@"/proc/%d/file", otherPID];
+            linkedPath = resolveSymlink(exePath);
+        }
+
+        if (!linkedPath) {
+            continue;
+        }
+
+        NSString *otherRealPath = canonicalPathForExecutable(linkedPath);
+
+        if ([otherRealPath isEqualToString:currentRealPath]) {
+            NSLog(@"[WindowManager] Killing stale instance with PID %d", otherPID);
+            kill(otherPID, SIGTERM);
+            usleep(100000);
+
+            BOOL stillAlive = (kill(otherPID, 0) == 0);
+            int waitedMs = 100;
+            while (stillAlive && waitedMs < 2000) {
+                usleep(100000);
+                waitedMs += 100;
+                stillAlive = (kill(otherPID, 0) == 0);
+            }
+
+            if (stillAlive) {
+                NSLog(@"[WindowManager] Force killing stale instance with PID %d", otherPID);
+                kill(otherPID, SIGKILL);
+            }
+        }
+    }
+
+    closedir(procDir);
 }
 
 @implementation XCBConnection
@@ -3729,16 +3821,35 @@ static XCBConnection *sharedInstance;
             BOOL acquired = [selector aquireWithWindow:selectionWindow replace:YES];
             if (!acquired)
             {
-                NSLog(@"[WM] Failed to acquire WM selection for replacement");
-                rootWindow = nil;
-                screen = nil;
-                selector = nil;
-                atomName = nil;
-                ewmhService = nil;
-                return NO;
+                NSLog(@"[WM] Failed to acquire WM selection; killing stale WM and retrying");
+                killOtherInstances();
+                [self flush];
+                usleep(500000);
+                acquired = [selector aquireWithWindow:selectionWindow replace:YES];
             }
 
-            attributesChanged = [rootWindow changeAttributes:values withMask:XCB_CW_EVENT_MASK checked:YES];
+            if (acquired)
+            {
+                // Wait for the old WM to handle SelectionClear and release
+                // SubstructRedirect (up to 2s total, polling every 100ms)
+                for (int i = 0; i < 20; i++)
+                {
+                    [self flush];
+                    usleep(100000);
+                    attributesChanged = [rootWindow changeAttributes:values withMask:XCB_CW_EVENT_MASK checked:YES];
+                    if (attributesChanged)
+                        break;
+                }
+            }
+
+            if (!attributesChanged)
+            {
+                NSLog(@"[WM] Replacement attempt failed; killing stale WM instance");
+                killOtherInstances();
+                [self flush];
+                usleep(500000);
+                attributesChanged = [rootWindow changeAttributes:values withMask:XCB_CW_EVENT_MASK checked:YES];
+            }
 
             if (!attributesChanged)
             {
@@ -3757,6 +3868,7 @@ static XCBConnection *sharedInstance;
         rootWindow = nil;
         screen = nil;
         ewmhService = nil;
+        killOtherInstances();
         return YES;
     }
 
@@ -3797,6 +3909,7 @@ static XCBConnection *sharedInstance;
     atomName = nil;
     ewmhService = nil;
 
+    killOtherInstances();
     return YES;
 }
 

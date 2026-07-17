@@ -106,7 +106,7 @@ $(APP_NAME)_GUI_LIBS = \
 		-lxcb-composite -lxcb-render -lxcb-damage -lxcb-shm -lxcb-present \
 		-ldispatch
 
-ADDITIONAL_OBJCFLAGS = -std=c99 -g -O0 -fobjc-arc -fblocks -Wall -Wno-typedef-redefinition
+ADDITIONAL_OBJCFLAGS = -std=c99 -g -O0 -fobjc-arc -fblocks -Wall -Wno-typedef-redefinition -D_GNU_SOURCE
 
 # Profiling: build with  make PROFILE=1  to enable CPU instrumentation.
 # When enabled, a summary is printed every 10s and on SIGUSR1.

@@ -1215,6 +1215,13 @@
     }
     [self cleanupCompositeWindowGroup:group deleteDamage:YES removeRecords:YES];
     [self.parentFrameCache removeAllObjects];
+
+    // Paint immediately so the shadow disappears in this frame, not the
+    // next run loop iteration.  addDamage: above defers via scheduleRepair;
+    // performRepairNow runs the paint cycle right here, clearing the old
+    // shadow pixels from the root buffer via the full-screen background fill.
+    xcb_flush([self.connection connection]);
+    [self performRepairNow];
 }
 
 - (void)removeWindow:(xcb_window_t)windowId {
@@ -1248,6 +1255,9 @@
     
     // OPTIMIZATION: Mark stacking order dirty
     self.stackingOrderDirty = YES;
+
+    xcb_flush([self.connection connection]);
+    [self performRepairNow];
 }
 
 - (void)freeWindowData:(URSCompositeWindow *)cw delete:(BOOL)shouldDelete {
@@ -1280,12 +1290,28 @@
         xcb_free_pixmap(conn, cw.shadowPixmap);
         cw.shadowPixmap = XCB_NONE;
     }
+
+    // Reset dimensions so windowExtents: falls through to the geometric
+    // estimation block.  Without this, unionExtentsForCompositeWindows:
+    // computes a bounding box from stale shadowWidth/Height even after
+    // the shadow has been freed, producing a wrong damage region.
+    cw.shadowWidth = 0;
+    cw.shadowHeight = 0;
+    cw.shadowOffsetX = 0;
+    cw.shadowOffsetY = 0;
     
     if (shouldDelete && cw.damage != XCB_NONE) {
         xcb_damage_destroy(conn, cw.damage);
         cw.damage = XCB_NONE;
     }
     
+    // Flush immediately so the X server frees the resources before the
+    // next paint cycle reads the root buffer.  Without this, the shadow
+    // picture persists on the server despite our client-side tracking
+    // indicating XCB_NONE, and a stale XFixes clip region or a delayed
+    // damage notification can cause the shadow to linger for one frame.
+    xcb_flush(conn);
+
     cw.damaged = NO;
     // OPTIMIZATION: Reset lazy picture flags
     cw.pictureValid = NO;
@@ -1685,6 +1711,8 @@
         [self damageScreen];
         [self.parentFrameCache removeAllObjects];
         self.stackingOrderDirty = YES;
+        xcb_flush([self.connection connection]);
+        [self performRepairNow];
         return;
     }
 
@@ -1712,6 +1740,9 @@
 
     [self.parentFrameCache removeAllObjects];
     self.stackingOrderDirty = YES;
+
+    xcb_flush([self.connection connection]);
+    [self performRepairNow];
 }
 
 #pragma mark - Damage Handling
@@ -2380,49 +2411,65 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
 }
 
-// Paint the Menu.app shadow at the bottom of the z-order so it appears
-// below all other windows (only the desktop background is lower).
+// Paint the Menu.app shadow in strips around the window rectangle so it
+// never overlays the menu bar itself.
 - (void)paintMenuShadow:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];
 
-    // Ensure the shadow picture exists (paintWindow: skips creation when it
-    // recognizes the Menu.app, so we must create it here).
     if (cw.shadowPicture == XCB_NONE && ![self.connection resizeState]) {
         [self createShadowForWindow:cw];
     }
     if (cw.shadowPicture == XCB_NONE) return;
 
+    if (!cw.damaged) return;
+
     int16_t screenX = cw.x;
     int16_t screenY = cw.y;
     int16_t shadowX = screenX + cw.shadowOffsetX;
     int16_t shadowY = screenY + cw.shadowOffsetY;
+    uint16_t drawShadowWidth = cw.shadowWidth;
+    uint16_t drawShadowHeight = cw.shadowHeight;
     uint16_t winW = cw.width + 2 * cw.borderWidth;
     uint16_t winH = cw.height + 2 * cw.borderWidth;
 
-    xcb_rectangle_t shadowRect = { shadowX, shadowY, cw.shadowWidth, cw.shadowHeight };
-    xcb_rectangle_t winRect = { screenX, screenY, winW, winH };
+    int16_t topH = screenY - shadowY;
+    int16_t botH = (shadowY + drawShadowHeight) - (screenY + winH);
+    int16_t leftW = screenX - shadowX;
+    int16_t rightW = (shadowX + drawShadowWidth) - (screenX + winW);
 
-    xcb_xfixes_region_t shadowRegion = xcb_generate_id(conn);
-    xcb_xfixes_create_region(conn, shadowRegion, 1, &shadowRect);
-    xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
-    xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
-    xcb_xfixes_region_t clipRegion = xcb_generate_id(conn);
-    xcb_xfixes_create_region(conn, clipRegion, 0, NULL);
-    xcb_xfixes_subtract_region(conn, clipRegion, shadowRegion, winRegion);
+    if (topH > 0) {
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, 0, 0, 0,
+                             shadowX, shadowY,
+                             drawShadowWidth, (uint16_t)topH);
+    }
 
-    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, 0, 0, clipRegion);
+    if (botH > 0) {
+        uint16_t botSrcY = drawShadowHeight - (uint16_t)botH;
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, botSrcY, 0, 0,
+                             shadowX, screenY + winH,
+                             drawShadowWidth, (uint16_t)botH);
+    }
 
-    xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                         cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                         0, 0, 0, 0,
-                         shadowX, shadowY,
-                         cw.shadowWidth, cw.shadowHeight);
+    if (leftW > 0 && winH > 0) {
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, (uint16_t)topH, 0, 0,
+                             shadowX, screenY,
+                             (uint16_t)leftW, winH);
+    }
 
-    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, 0, 0, XCB_NONE);
-
-    xcb_xfixes_destroy_region(conn, clipRegion);
-    xcb_xfixes_destroy_region(conn, winRegion);
-    xcb_xfixes_destroy_region(conn, shadowRegion);
+    if (rightW > 0 && winH > 0) {
+        uint16_t rightSrcX = drawShadowWidth - (uint16_t)rightW;
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             rightSrcX, (uint16_t)topH, 0, 0,
+                             screenX + winW, screenY,
+                             (uint16_t)rightW, winH);
+    }
 }
 
 - (void)paintAll:(xcb_xfixes_region_t)region {
@@ -3018,89 +3065,8 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             [self createShadowForWindow:cw];
         }
     }
-
-    // Draw shadow whenever available (including during resize),
-    // except for explicitly excluded windows (e.g. snap preview overlay)
-    // and the Menu.app top panel (its shadow is painted separately at the bottom).
-    BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
-    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
-    if (cw.shadowPicture != XCB_NONE && !animating && !skipShadow) {
-        int16_t shadowX = screenX + cw.shadowOffsetX;
-        int16_t shadowY = screenY + cw.shadowOffsetY;
-        uint16_t drawShadowWidth = cw.shadowWidth;
-        uint16_t drawShadowHeight = cw.shadowHeight;
-        BOOL appliedShadowScale = NO;
-
-        if ([self.connection resizeState]) {
-            int32_t expectedShadowWidth = (int32_t)cw.width + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
-            int32_t expectedShadowHeight = (int32_t)cw.height + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
-            if (expectedShadowWidth < 1) expectedShadowWidth = 1;
-            if (expectedShadowHeight < 1) expectedShadowHeight = 1;
-            if (expectedShadowWidth > 65535) expectedShadowWidth = 65535;
-            if (expectedShadowHeight > 65535) expectedShadowHeight = 65535;
-
-            if (cw.shadowWidth > 0 && cw.shadowHeight > 0 &&
-                (cw.shadowWidth != expectedShadowWidth || cw.shadowHeight != expectedShadowHeight)) {
-                double sx = (double)cw.shadowWidth / (double)expectedShadowWidth;
-                double sy = (double)cw.shadowHeight / (double)expectedShadowHeight;
-                xcb_render_transform_t shadowTransform = URSIdentityTransform();
-                shadowTransform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
-                shadowTransform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
-                xcb_render_set_picture_transform(conn, cw.shadowPicture, shadowTransform);
-                drawShadowWidth = (uint16_t)expectedShadowWidth;
-                drawShadowHeight = (uint16_t)expectedShadowHeight;
-                appliedShadowScale = YES;
-            }
-        }
-        
-        // Clip the shadow to exclude the window area so we never waste
-        // fill rate rendering shadow behind the window content.
-        {
-            xcb_rectangle_t shadowRect = { (int16_t)shadowX, (int16_t)shadowY,
-                                            drawShadowWidth, drawShadowHeight };
-            uint16_t winClipW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
-            uint16_t winClipH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
-            xcb_rectangle_t winRect = { (int16_t)screenX, (int16_t)screenY,
-                                         winClipW, winClipH };
-
-            xcb_xfixes_region_t shadowRegion = xcb_generate_id(conn);
-            xcb_xfixes_create_region(conn, shadowRegion, 1, &shadowRect);
-
-            xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
-            xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
-
-            xcb_xfixes_region_t clipRegion = xcb_generate_id(conn);
-            xcb_xfixes_create_region(conn, clipRegion, 0, NULL);
-            xcb_xfixes_subtract_region(conn, clipRegion, shadowRegion, winRegion);
-
-            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer,
-                                               0, 0, clipRegion);
-
-            // Composite ARGB32 shadow with proper alpha blending
-            xcb_render_composite(conn,
-                                XCB_RENDER_PICT_OP_OVER,
-                                cw.shadowPicture,
-                                XCB_NONE,
-                                self.rootBuffer,
-                                0, 0, 0, 0,
-                                shadowX, shadowY,
-                                drawShadowWidth, drawShadowHeight);
-
-            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer,
-                                               0, 0, XCB_NONE);
-
-            xcb_xfixes_destroy_region(conn, clipRegion);
-            xcb_xfixes_destroy_region(conn, winRegion);
-            xcb_xfixes_destroy_region(conn, shadowRegion);
-        }
-
-        if (appliedShadowScale) {
-            xcb_render_transform_t resetShadow = URSIdentityTransform();
-            xcb_render_set_picture_transform(conn, cw.shadowPicture, resetShadow);
-        }
-    }
 #endif
-    
+
     // OPTIMIZATION: Lazy picture creation - only create when first painting
     // NOTE: The underlying NameWindowPixmap is automatically updated by X server on damage
     // so we only need to recreate when pictureValid is false (size change, etc.)
@@ -3205,6 +3171,94 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             xcb_render_free_picture(conn, alphaMask);
         }
     }
+
+#if 1
+    // Render shadow AFTER window content in 4 strips (top, bottom, left, right)
+    // that surround the window rectangle. This never paints shadow pixels behind
+    // the window and avoids any temporary picture allocation.
+    BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
+    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
+    if (cw.shadowPicture != XCB_NONE && !animating && !skipShadow && cw.picture != XCB_NONE && cw.damaged) {
+        int16_t shadowX = screenX + cw.shadowOffsetX;
+        int16_t shadowY = screenY + cw.shadowOffsetY;
+        uint16_t drawShadowWidth = cw.shadowWidth;
+        uint16_t drawShadowHeight = cw.shadowHeight;
+        BOOL appliedShadowScale = NO;
+
+        if ([self.connection resizeState]) {
+            int32_t expectedShadowWidth = (int32_t)cw.width + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
+            int32_t expectedShadowHeight = (int32_t)cw.height + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
+            if (expectedShadowWidth < 1) expectedShadowWidth = 1;
+            if (expectedShadowHeight < 1) expectedShadowHeight = 1;
+            if (expectedShadowWidth > 65535) expectedShadowWidth = 65535;
+            if (expectedShadowHeight > 65535) expectedShadowHeight = 65535;
+
+            if (cw.shadowWidth > 0 && cw.shadowHeight > 0 &&
+                (cw.shadowWidth != expectedShadowWidth || cw.shadowHeight != expectedShadowHeight)) {
+                double sx = (double)cw.shadowWidth / (double)expectedShadowWidth;
+                double sy = (double)cw.shadowHeight / (double)expectedShadowHeight;
+                xcb_render_transform_t shadowTransform = URSIdentityTransform();
+                shadowTransform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
+                shadowTransform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
+                xcb_render_set_picture_transform(conn, cw.shadowPicture, shadowTransform);
+                drawShadowWidth = (uint16_t)expectedShadowWidth;
+                drawShadowHeight = (uint16_t)expectedShadowHeight;
+                appliedShadowScale = YES;
+            }
+        }
+
+        uint16_t winW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
+        uint16_t winH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
+        int16_t topH = screenY - shadowY;
+        int16_t botH = (shadowY + drawShadowHeight) - (screenY + winH);
+        int16_t leftW = screenX - shadowX;
+        int16_t rightW = (shadowX + drawShadowWidth) - (screenX + winW);
+
+        // Top strip — full width, above window
+        if (topH > 0) {
+            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                                 0, 0, 0, 0,
+                                 shadowX, shadowY,
+                                 drawShadowWidth, (uint16_t)topH);
+        }
+
+        // Bottom strip — full width, below window
+        if (botH > 0) {
+            uint16_t botSrcY = drawShadowHeight - (uint16_t)botH;
+            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                                 0, botSrcY, 0, 0,
+                                 shadowX, screenY + winH,
+                                 drawShadowWidth, (uint16_t)botH);
+        }
+
+        // Left strip — left of window, spanning window height
+        if (leftW > 0 && winH > 0) {
+            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                                 0, (uint16_t)topH, 0, 0,
+                                 shadowX, screenY,
+                                 (uint16_t)leftW, winH);
+        }
+
+        // Right strip — right of window, spanning window height
+        if (rightW > 0 && winH > 0) {
+            uint16_t rightSrcX = drawShadowWidth - (uint16_t)rightW;
+            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                                 rightSrcX, (uint16_t)topH, 0, 0,
+                                 screenX + winW, screenY,
+                                 (uint16_t)rightW, winH);
+        }
+
+        if (appliedShadowScale) {
+            xcb_render_transform_t resetShadow = URSIdentityTransform();
+            xcb_render_set_picture_transform(conn, cw.shadowPicture, resetShadow);
+        }
+    }
+#endif
+
     // No need to recursively paint children - IncludeInferiors handles that
     URS_PROFILE_END(paintWindow);
 }

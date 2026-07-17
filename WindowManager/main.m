@@ -20,16 +20,6 @@ static URSHybridEventHandler *globalEventHandler = nil;
 // Signal handler for clean shutdown
 static void signalHandler(int sig)
 {
-    const char *signame;
-    switch (sig) {
-        case SIGTERM: signame = "SIGTERM"; break;
-        case SIGINT: signame = "SIGINT"; break;
-        case SIGHUP: signame = "SIGHUP"; break;
-        default: signame = "UNKNOWN"; break;
-    }
-    
-    //NSLog(@"[WindowManager] Received signal %d (%s), initiating clean shutdown...", sig, signame);
-    
     if (globalEventHandler) {
         [globalEventHandler cleanupBeforeExit];
     }
@@ -132,7 +122,11 @@ int main(int argc, const char * argv[])
         ursProfileInstallSignalHandler();
 
         // Start NSApplication main loop (replaces blocking XCB event loop)
-        [app run];
+        @try {
+            [app run];
+        } @catch (NSException *e) {
+            NSLog(@"[WM] Uncaught exception: %@ reason=%@", e.name, e.reason);
+        }
     }
     return 0;
 }
