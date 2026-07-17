@@ -941,12 +941,16 @@
 
 - (void)stackAbove
 {
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    if ([[self windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]]) {
+        return;
+    }
+
     uint32_t values[1] = {XCB_STACK_MODE_ABOVE};
     xcb_configure_window([connection connection], window, XCB_CONFIG_WINDOW_STACK_MODE, &values);
     isAbove = YES;
     isBelow = NO;
 
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
     [ewmhService updateNetClientList];
     ewmhService = nil;
 }

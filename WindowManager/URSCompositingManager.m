@@ -2411,6 +2411,55 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
 }
 
+// Composite shadow in 4 non-overlapping strips (top, bottom, left, right)
+// around the window rectangle. This never paints behind the window.
+- (void)compositeShadowStrips:(URSCompositeWindow *)cw
+                   connection:(xcb_connection_t *)conn
+                      shadowX:(int16_t)shadowX shadowY:(int16_t)shadowY
+                 shadowWidth:(uint16_t)shadowWidth shadowHeight:(uint16_t)shadowHeight
+                       winX:(int16_t)winX winY:(int16_t)winY
+                       winW:(uint16_t)winW winH:(uint16_t)winH
+{
+    int16_t topH = winY - shadowY;
+    int16_t botH = (shadowY + shadowHeight) - (winY + winH);
+    int16_t leftW = winX - shadowX;
+    int16_t rightW = (shadowX + shadowWidth) - (winX + winW);
+
+    if (topH > 0) {
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, 0, 0, 0,
+                             shadowX, shadowY,
+                             shadowWidth, (uint16_t)topH);
+    }
+
+    if (botH > 0) {
+        uint16_t botSrcY = shadowHeight - (uint16_t)botH;
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, botSrcY, 0, 0,
+                             shadowX, winY + winH,
+                             shadowWidth, (uint16_t)botH);
+    }
+
+    if (leftW > 0 && winH > 0) {
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, (uint16_t)topH, 0, 0,
+                             shadowX, winY,
+                             (uint16_t)leftW, winH);
+    }
+
+    if (rightW > 0 && winH > 0) {
+        uint16_t rightSrcX = shadowWidth - (uint16_t)rightW;
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             rightSrcX, (uint16_t)topH, 0, 0,
+                             winX + winW, winY,
+                             (uint16_t)rightW, winH);
+    }
+}
+
 // Paint the Menu.app shadow in strips around the window rectangle so it
 // never overlays the menu bar itself.
 - (void)paintMenuShadow:(URSCompositeWindow *)cw {
@@ -2420,56 +2469,15 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self createShadowForWindow:cw];
     }
     if (cw.shadowPicture == XCB_NONE) return;
-
     if (!cw.damaged) return;
 
-    int16_t screenX = cw.x;
-    int16_t screenY = cw.y;
-    int16_t shadowX = screenX + cw.shadowOffsetX;
-    int16_t shadowY = screenY + cw.shadowOffsetY;
-    uint16_t drawShadowWidth = cw.shadowWidth;
-    uint16_t drawShadowHeight = cw.shadowHeight;
-    uint16_t winW = cw.width + 2 * cw.borderWidth;
-    uint16_t winH = cw.height + 2 * cw.borderWidth;
-
-    int16_t topH = screenY - shadowY;
-    int16_t botH = (shadowY + drawShadowHeight) - (screenY + winH);
-    int16_t leftW = screenX - shadowX;
-    int16_t rightW = (shadowX + drawShadowWidth) - (screenX + winW);
-
-    if (topH > 0) {
-        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                             0, 0, 0, 0,
-                             shadowX, shadowY,
-                             drawShadowWidth, (uint16_t)topH);
-    }
-
-    if (botH > 0) {
-        uint16_t botSrcY = drawShadowHeight - (uint16_t)botH;
-        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                             0, botSrcY, 0, 0,
-                             shadowX, screenY + winH,
-                             drawShadowWidth, (uint16_t)botH);
-    }
-
-    if (leftW > 0 && winH > 0) {
-        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                             0, (uint16_t)topH, 0, 0,
-                             shadowX, screenY,
-                             (uint16_t)leftW, winH);
-    }
-
-    if (rightW > 0 && winH > 0) {
-        uint16_t rightSrcX = drawShadowWidth - (uint16_t)rightW;
-        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                             rightSrcX, (uint16_t)topH, 0, 0,
-                             screenX + winW, screenY,
-                             (uint16_t)rightW, winH);
-    }
+    [self compositeShadowStrips:cw connection:conn
+                        shadowX:cw.x + cw.shadowOffsetX
+                        shadowY:cw.y + cw.shadowOffsetY
+                   shadowWidth:cw.shadowWidth shadowHeight:cw.shadowHeight
+                         winX:cw.x winY:cw.y
+                         winW:cw.width + 2 * cw.borderWidth
+                         winH:cw.height + 2 * cw.borderWidth];
 }
 
 - (void)paintAll:(xcb_xfixes_region_t)region {
@@ -3209,48 +3217,11 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 
         uint16_t winW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
         uint16_t winH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
-        int16_t topH = screenY - shadowY;
-        int16_t botH = (shadowY + drawShadowHeight) - (screenY + winH);
-        int16_t leftW = screenX - shadowX;
-        int16_t rightW = (shadowX + drawShadowWidth) - (screenX + winW);
-
-        // Top strip — full width, above window
-        if (topH > 0) {
-            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                                 0, 0, 0, 0,
-                                 shadowX, shadowY,
-                                 drawShadowWidth, (uint16_t)topH);
-        }
-
-        // Bottom strip — full width, below window
-        if (botH > 0) {
-            uint16_t botSrcY = drawShadowHeight - (uint16_t)botH;
-            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                                 0, botSrcY, 0, 0,
-                                 shadowX, screenY + winH,
-                                 drawShadowWidth, (uint16_t)botH);
-        }
-
-        // Left strip — left of window, spanning window height
-        if (leftW > 0 && winH > 0) {
-            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                                 0, (uint16_t)topH, 0, 0,
-                                 shadowX, screenY,
-                                 (uint16_t)leftW, winH);
-        }
-
-        // Right strip — right of window, spanning window height
-        if (rightW > 0 && winH > 0) {
-            uint16_t rightSrcX = drawShadowWidth - (uint16_t)rightW;
-            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                                 rightSrcX, (uint16_t)topH, 0, 0,
-                                 screenX + winW, screenY,
-                                 (uint16_t)rightW, winH);
-        }
+        [self compositeShadowStrips:cw connection:conn
+                            shadowX:shadowX shadowY:shadowY
+                       shadowWidth:drawShadowWidth shadowHeight:drawShadowHeight
+                             winX:screenX winY:screenY
+                             winW:winW winH:winH];
 
         if (appliedShadowScale) {
             xcb_render_transform_t resetShadow = URSIdentityTransform();
