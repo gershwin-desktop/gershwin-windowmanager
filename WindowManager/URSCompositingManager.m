@@ -21,6 +21,7 @@
 #import <xcb/present.h>
 #import <xcb/shm.h>
 #import <xcb/randr.h>
+#import <AppKit/NSImage.h>
 #import "XCBFrame.h"
 #import "EWMHService.h"
 #import <sys/shm.h>
@@ -175,6 +176,14 @@
 @property (assign, nonatomic) xcb_render_pictformat_t argbFormat;
 @property (assign, nonatomic) xcb_atom_t bypassCompositorAtom;
 
+// Desktop background (loaded from org.gnustep.Workspace.plist desktopinfo)
+@property (assign, nonatomic) xcb_pixmap_t desktopBgPixmap;
+@property (assign, nonatomic) xcb_render_picture_t desktopBgPicture;
+@property (assign, nonatomic) BOOL desktopBgLoaded;
+@property (assign, nonatomic) double desktopBgRed;
+@property (assign, nonatomic) double desktopBgGreen;
+@property (assign, nonatomic) double desktopBgBlue;
+
 // OPTIMIZATION: Cached visual-to-format mappings (avoids repeated xcb_render_query_pict_formats)
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSNumber *> *visualFormatCache;
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSNumber *> *depthFormatCache;
@@ -286,6 +295,13 @@
         _presentAvailable = NO;
         _presentEventBase = 0;
         _randrEventBase = 0;
+        _desktopBgPixmap = XCB_NONE;
+        _desktopBgPicture = XCB_NONE;
+        _desktopBgLoaded = NO;
+        _desktopBgRed = 0.372;
+        _desktopBgGreen = 0.403;
+        _desktopBgBlue = 0.439;
+
         _presentPixmap0 = XCB_NONE;
         _presentPixmap1 = XCB_NONE;
         _presentPicture0 = XCB_NONE;
@@ -718,6 +734,130 @@
 
 #pragma mark - Activation
 
+// Load the desktop background image/color from ~/Library/Preferences/org.gnustep.Workspace.plist
+- (void)loadDesktopBackground
+{
+    xcb_connection_t *conn = [self.connection connection];
+
+    if (self.desktopBgPicture != XCB_NONE) {
+        xcb_render_free_picture(conn, self.desktopBgPicture);
+        self.desktopBgPicture = XCB_NONE;
+    }
+    if (self.desktopBgPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, self.desktopBgPixmap);
+        self.desktopBgPixmap = XCB_NONE;
+    }
+
+    NSString *prefsPath = [@"~/Library/Preferences/org.gnustep.Workspace.plist" stringByExpandingTildeInPath];
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:prefsPath];
+    NSDictionary *dskinfo = [prefs objectForKey:@"desktopinfo"];
+
+    // Default color from GNUstep workspace
+    self.desktopBgRed = 0.372;
+    self.desktopBgGreen = 0.403;
+    self.desktopBgBlue = 0.439;
+
+    if (!dskinfo) {
+        NSLog(@"[Compositor] Desktop background: no desktopinfo in preferences, using default color");
+        self.desktopBgLoaded = YES;
+        return;
+    }
+
+    NSDictionary *backcolor = [dskinfo objectForKey:@"backcolor"];
+    if (backcolor) {
+        self.desktopBgRed = [[backcolor objectForKey:@"red"] doubleValue];
+        self.desktopBgGreen = [[backcolor objectForKey:@"green"] doubleValue];
+        self.desktopBgBlue = [[backcolor objectForKey:@"blue"] doubleValue];
+    }
+
+    if (![[dskinfo objectForKey:@"usebackimage"] boolValue]) {
+        NSLog(@"[Compositor] Desktop background: using solid color");
+        self.desktopBgLoaded = YES;
+        return;
+    }
+
+    NSString *imagePath = [dskinfo objectForKey:@"imagepath"];
+    if (!imagePath) {
+        NSLog(@"[Compositor] Desktop background: no image path configured, using solid color");
+        self.desktopBgLoaded = YES;
+        return;
+    }
+
+    @autoreleasepool {
+        NSImage *image = [[NSImage alloc] initWithContentsOfFile:imagePath];
+        if (!image) {
+            NSLog(@"[Compositor] Desktop background: failed to load image at %@", imagePath);
+            self.desktopBgLoaded = YES;
+            return;
+        }
+
+        NSSize srcSize = [image size];
+        uint16_t outW = self.screenWidth;
+        uint16_t outH = self.screenHeight;
+
+        NSImage *scaled = [[NSImage alloc] initWithSize:NSMakeSize(outW, outH)];
+        [scaled lockFocus];
+        [image drawInRect:NSMakeRect(0, 0, outW, outH)
+                fromRect:NSZeroRect
+               operation:NSCompositeCopy
+                fraction:1.0];
+        [scaled unlockFocus];
+
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithData:[scaled TIFFRepresentation]];
+        if (!bitmap) {
+            NSLog(@"[Compositor] Desktop background: bitmap conversion failed");
+            self.desktopBgLoaded = YES;
+            return;
+        }
+
+        size_t bufSize = (size_t)outW * (size_t)outH * 4;
+        uint8_t *argb = malloc(bufSize);
+        if (!argb) {
+            self.desktopBgLoaded = YES;
+            return;
+        }
+
+        int srcW = (int)[bitmap pixelsWide];
+        int srcH = (int)[bitmap pixelsHigh];
+
+        for (int y = 0; y < outH && y < srcH; y++) {
+            for (int x = 0; x < outW && x < srcW; x++) {
+                NSUInteger pixel[4];
+                [bitmap getPixel:pixel atX:x y:y];
+                uint32_t r = (uint32_t)(pixel[0]);
+                uint32_t g = (uint32_t)(pixel[1]);
+                uint32_t b = (uint32_t)(pixel[2]);
+                uint32_t a = (uint32_t)(pixel[3]);
+                uint32_t argbPixel = (a << 24) | (r << 16) | (g << 8) | b;
+                ((uint32_t *)argb)[y * outW + x] = argbPixel;
+            }
+        }
+
+        xcb_pixmap_t pm = xcb_generate_id(conn);
+        xcb_create_pixmap(conn, 32, pm, self.rootWindow, outW, outH);
+
+        xcb_gcontext_t gc = xcb_generate_id(conn);
+        xcb_create_gc(conn, gc, pm, 0, NULL);
+        xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, pm, gc,
+                      outW, outH, 0, 0, 0, 32, bufSize, argb);
+        xcb_free_gc(conn, gc);
+        free(argb);
+
+        xcb_render_picture_t pic = xcb_generate_id(conn);
+        uint32_t repeat = 1;
+        xcb_render_create_picture(conn, pic, pm, self.argbFormat,
+                                  XCB_RENDER_CP_REPEAT, &repeat);
+
+        self.desktopBgPixmap = pm;
+        self.desktopBgPicture = pic;
+
+        NSLog(@"[Compositor] Desktop background: loaded %@ (%dx%d -> %dx%d)",
+              imagePath, (int)srcSize.width, (int)srcSize.height, outW, outH);
+    }
+
+    self.desktopBgLoaded = YES;
+}
+
 - (BOOL)activateCompositing {
     if (!self.compositingEnabled) {
         //NSLog(@"[CompositingManager] Cannot activate - not initialized properly");
@@ -751,6 +891,9 @@
             [self cleanup];
             return NO;
         }
+
+        // Load desktop background (image or solid color from preferences)
+        [self loadDesktopBackground];
         
         // Add all existing windows
         [self addAllWindows];
@@ -2503,13 +2646,25 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     
     NSUInteger num_windows = [self.windowStackingOrder count];
 
-    // Fill rootBuffer with the desktop background colour so that areas not
-    // covered by any window (including transparent window corners) show the
-    // intended background instead of undefined/black pixels.
-    xcb_render_color_t bg_color = {0xFFFF, 0, 0, 0xFFFF};
-    xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
-    xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
-                               self.rootBuffer, bg_color, 1, &bg_rect);
+    // Fill rootBuffer with the desktop background (image or solid colour)
+    // from ~/Library/Preferences/org.gnustep.Workspace.plist desktopinfo.
+    // This ensures areas not covered by any window show the user's chosen
+    // wallpaper instead of undefined/black pixels.
+    if (self.desktopBgPicture != XCB_NONE) {
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_SRC,
+                             self.desktopBgPicture, XCB_NONE, self.rootBuffer,
+                             0, 0, 0, 0,
+                             0, 0,
+                             self.screenWidth, self.screenHeight);
+    } else {
+        uint16_t r16 = (uint16_t)(self.desktopBgRed * 0xFFFF);
+        uint16_t g16 = (uint16_t)(self.desktopBgGreen * 0xFFFF);
+        uint16_t b16 = (uint16_t)(self.desktopBgBlue * 0xFFFF);
+        xcb_render_color_t bg_color = {r16, g16, b16, 0xFFFF};
+        xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
+        xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
+                                   self.rootBuffer, bg_color, 1, &bg_rect);
+    }
 
     // Find Menu.app and ensure its shadow is created early so we can
     // paint it at the desktop z-order (below all other windows).
@@ -3519,6 +3674,16 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             self.screenRegion = XCB_NONE;
         }
         
+        // Free desktop background resources
+        if (self.desktopBgPicture != XCB_NONE) {
+            xcb_render_free_picture(conn, self.desktopBgPicture);
+            self.desktopBgPicture = XCB_NONE;
+        }
+        if (self.desktopBgPixmap != XCB_NONE) {
+            xcb_free_pixmap(conn, self.desktopBgPixmap);
+            self.desktopBgPixmap = XCB_NONE;
+        }
+
         // Free shadow resources
         if (self.blackPicture != XCB_NONE) {
             xcb_render_free_picture(conn, self.blackPicture);
