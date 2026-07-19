@@ -70,6 +70,8 @@
 @property (assign, nonatomic) int16_t shadowOffsetY;
 @property (assign, nonatomic) uint16_t shadowWidth;
 @property (assign, nonatomic) uint16_t shadowHeight;
+// Timestamp set when the window is mapped (NSDate timeIntervalSinceReferenceDate)
+@property (assign, nonatomic) NSTimeInterval mappedAt;
 // Animation state
 @property (assign, nonatomic) BOOL animating;
 @property (assign, nonatomic) BOOL animatingMinimize;
@@ -107,6 +109,7 @@
         _shadowOffsetY = 0;
         _shadowWidth = 0;
         _shadowHeight = 0;
+        _mappedAt = 0;
         _animating = NO;
         _animatingMinimize = NO;
         _animatingFade = NO;
@@ -1671,6 +1674,7 @@
     if (cw) {
         [self.parentFrameCache removeAllObjects];
         cw.viewable = YES;
+        cw.mappedAt = [NSDate timeIntervalSinceReferenceDate];
 
         // Unredirected windows draw directly to the screen — skip
         // picture/shadow/damage since the compositor doesn't paint them.
@@ -2502,7 +2506,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     // Fill rootBuffer with the desktop background colour so that areas not
     // covered by any window (including transparent window corners) show the
     // intended background instead of undefined/black pixels.
-    xcb_render_color_t bg_color = {0x8000, 0x8000, 0x8000, 0xFFFF};
+    xcb_render_color_t bg_color = {0xFFFF, 0, 0, 0xFFFF};
     xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
     xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
                                self.rootBuffer, bg_color, 1, &bg_rect);
@@ -2956,6 +2960,15 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     double destY = screenY;
     double destW = (double)cw.width + (2.0 * (double)cw.borderWidth);
     double destH = (double)cw.height + (2.0 * (double)cw.borderWidth);
+
+    // Delay window painting for up to 3s after mapping until the
+    // window receives its first damage event (content has been drawn).
+    // This avoids showing unrendered background colour through the
+    // window.  After 3s the window paints regardless.
+    if (!animating && !cw.damaged && cw.mappedAt > 0 && (now - cw.mappedAt) < 3.0) {
+        URS_PROFILE_END(paintWindow);
+        return;
+    }
 
     if (animating && FnCheckXCBRectIsValid(cw.animationStartRect) &&
         FnCheckXCBRectIsValid(cw.animationEndRect) && cw.animationDuration > 0.0) {
