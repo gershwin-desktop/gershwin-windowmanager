@@ -1468,7 +1468,6 @@ static XCBConnection *sharedInstance;
             if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDialog]] ||
                 *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeTooltip]] ||
                 *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeNotification]] ||
-                *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeUtility]] ||
                 *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeSplash]])
             {
                 [self registerWindow:window];
@@ -1824,6 +1823,16 @@ static XCBConnection *sharedInstance;
         [ewmhService updateNetWmState:window];
         if (!self.adoptingExistingWindows)
             [frame stackBelow];
+    } else if ([[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeUtility]]) {
+        [window setSkipTaskBar:YES];
+        [window setSkipPager:YES];
+        [window setIsAbove:YES];
+        [ewmhService updateNetWmState:window];
+        if (!self.adoptingExistingWindows) {
+            [frame stackAbove];
+            [frame raiseResizeHandle];
+            [self restackDockWindowsAbove];
+        }
     } else {
         if (!self.adoptingExistingWindows) {
             [frame stackAbove];
