@@ -37,6 +37,9 @@
 @property (assign, nonatomic) BOOL xcbEventsIntegrated;
 @property (assign, nonatomic) BOOL nsRunLoopActive;
 @property (assign, nonatomic) NSUInteger eventCount;
+// Set once the XCB connection has been found unusable, so the fatal path runs
+// exactly once.
+@property (assign, nonatomic) BOOL xcbConnectionLost;
 
 // Window Switcher (Alt-Tab)
 @property (strong, nonatomic) URSWindowSwitcher *windowSwitcher;

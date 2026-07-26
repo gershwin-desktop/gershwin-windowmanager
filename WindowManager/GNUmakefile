@@ -30,6 +30,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \
 		URSProfiler.m \
+		URSImageUpload.m \
 		GSThemeTitleBar.m \
 		xcb/XCBConnection.m \
 		xcb/XCBWindow.m \
@@ -69,6 +70,7 @@ $(APP_NAME)_HEADER_FILES = \
 		URSSnapPreviewOverlay.h \
 		URSThemeIntegration.h \
 		URSProfiler.h \
+		URSImageUpload.h \
 		GSThemeTitleBar.h \
 		xcb/XCBConnection.h \
 		xcb/XCBWindow.h \
