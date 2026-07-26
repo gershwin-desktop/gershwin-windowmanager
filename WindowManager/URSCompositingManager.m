@@ -11,6 +11,7 @@
 
 #define _DEFAULT_SOURCE  // For usleep
 #import "URSCompositingManager.h"
+#import "URSImageUpload.h"
 #import "URSProfiler.h"
 #import "XCBScreen.h"
 #import <xcb/xcb.h>
@@ -838,8 +839,12 @@
 
         xcb_gcontext_t gc = xcb_generate_id(conn);
         xcb_create_gc(conn, gc, pm, 0, NULL);
-        xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, pm, gc,
-                      outW, outH, 0, 0, 0, 32, bufSize, argb);
+        // Banded upload: at 3840x2160 this buffer is 33MB, well over the
+        // ~16MB maximum request length, and libxcb would tear down the
+        // connection rather than send it.
+        URSPutImageBanded(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, pm, gc,
+                          outW, outH, 0, 0, 0, 32,
+                          (uint32_t)outW * 4, argb);
         xcb_free_gc(conn, gc);
         free(argb);
 
@@ -3084,9 +3089,11 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     xcb_gcontext_t gc = xcb_generate_id(conn);
     xcb_create_gc(conn, gc, cw.shadowPixmap, 0, NULL);
     
-    xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.shadowPixmap, gc,
-                 swidth, sheight, 0, 0, 0, 32,
-                 swidth * sheight * 4, (uint8_t *)argb_data);
+    // Banded upload: the shadow is sized from the window, so a full-screen
+    // window on a 4K display would exceed the maximum request length.
+    URSPutImageBanded(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.shadowPixmap, gc,
+                      swidth, sheight, 0, 0, 0, 32,
+                      (uint32_t)swidth * 4, (uint8_t *)argb_data);
     // No blocking flush here — the batch flush in the event loop sends it.
     // The next xcb_render_create_picture is queued after put_image in order,
     // so the server will process them in sequence without an explicit sync.

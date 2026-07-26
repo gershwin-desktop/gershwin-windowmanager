@@ -440,6 +440,52 @@
                afterDelay:0.1];
 }
 
+- (void)teardownXCBEventIntegration
+{
+    if (!self.xcbEventsIntegrated || !connection) {
+        return;
+    }
+
+    int xcbFD = xcb_get_file_descriptor([connection connection]);
+    if (xcbFD >= 0) {
+        NSRunLoop *currentRunLoop = [NSRunLoop currentRunLoop];
+        NSArray *modes = @[NSDefaultRunLoopMode,
+                           NSRunLoopCommonModes,
+                           NSEventTrackingRunLoopMode,
+                           NSModalPanelRunLoopMode];
+        for (NSString *mode in modes) {
+            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
+                                   type:ET_RDESC
+                                forMode:mode
+                                   all:YES];
+        }
+    }
+
+    self.xcbEventsIntegrated = NO;
+}
+
+- (void)handleFatalConnectionError:(int)errorCode
+{
+    if (self.xcbConnectionLost) {
+        return;
+    }
+    self.xcbConnectionLost = YES;
+
+    // XCB_CONN_CLOSED_REQ_LEN_EXCEED (4) is the one to watch for: libxcb
+    // refuses to send a request longer than the server's maximum request
+    // length and closes the connection itself, so nothing is logged server
+    // side. See URSPutImageBanded() for the uploads that must stay bounded.
+    NSLog(@"[WindowManager] FATAL: XCB connection unusable "
+          @"(xcb_connection_has_error() = %d). Detaching from the run loop "
+          @"and terminating rather than spinning.", errorCode);
+
+    // Detach first: leaving the dead fd registered is what turns this into a
+    // 100%% CPU busy loop.
+    [self teardownXCBEventIntegration];
+
+    [NSApp terminate:nil];
+}
+
 #pragma mark - RunLoopEvents Protocol Implementation
 
 - (void)receivedEvent:(void*)data
@@ -455,6 +501,18 @@
 
 - (void)processAvailableXCBEvents
 {
+    // A broken XCB connection is unrecoverable and, worse, invisible without
+    // this check: the closed socket sits at EOF so poll() reports it readable
+    // forever, while xcb_poll_for_event() returns NULL immediately without
+    // touching the fd. The run loop would then never block again and would
+    // spin a core at 100% while silently servicing no events at all --
+    // MapRequest included, which leaves every managed window unmapped.
+    int connectionError = xcb_connection_has_error([connection connection]);
+    if (connectionError != 0) {
+        [self handleFatalConnectionError:connectionError];
+        return;
+    }
+
     URS_PROFILE_BEGIN(eventLoop);
     xcb_generic_event_t *e;
     xcb_motion_notify_event_t *lastMotionEvent = NULL;
@@ -2598,28 +2656,7 @@
     [self.keyboardManager cleanupKeyboardGrabbing];
 
     // Remove from run loop if integrated - must match all modes added in setupXCBEventIntegration
-    if (self.xcbEventsIntegrated && connection) {
-        int xcbFD = xcb_get_file_descriptor([connection connection]);
-        if (xcbFD >= 0) {
-            NSRunLoop *currentRunLoop = [NSRunLoop currentRunLoop];
-            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
-                                   type:ET_RDESC
-                                forMode:NSDefaultRunLoopMode
-                                   all:YES];
-            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
-                                   type:ET_RDESC
-                                forMode:NSRunLoopCommonModes
-                                   all:YES];
-            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
-                                   type:ET_RDESC
-                                forMode:NSEventTrackingRunLoopMode
-                                   all:YES];
-            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
-                                   type:ET_RDESC
-                                forMode:NSModalPanelRunLoopMode
-                                   all:YES];
-        }
-    }
+    [self teardownXCBEventIntegration];
 
     // Remove notification center observers
     [[NSNotificationCenter defaultCenter] removeObserver:self];
