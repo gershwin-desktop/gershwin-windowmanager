@@ -51,6 +51,13 @@ static CGFloat WMLastScaleFactor = 1.0;
 
 - (void)startScaleFactorMonitoring
 {
+  /* Seed with the current factor so the first poll doesn't trigger a spurious
+   * re-frame of freshly-decorated windows at startup. */
+  [[NSUserDefaults standardUserDefaults] synchronize];
+  WMLastScaleFactor = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
+  if (WMLastScaleFactor == 0.0)
+    WMLastScaleFactor = 1.0;
+
   [NSTimer scheduledTimerWithTimeInterval: 1.0
                                    target: self
                                  selector: @selector(checkScaleFactor:)
