@@ -1151,8 +1151,8 @@ static XCBConnection *sharedInstance;
             }
 
             if (screen) {
-                int16_t screenHeight = screen->height_in_pixels;
-                int16_t screenWidth = screen->width_in_pixels;
+                int16_t screenHeight = [screenObj height];
+                int16_t screenWidth = [screenObj width];
 
                 // Candidate for bottom-left default: near left edge and near bottom
                 if (reqX < 64 && abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100 && reqW < screenWidth) {
@@ -1673,7 +1673,7 @@ static XCBConnection *sharedInstance;
         if (!isGNUstepApp) {
             BOOL isAtDefaultPos = NO;
             if (screen) {
-                int16_t screenHeight = [screen screen]->height_in_pixels;
+                int16_t screenHeight = [screen height];
                 if (reqY < 64) {
                     isAtDefaultPos = YES;
                 } else if (abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100) {
@@ -1683,7 +1683,7 @@ static XCBConnection *sharedInstance;
 
             if (isAtDefaultPos) {
                 BOOL isFullWidth = NO;
-                if (screen && reqW >= [screen screen]->width_in_pixels) {
+                if (screen && reqW >= [screen width]) {
                     isFullWidth = YES;
                 }
 
@@ -1727,8 +1727,8 @@ static XCBConnection *sharedInstance;
     //NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
     if (shouldReposition && screen) {
-        uint16_t screenWidth = [screen screen]->width_in_pixels;
-        uint16_t screenHeight = [screen screen]->height_in_pixels;
+        uint16_t screenWidth = [screen width];
+        uint16_t screenHeight = [screen height];
 
         // Use cached workarea to dodge struts (menu bar, dock, etc.)
         int32_t waX = self.workareaValid ? _cachedWorkareaX : 0;

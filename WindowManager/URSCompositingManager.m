@@ -353,8 +353,8 @@
         return NO;
     }
     
-    self.screenWidth = [screen screen]->width_in_pixels;
-    self.screenHeight = [screen screen]->height_in_pixels;
+    self.screenWidth = [screen width];
+    self.screenHeight = [screen height];
     self.rootWindow = [screen screen]->root;
     
     // Find render formats

@@ -153,8 +153,8 @@
         XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
         XCBWindow *rootWindow = [screen rootWindow];
 
-        uint32_t screenWidth  = [screen screen]->width_in_pixels;
-        uint32_t screenHeight = [screen screen]->height_in_pixels;
+        uint32_t screenWidth  = [screen width];
+        uint32_t screenHeight = [screen height];
 
         uint32_t maxLeft = 0, maxRight = 0, maxTop = 0, maxBottom = 0;
 
@@ -214,8 +214,8 @@
 - (NSRect)currentWorkarea
 {
     XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
-    uint32_t screenWidth  = [screen screen]->width_in_pixels;
-    uint32_t screenHeight = [screen screen]->height_in_pixels;
+    uint32_t screenWidth  = [screen width];
+    uint32_t screenHeight = [screen height];
 
     uint32_t maxLeft = 0, maxRight = 0, maxTop = 0, maxBottom = 0;
 

@@ -346,11 +346,11 @@ static CGFloat WMLastScaleFactor = 1.0;
     [ewmhService putPropertiesForRootWindow:[screen rootWindow] andWmWindow:selectionManagerWindow];
     
     // Set initial workarea to full screen (no struts yet)
-    [ewmhService updateWorkareaForRootWindow:[screen rootWindow] 
-                                           x:0 
-                                           y:0 
-                                       width:[screen screen]->width_in_pixels 
-                                      height:[screen screen]->height_in_pixels];
+    [ewmhService updateWorkareaForRootWindow:[screen rootWindow]
+                                           x:0
+                                           y:0
+                                       width:[screen width]
+                                      height:[screen height]];
     
     [connection flush];
 

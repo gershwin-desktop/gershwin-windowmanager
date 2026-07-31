@@ -1224,8 +1224,8 @@
             // Full screen — conservative but reliable.
             XCBScreen *screen = [[self.connection screens] firstObject];
             if (screen) {
-                expose.width = [screen screen]->width_in_pixels;
-                expose.height = [screen screen]->height_in_pixels;
+                expose.width = [screen width];
+                expose.height = [screen height];
             } else {
                 expose.width = 65535;
                 expose.height = 65535;
