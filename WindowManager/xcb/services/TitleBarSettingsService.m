@@ -59,7 +59,7 @@
 
 - (void)setScaleFactor:(CGFloat)factor
 {
-    _scaleFactor = factor >= 1.0 ? factor : 1.0;
+    _scaleFactor = factor > 0 ? factor : 1.0;
 }
 
 - (uint16_t) defaultHeight

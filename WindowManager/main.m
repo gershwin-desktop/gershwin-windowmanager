@@ -103,10 +103,10 @@ int main(int argc, const char * argv[])
         // Read GSScaleFactor for HiDPI support (default 1.0)
         {
             CGFloat sf = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
-            if (sf < 1.0) {
+            if (sf == 0) {
                 sf = [[NSScreen mainScreen] backingScaleFactor];
             }
-            if (sf < 1.0) sf = 1.0;
+            if (sf == 0) sf = 1.0;
             [settings setScaleFactor:sf];
         }
 

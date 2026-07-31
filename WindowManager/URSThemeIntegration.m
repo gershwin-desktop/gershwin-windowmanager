@@ -44,11 +44,11 @@ static NSInteger hoveredButtonIndex = -1;  // -1=none, 0=close, 1=mini, 2=zoom
 // Multiplied by GSScaleFactor for HiDPI support (lazily computed).
 static CGFloat _wmScaleFactor = 0;
 static CGFloat WMScaleFactor(void) {
-    if (_wmScaleFactor < 1.0) {
+    if (_wmScaleFactor == 0) {
         _wmScaleFactor = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
-        if (_wmScaleFactor < 1.0)
+        if (_wmScaleFactor == 0)
             _wmScaleFactor = [[NSScreen mainScreen] backingScaleFactor];
-        if (_wmScaleFactor < 1.0) _wmScaleFactor = 1.0;
+        if (_wmScaleFactor == 0) _wmScaleFactor = 1.0;
     }
     return _wmScaleFactor;
 }
