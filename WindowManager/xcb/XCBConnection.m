@@ -1730,16 +1730,20 @@ static XCBConnection *sharedInstance;
         uint16_t screenWidth = [screen screen]->width_in_pixels;
         uint16_t screenHeight = [screen screen]->height_in_pixels;
 
+        // Use cached workarea to dodge struts (menu bar, dock, etc.)
+        int32_t waX = self.workareaValid ? _cachedWorkareaX : 0;
+        int32_t waY = self.workareaValid ? _cachedWorkareaY : 0;
+        uint32_t waW = self.workareaValid ? _cachedWorkareaWidth : screenWidth;
+        uint32_t waH = self.workareaValid ? _cachedWorkareaHeight : screenHeight;
+
         if (isDialog) {
-            // Dialogs: centered horizontally, golden ratio vertically
-            xPos = (screenWidth - winWidth) / 2;
-            yPos = (screenHeight - winHeight) * 0.381966; // Golden ratio from top
-            //NSLog(@"[MapRequest] Applying golden ratio placement for dialog window %u: %d, %d", [window window], xPos, yPos);
+            // Dialogs: centered horizontally, golden ratio vertically within workarea
+            xPos = waX + (waW - winWidth) / 2;
+            yPos = waY + (waH - winHeight) * 0.381966;
         } else {
-            // Other windows: 22 px from left, 44 px from top
-            xPos = 22;
-            yPos = 44;
-            //NSLog(@"[MapRequest] Applying default placement for window %u: %d, %d", [window window], xPos, yPos);
+            // Other windows: small inset from workarea top-left
+            xPos = waX + 22;
+            yPos = waY + 22;
         }
 
         // Keep the client rect in root coordinates while frame uses xPos/yPos.

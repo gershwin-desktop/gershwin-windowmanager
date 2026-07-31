@@ -1725,20 +1725,26 @@
             }
             
             queryWindow = nil;
+            // Use workarea as placement/clamping bounds so windows dodge struts
+            // (menu bar at top, dock at bottom/side, etc.).
+            uint16_t waX = (uint16_t)workarea.origin.x;
+            uint16_t waY = (uint16_t)workarea.origin.y;
+            uint16_t waW = (uint16_t)workarea.size.width;
+            uint16_t waH = (uint16_t)workarea.size.height;
+
             // Clamp overly large windows before mapping.
-            // Rule: if either dimension exceeds 90% of screen, resize both dimensions to 80%
+            // Rule: if either dimension exceeds 90% of screen, resize to 80% of workarea
             BOOL exceedsNinetyPercent =
                 ((uint32_t)geom_reply->width * 100 > (uint32_t)screenWidth * 90) ||
                 ((uint32_t)geom_reply->height * 100 > (uint32_t)screenHeight * 90);
 
             if (!isDesktopWindow && !isFullscreenState && exceedsNinetyPercent) {
-                uint16_t clampedWidth = (uint16_t)(screenWidth * 0.8);
-                uint16_t clampedHeight = (uint16_t)(screenHeight * 0.8);
+                uint16_t clampedWidth = (uint16_t)(waW * 0.8);
+                uint16_t clampedHeight = (uint16_t)(waH * 0.8);
 
-                // Per HIG: place resized windows toward top-left so desktop status affordances
-                // (such as volume icons) remain visible and unobstructed.
-                uint16_t defaultX = isDialogWindow ? goldenPosX : 22;
-                uint16_t defaultY = isDialogWindow ? goldenPosY : 44;
+                // Place at workarea top-left with a small inset, or golden ratio for dialogs.
+                uint16_t defaultX = isDialogWindow ? goldenPosX : (waX + 22);
+                uint16_t defaultY = isDialogWindow ? goldenPosY : (waY + 22);
                 uint32_t sizeValues[] = {defaultX, defaultY, clampedWidth, clampedHeight};
                 xcb_configure_window([connection connection],
                                      clientWindowId,
@@ -1746,14 +1752,6 @@
                              XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
                                      sizeValues);
                 [connection flush];
-                //NSLog(@"Window %u exceeds 90%% of screen (%ux%u). Clamped to 80%% (%ux%u) and placed at (%u,%u) before map.",
-                      //clientWindowId,
-                      //geom_reply->width,
-                      //geom_reply->height,
-                      //clampedWidth,
-                    //clampedHeight,
-                    //defaultX,
-                    //defaultY);
             }
 
             // Only apply WM default placement if:
@@ -1762,16 +1760,13 @@
             // 3. AND window is not explicitly requesting fullscreen
             BOOL isAtOrigin = (geom_reply->x == 0 && geom_reply->y == 0);
             BOOL isFullScreenSize = (geom_reply->width >= screenWidth && geom_reply->height >= screenHeight);
-            
+
             if (isAtOrigin && (geom_reply->width < screenWidth) && !isDesktopWindow && !isFullscreenState) {
                 // Window starts at (0,0) but is NOT full-width. This is usually a fallback position
-                // for apps that don't specify geometry. Move it to a suitable default position:
-                // dialogs get centered (golden ratio), other windows get 22,44 offset.
-                uint16_t defaultX = isDialogWindow ? goldenPosX : 22;
-                uint16_t defaultY = isDialogWindow ? goldenPosY : 44;
-                //NSLog(@"Window %u starts at origin (0,0) but is not full-width (%u). Applying default placement (%u,%u) to avoid x=0 default.",
-                      //clientWindowId, geom_reply->width, defaultX, defaultY);
-                
+                // for apps that don't specify geometry. Move it below the workarea top edge.
+                uint16_t defaultX = isDialogWindow ? goldenPosX : (waX + 22);
+                uint16_t defaultY = isDialogWindow ? goldenPosY : (waY + 22);
+
                 uint32_t configValues[] = {defaultX, defaultY};
                 xcb_configure_window([connection connection],
                                      clientWindowId,
@@ -1779,14 +1774,19 @@
                                      configValues);
                 [connection flush];
             } else if (isDesktopWindow || isFullscreenState) {
-                //NSLog(@"Window %u is desktop or fullscreen window. Skipping WM defaults (isDesktop=%d, isFullscreen=%d)",
-                      //clientWindowId, isDesktopWindow, isFullscreenState);
+                // Desktop/fullscreen windows: leave at their requested position.
             } else if (isAtOrigin && isFullScreenSize) {
-                //NSLog(@"Window %u is exactly full screen size at origin; skipping >90%% clamp per 100%% exception.",
-                      //clientWindowId);
-            } else {
-                //NSLog(@"Window %u has app-determined geometry (%ux%u at %d,%d). Respecting app preferences",
-                      //clientWindowId, geom_reply->width, geom_reply->height, geom_reply->x, geom_reply->y);
+                // Exactly full screen at origin: leave alone.
+            } else if (!isDesktopWindow && !isFullscreenState &&
+                       geom_reply->y < waY) {
+                // App-positioned window overlaps top strut (e.g. menu bar).
+                // Push it down so the title bar is accessible.
+                uint32_t configValues[] = {(uint32_t)geom_reply->x, waY};
+                xcb_configure_window([connection connection],
+                                     clientWindowId,
+                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y,
+                                     configValues);
+                [connection flush];
             }
             free(geom_reply);
         }
