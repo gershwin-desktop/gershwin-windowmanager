@@ -52,6 +52,9 @@ static CGFloat WMScaleFactor(void) {
     }
     return _wmScaleFactor;
 }
++ (void)invalidateScaleFactorCache {
+    _wmScaleFactor = 0;
+}
 #define ICON_STROKE (1.5 * WMScaleFactor())     // Subtle icon strokes
 #define ICON_INSET (8.0 * WMScaleFactor())      // Icon inset from button edges (matches Eau theme)
 

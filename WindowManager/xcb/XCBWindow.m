@@ -18,6 +18,7 @@
 #import "EIcccm.h"
 #import "Transformers.h"
 #import "TitleBarSettingsService.h"
+#import "XCBFrame.h"
 #import <AppKit/NSAlert.h>
 
 #define BUTTONMASK  (XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE)
@@ -1276,6 +1277,64 @@
     oldRect = windowRect;
     windowRect = rect;
     originalRect = rect;
+}
+
+/* Re-apply the frame geometry after a GSScaleFactor change: resize the frame
+ * and titlebar to the new titlebar height and re-position the client. */
+- (void)reframeForScaleChange
+{
+    /* Only decorated client windows live in a frame; titlebars and frames
+     * (also in the windows map) must be skipped. */
+    if (!decorated)
+        return;
+    if (![parentWindow isKindOfClass:[XCBFrame class]])
+        return;
+
+    XCBFrame *frame = (XCBFrame *)parentWindow;
+    XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    int titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    int cb = [frame clientBorder];
+
+    XCBGeometryReply *geo = [self geometries];
+    if (geo == nil)
+        return;
+    uint16_t cw = (uint16_t)geo.rect.size.width;
+    uint16_t ch = (uint16_t)geo.rect.size.height;
+
+    uint16_t nw = cw + 2 * cb;
+    uint16_t nh = ch + titleHeight + cb;
+
+    uint32_t fvals[] = { nw, nh };
+    xcb_configure_window([connection connection], [frame window],
+                         XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, fvals);
+
+    uint32_t cvals[] = { (uint32_t)cb, (uint32_t)titleHeight, cw, ch };
+    xcb_configure_window([connection connection], window,
+                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+                         XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, cvals);
+
+    if (titleBar != nil)
+    {
+        uint32_t tvals[] = { nw, (uint32_t)titleHeight };
+        xcb_configure_window([connection connection], [titleBar window],
+                             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, tvals);
+
+        /* Keep the titlebar's internal rect and pixmap in sync with the new
+         * size so the GSTheme re-render draws at the new scale. */
+        XCBRect tbRect = [titleBar windowRect];
+        tbRect.size.width = nw;
+        tbRect.size.height = titleHeight;
+        [titleBar setWindowRect: tbRect];
+        [titleBar createPixmap];
+    }
+
+    xcb_flush([connection connection]);
+
+    XCBRect frameRect = [frame windowRect];
+    frameRect.size.width = nw;
+    frameRect.size.height = nh;
+    [frame setWindowRect:frameRect];
 }
 
 - (XCBVisual*) visual

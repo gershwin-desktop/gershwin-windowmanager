@@ -11,6 +11,13 @@
 
 #import "URSHybridEventHandler.h"
 #import "URSProfiler.h"
+#import "xcb/services/TitleBarSettingsService.h"
+#import <GNUstepGUI/GSTheme.h>
+
+/* Eau theme's live scale-factor cache reset (implemented by the theme). */
+@interface GSTheme (EauScaleFactor)
+- (void)invalidateScaleFactorCache;
+@end
 
 /* Class extension for private ivars */
 @interface URSHybridEventHandler () {
@@ -38,6 +45,61 @@
 #import "URSWindowSwitcher.h"
 
 @implementation URSHybridEventHandler
+
+/* Last seen GSScaleFactor, used to detect changes while polling. */
+static CGFloat WMLastScaleFactor = 1.0;
+
+- (void)startScaleFactorMonitoring
+{
+  [NSTimer scheduledTimerWithTimeInterval: 1.0
+                                   target: self
+                                 selector: @selector(checkScaleFactor:)
+                                 userInfo: nil
+                                  repeats: YES];
+}
+
+- (void)checkScaleFactor:(NSTimer *)timer
+{
+  [[NSUserDefaults standardUserDefaults] synchronize];
+
+  CGFloat factor = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
+  if (factor == 0.0)
+    factor = 1.0;
+
+  if (factor == WMLastScaleFactor)
+    return;
+
+  WMLastScaleFactor = factor;
+  [self applyScaleFactor:factor];
+}
+
+- (void)applyScaleFactor:(CGFloat)factor
+{
+  TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+  [settings setScaleFactor:factor];
+  [settings setHeight:(uint16_t)(22 * factor)];
+
+  /* Titlebar drawing constants cache the scale factor; invalidate so the
+   * next render uses the new value. */
+  [URSThemeIntegration invalidateScaleFactorCache];
+
+  /* The Eau theme's own decoration metrics (buttons, corners) cache the
+   * factor too; reset them so the re-render below uses the new scale. */
+  if ([[GSTheme theme] respondsToSelector: @selector(invalidateScaleFactorCache)])
+    [[GSTheme theme] invalidateScaleFactorCache];
+
+  /* Re-frame every managed window so its titlebar height follows the factor.
+   * reframeForScaleChange self-guards (only acts on frame-parented windows). */
+  NSDictionary *windows = [self.connection windowsMap];
+  for (XCBWindow *win in [windows allValues])
+    {
+      [win reframeForScaleChange];
+    }
+
+  /* Re-render all titlebars with the new scale. */
+  xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
+  [URSThemeIntegration refreshAllTitlebarsWithFocusedWindow:focusedId];
+}
 
 @synthesize connection;
 @synthesize selectionManagerWindow;
@@ -115,6 +177,9 @@
 {
     // Mark NSRunLoop as active
     self.nsRunLoopActive = YES;
+
+    // React live to GSScaleFactor changes like Menu.app does.
+    [self startScaleFactorMonitoring];
 
     // Register as window manager
     BOOL registered = [self registerAsWindowManager];
