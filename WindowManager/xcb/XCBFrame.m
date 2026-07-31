@@ -151,15 +151,16 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
     // Determine client border: 0 in compositor mode (drop shadow handles visual separation),
-    // 1 in non-compositor mode (thin strip of frame background as border).
+    // 1 (scaled by GSScaleFactor) in non-compositor mode (thin strip of frame background as border).
     // Stored on self for use in resize functions and queried again in decorateClientWindow.
     {
         Class compositorClass = NSClassFromString(@"URSCompositingManager");
-        int cb = 1;
+        CGFloat sf = [[TitleBarSettingsService sharedInstance] scaleFactor];
+        int cb = (int)sf;
         if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
             id manager = [compositorClass sharedManager];
             if ([manager respondsToSelector:@selector(compositingActive)])
-                cb = [manager compositingActive] ? 0 : 1;
+                cb = [manager compositingActive] ? 0 : (int)sf;
         }
         self.clientBorder = cb;
     }
@@ -251,8 +252,11 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     // Update clientBorder now that we have definitive compositor state.
     // 0 = compositor mode (client flush with frame; drop shadow separates visually)
-    // 1 = non-compositor mode (1px border on left, right, bottom)
-    self.clientBorder = compositorActive ? 0 : 1;
+    // scaled (1 * scaleFactor) = non-compositor mode (border on left, right, bottom)
+    {
+        CGFloat sf = [[TitleBarSettingsService sharedInstance] scaleFactor];
+        self.clientBorder = compositorActive ? 0 : (int)sf;
+    }
 
     uint32_t values[4];  // May need up to 4 values for ARGB (back_pixel, colormap, border_pixel, event_mask)
     uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;

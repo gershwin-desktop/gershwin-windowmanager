@@ -1713,7 +1713,9 @@ static XCBConnection *sharedInstance;
 
     // In compositor mode (drop shadows), the client sits flush inside the frame
     // with no pixel-wide border strips, so cb=0.  Non-compositor uses cb=1.
-    int cb = compositorActive ? 0 : 1;
+    // Scale cb by GSScaleFactor for HiDPI displays.
+    CGFloat cbScaleFactor = [[TitleBarSettingsService sharedInstance] scaleFactor];
+    int cb = compositorActive ? 0 : (int)cbScaleFactor;
     // GNUstep's DPSplacewindow uses _XFrameToXHints which places the CLIENT at the
     // desired FRAME top-left position (not the content area position). So reqX/reqY
     // are already the frame coordinates — do NOT subtract cb or titleHeight.

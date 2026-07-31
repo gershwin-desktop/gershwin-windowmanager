@@ -641,7 +641,8 @@
         }
     }
 
-    uint32_t cb = compositorActive ? 0 : 1;
+    CGFloat sf = [settings scaleFactor];
+    uint32_t cb = compositorActive ? 0 : (uint32_t)sf;
     uint32_t extents[4];
     extents[0] = cb;              // left border
     extents[1] = cb;              // right border

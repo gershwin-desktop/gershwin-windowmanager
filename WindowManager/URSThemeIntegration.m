@@ -41,13 +41,24 @@ static NSInteger hoveredButtonIndex = -1;  // -1=none, 0=close, 1=mini, 2=zoom
 
 // Edge button metrics: buttons are square, width equals titlebar height (queried at render time)
 // Declared early so they can be used in hover state methods
-static const CGFloat ICON_STROKE = 1.5;               // Subtle icon strokes
-static const CGFloat ICON_INSET = 8.0;                // Icon inset from button edges (matches Eau theme)
+// Multiplied by GSScaleFactor for HiDPI support (lazily computed).
+static CGFloat _wmScaleFactor = 0;
+static CGFloat WMScaleFactor(void) {
+    if (_wmScaleFactor < 1.0) {
+        _wmScaleFactor = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
+        if (_wmScaleFactor < 1.0)
+            _wmScaleFactor = [[NSScreen mainScreen] backingScaleFactor];
+        if (_wmScaleFactor < 1.0) _wmScaleFactor = 1.0;
+    }
+    return _wmScaleFactor;
+}
+#define ICON_STROKE (1.5 * WMScaleFactor())     // Subtle icon strokes
+#define ICON_INSET (8.0 * WMScaleFactor())      // Icon inset from button edges (matches Eau theme)
 
 // Orb button metrics (matching Eau theme AppearanceMetrics.h orb constants)
-static const CGFloat ORB_BUTTON_SIZE = 15.0;
-static const CGFloat ORB_PADDING_LEFT = 10.5;
-static const CGFloat ORB_BUTTON_SPACING = 4.0;
+#define ORB_BUTTON_SIZE (15.0 * WMScaleFactor())
+#define ORB_PADDING_LEFT (10.5 * WMScaleFactor())
+#define ORB_BUTTON_SPACING (4.0 * WMScaleFactor())
 
 #pragma mark - Fixed-size window tracking
 
@@ -294,7 +305,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     NSBezierPath *highlight = [NSBezierPath bezierPath];
     [highlight moveToPoint:NSMakePoint(NSMinX(rect), NSMaxY(rect) - 0.5)];
     [highlight lineToPoint:NSMakePoint(NSMaxX(rect), NSMaxY(rect) - 0.5)];
-    [highlight setLineWidth:1.0];
+    [highlight setLineWidth:(1.0 * WMScaleFactor())];
     [highlight stroke];
 }
 
@@ -695,7 +706,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSBezierPath *titleBase = [NSBezierPath bezierPath];
             [titleBase moveToPoint:NSMakePoint(highlightLeft, titlebarSize.height - 0.5)];
             [titleBase lineToPoint:NSMakePoint(highlightRight, titlebarSize.height - 0.5)];
-            [titleBase setLineWidth:1.0];
+            [titleBase setLineWidth:(1.0 * WMScaleFactor())];
             [titleBase stroke];
 
             NSColor *titleHighlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
@@ -703,7 +714,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSBezierPath *titleHighlight = [NSBezierPath bezierPath];
             [titleHighlight moveToPoint:NSMakePoint(0, titlebarSize.height - 0.5)];
             [titleHighlight lineToPoint:NSMakePoint(titlebarSize.width, titlebarSize.height - 0.5)];
-            [titleHighlight setLineWidth:1.0];
+            [titleHighlight setLineWidth:(1.0 * WMScaleFactor())];
             [titleHighlight stroke];
 
             // Button dividers — lightened to blend with inactive gradient
@@ -725,7 +736,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 [dividers moveToPoint:NSMakePoint(titlebarSize.width - titlebarSize.height, 0)];
                 [dividers lineToPoint:NSMakePoint(titlebarSize.width - titlebarSize.height, titlebarSize.height)];
             }
-            [dividers setLineWidth:1.0];
+            [dividers setLineWidth:(1.0 * WMScaleFactor())];
             [dividers stroke];
         }
 
@@ -1367,7 +1378,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSBezierPath *titleBase = [NSBezierPath bezierPath];
             [titleBase moveToPoint:NSMakePoint(highlightLeft, buttonHeight - 0.5)];
             [titleBase lineToPoint:NSMakePoint(highlightRight, buttonHeight - 0.5)];
-            [titleBase setLineWidth:1.0];
+            [titleBase setLineWidth:(1.0 * WMScaleFactor())];
             [titleBase stroke];
 
             NSColor *titleHighlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
@@ -1375,7 +1386,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSBezierPath *titleHighlight = [NSBezierPath bezierPath];
             [titleHighlight moveToPoint:NSMakePoint(0, buttonHeight - 0.5)];
             [titleHighlight lineToPoint:NSMakePoint(titlebarWidth, buttonHeight - 0.5)];
-            [titleHighlight setLineWidth:1.0];
+            [titleHighlight setLineWidth:(1.0 * WMScaleFactor())];
             [titleHighlight stroke];
 
             // Button dividers — lightened to blend with inactive gradient
@@ -1397,7 +1408,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 [dividers moveToPoint:NSMakePoint(titlebarWidth - buttonHeight, 0)];
                 [dividers lineToPoint:NSMakePoint(titlebarWidth - buttonHeight, buttonHeight)];
             }
-            [dividers setLineWidth:1.0];
+            [dividers setLineWidth:(1.0 * WMScaleFactor())];
             [dividers stroke];
         }
 
