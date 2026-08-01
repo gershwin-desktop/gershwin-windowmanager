@@ -86,6 +86,12 @@ static CGFloat WMLastScaleFactor = 1.0;
   [settings setScaleFactor:factor];
   [settings setHeight:(uint16_t)(22 * factor)];
 
+  /* Keep the root _GNUSTEP_FRAME_OFFSETS in sync with the new titlebar
+   * height so the GNUstep backend positions content flush below it. */
+  XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
+  EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+  [ewmh updateGNUStepFrameOffsetsForRootWindow:rootWin];
+
   /* Titlebar drawing constants cache the scale factor; invalidate so the
    * next render uses the new value. */
   [URSThemeIntegration invalidateScaleFactorCache];
@@ -351,6 +357,10 @@ static CGFloat WMLastScaleFactor = 1.0;
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
     [ewmhService updateNetWmState:selectionManagerWindow];
     [ewmhService putPropertiesForRootWindow:[screen rootWindow] andWmWindow:selectionManagerWindow];
+
+    /* Tell the GNUstep backend the real frame offsets (titlebar height etc.)
+     * so it positions window content flush below the decoration. */
+    [ewmhService updateGNUStepFrameOffsetsForRootWindow:[screen rootWindow]];
     
     // Set initial workarea to full screen (no struts yet)
     [ewmhService updateWorkareaForRootWindow:[screen rootWindow]
@@ -1567,6 +1577,19 @@ static CGFloat WMLastScaleFactor = 1.0;
         XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
         if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
             XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
+
+            // Tell the client (via EWMH _NET_FRAME_EXTENTS) how much frame
+            // decoration surrounds it, so GNUstep backends position their
+            // content flush below the titlebar instead of guessing and
+            // leaving a gap.  Mirrors the legacy XCBKit decoration path.
+            {
+                XCBWindow *client = [frame childWindowForKey:ClientWindow];
+                if (client)
+                {
+                    EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+                    [ewmh updateNetFrameExtentsForWindow:client];
+                }
+            }
 
             // Apply ONLY GSTheme rendering (no legacy/XCBKit drawing).
             // Newly mapped windows almost always get focus, so default active.

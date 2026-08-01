@@ -308,7 +308,7 @@
         EWMHMoveresizeWindow,
         EWMHWMMoveresize,
         EWMHRestackWindow,
-        //EWMHRequestFrameExtents,
+        EWMHRequestFrameExtents,
         EWMHWMName,
         EWMHWMVisibleName,
         EWMHWMIconName,
@@ -434,6 +434,7 @@
         // Window Manager Protocols
         EWMHWMPing,
         EWMHWMSyncRequest,
+        EWMHRequestFrameExtents,
         
         // Client Window Properties
         EWMHWMName,
@@ -1487,6 +1488,54 @@
                            withType:XCB_ATOM_ATOM
                          withFormat:32 withDataLength:size
                            withData:atomList];
+}
+
+/* Write _GNUSTEP_FRAME_OFFSETS on the root window.  The GNUstep backend
+ * reads this to determine how much frame decoration surrounds each window
+ * style, so the top offset MUST match the real titlebar height.  The
+ * property holds 15 styles x 4 (l,r,t,b) 16-bit values.  Missing one (or
+ * leaving a stale value from a previous titlebar height) makes the backend
+ * position content below the decoration, leaving a visible gap. */
+- (void) updateGNUStepFrameOffsetsForRootWindow:(XCBWindow *)aRootWindow
+{
+    if (!aRootWindow)
+        return;
+
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+
+    BOOL compositorActive = NO;
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        id<URSCompositingManaging> compositor = [compositorClass performSelector:@selector(sharedManager)];
+        if (compositor && [compositor respondsToSelector:@selector(compositingActive)] &&
+            [compositor compositingActive])
+        {
+            compositorActive = YES;
+        }
+    }
+
+    CGFloat sf = [settings scaleFactor];
+    uint16_t cb = compositorActive ? 0 : (uint16_t)sf;
+
+    /* 15 window styles x 4 offsets (l, r, t, b), 16-bit each, matching what
+     * the GNUstep backend reads (XA_CARDINAL, format 16, 60 items). */
+    uint16_t offsets[60];
+    for (int i = 0; i < 15; i++)
+    {
+        offsets[i*4 + 0] = cb;           /* left */
+        offsets[i*4 + 1] = cb;           /* right */
+        offsets[i*4 + 2] = titleHeight;  /* top (titlebar) */
+        offsets[i*4 + 3] = cb;           /* bottom */
+    }
+
+    [self changePropertiesForWindow:aRootWindow
+                           withMode:XCB_PROP_MODE_REPLACE
+                       withProperty:GNUStepFrameOffset
+                           withType:XCB_ATOM_CARDINAL
+                         withFormat:16 withDataLength:60
+                           withData:offsets];
 }
 
 #pragma mark - EWMH Client Window Properties
