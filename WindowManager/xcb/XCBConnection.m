@@ -1465,8 +1465,7 @@ static XCBConnection *sharedInstance;
                 return;
             }
 
-            if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDialog]] ||
-                *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeTooltip]] ||
+            if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeTooltip]] ||
                 *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeNotification]] ||
                 *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeSplash]])
             {
@@ -1488,6 +1487,11 @@ static XCBConnection *sharedInstance;
                 free(windowTypeReply);
                 return;
             }
+
+            /* Dialogs (e.g. confirmation panels) are real windows and must be
+               decorated with a title bar like any normal window.  Only the
+               main menu bar (DOCK), dropdown menus (MENU) and the transient
+               windows handled above stay undecorated. */
 
             atom = NULL; // atom points into windowTypeReply memory, cleared to avoid dangling pointer
             free(windowTypeReply);
