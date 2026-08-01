@@ -1296,6 +1296,11 @@
     int titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
     int cb = [frame clientBorder];
 
+    /* Keep the frame's cached titlebar height in sync with the service so
+     * later interactive resizes (which read frame.titleHeight) place the
+     * client correctly below the titlebar at the new scale. */
+    [frame setTitleHeight:(uint16_t)titleHeight];
+
     XCBGeometryReply *geo = [self geometries];
     if (geo == nil)
         return;

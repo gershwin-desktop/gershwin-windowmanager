@@ -493,6 +493,12 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 {
     int clientBorder = self.clientBorder;
 
+    /* Always use the current service titlebar height so interactive resizes
+     * match the rendered titlebar even after a GSScaleFactor change (which
+     * re-frames windows but must not leave the cached titleHeight stale). */
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+
     /*** width ***/
 
     if (rightBorderClicked && !bottomBorderClicked && !leftBorderClicked && !topBorderClicked)
