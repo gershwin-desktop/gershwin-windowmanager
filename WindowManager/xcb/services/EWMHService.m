@@ -1755,13 +1755,13 @@
         return;
     }
     
-    xcb_atom_t *atoms = xcb_list_properties_atoms(propReply);
+    xcb_atom_t *clientAtoms = xcb_list_properties_atoms(propReply);
     int atomCount = xcb_list_properties_atoms_length(propReply);
     
     // Iterate through all properties on the client window
     for (int i = 0; i < atomCount; i++)
     {
-        xcb_atom_t propAtom = atoms[i];
+        xcb_atom_t propAtom = clientAtoms[i];
         
         // Get property name for blacklist check
         xcb_get_atom_name_cookie_t nameCookie = xcb_get_atom_name(conn, propAtom);
