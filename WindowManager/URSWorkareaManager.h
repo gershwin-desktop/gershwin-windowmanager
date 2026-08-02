@@ -19,6 +19,7 @@
 - (BOOL)readAndRegisterStrutForWindow:(xcb_window_t)windowId;
 - (BOOL)removeStrutForWindow:(xcb_window_t)windowId;
 - (void)recalculateWorkarea;
+- (void)pushExistingWindowsBelowWorkarea;
 - (NSRect)currentWorkarea;
 
 @end

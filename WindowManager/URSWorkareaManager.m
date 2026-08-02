@@ -9,6 +9,7 @@
 #import "URSWorkareaManager.h"
 #import "XCBScreen.h"
 #import "XCBWindow.h"
+#import "XCBFrame.h"
 #import "EWMHService.h"
 #import "XCBAtomService.h"
 
@@ -64,6 +65,82 @@
 
     if (needsRecalc) {
         [self recalculateWorkarea];
+
+        /* The strut changed while windows were already mapped: re-layout the
+         * existing windows so they too dodge the new workarea (e.g. a menu
+         * bar that was resized/repositioned after a resolution change). */
+        [self pushExistingWindowsBelowWorkarea];
+    }
+}
+
+#pragma mark - Re-layout of existing windows
+
+/* Move already-mapped normal windows that overlap the new workarea top (i.e.
+   their frame top edge is above the workarea, e.g. under the menu bar) down
+   so they respect the strut that was just applied.  Only framed top-level
+   windows are moved; special window types and fullscreen windows are left
+   alone. */
+- (void)pushExistingWindowsBelowWorkarea
+{
+    @try {
+        EWMHService *ewmhService =
+            [EWMHService sharedInstanceWithConnection:self.connection];
+        NSRect workarea = [self currentWorkarea];
+        int32_t waY = (int32_t)workarea.origin.y;
+        NSDictionary *windows = [self.connection windowsMap];
+
+        for (NSString *key in windows) {
+            XCBWindow *win = [windows objectForKey:key];
+            if (!win || ![win isKindOfClass:[XCBFrame class]]) {
+                continue;
+            }
+            if ([win fullScreen]) {
+                continue;
+            }
+
+            /* Normal windows have no windowType set - the WM only assigns a
+             * type to special windows (Dock, Menu, Tooltip, ...) - so skip
+             * only the explicitly special types; nil means a normal window. */
+            NSString *type = [win windowType];
+            if (type != nil) {
+                if ([type isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypeDock]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypeToolbar]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypeMenu]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypeDropdownMenu]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypePopupMenu]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypeTooltip]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypeNotification]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypeSplash]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypeCombo]] ||
+                    [type isEqualToString:[ewmhService EWMHWMWindowTypeDnd]]) {
+                    continue;
+                }
+            }
+
+            xcb_get_geometry_cookie_t geomCookie =
+                xcb_get_geometry([self.connection connection], [win window]);
+            xcb_get_geometry_reply_t *geom =
+                xcb_get_geometry_reply([self.connection connection], geomCookie, NULL);
+            if (!geom) {
+                continue;
+            }
+
+            if ((int32_t)geom->y < waY) {
+                uint32_t values[] = {(uint32_t)((int32_t)geom->x < 0 ? 0 : geom->x),
+                                     (uint32_t)waY};
+                xcb_configure_window([self.connection connection], [win window],
+                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y,
+                                     values);
+                //NSLog(@"[ICCCM] Moved window %u below workarea top (y=%d -> %d)",
+                //      [win window], geom->y, waY);
+            }
+            free(geom);
+        }
+        [self.connection flush];
+    } @catch (NSException *exception) {
+        NSLog(@"[ICCCM] Exception pushing existing windows below workarea: %@",
+              exception.reason);
     }
 }
 
