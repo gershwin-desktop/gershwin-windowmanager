@@ -1183,6 +1183,15 @@
         URSCompositeWindow *cw = self.cwindows[key];
         if (!cw) continue;
 
+        // Never tear down an animating window.  A transient child window being
+        // destroyed (e.g. xterm's helper windows) otherwise kills the parent
+        // frame's map animation and leaks activeAnimations, which keeps the
+        // animation timer running forever.  The animation finishes on its own
+        // and finishAnimationForWindow: then releases the resources.
+        if (cw.animating) {
+            continue;
+        }
+
         if (cw.viewable) {
             cw.viewable = NO;
         }
@@ -2444,8 +2453,8 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
           //duration, (int)fade, (int)minimizing, (int)self.compositingActive);
 
     if (!self.compositingActive || windowId == XCB_NONE) {
-        //NSLog(@"[Compositor] animateWindow aborted: compositingActive=%d, windowId=%u",
-              //(int)self.compositingActive, windowId);
+        NSLog(@"[Compositor] animateWindow aborted: compositingActive=%d, windowId=%u",
+              (int)self.compositingActive, windowId);
         return;
     }
 
@@ -2488,8 +2497,6 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
 
     BOOL wasMinimized = cw.animatingMinimize;
-
-    //NSLog(@"[Compositor] Animation finished for window %u (wasMinimize=%d)", cw.windowId, (int)wasMinimized);
 
     cw.animating = NO;
     cw.animatingMinimize = NO;
@@ -3163,17 +3170,34 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         double endW = fmax(1.0, (double)cw.animationEndRect.size.width);
         double endH = fmax(1.0, (double)cw.animationEndRect.size.height);
 
-        // Always preserve the window's natural aspect ratio, defined by
-        // the LARGER start/end rect (the non-minimized state has the true
-        // window shape, the icon rect is often square).
-        double naturalW = fmax(startW, endW);
-        double naturalH = fmax(startH, endH);
+        // Always preserve the aspect ratio of the actual WINDOW throughout
+        // the animation, regardless of the source rect (icon, or the
+        // _GSWORKSPACE_WINDOW_BIRTH atom rect, which may have any aspect).
+        // For opens (birth/restore) the window is the end rect; for minimize
+        // the window is the start rect.  Using max(start,end) per axis would
+        // distort the shape whenever the source rect is larger than the
+        // window in one dimension.
+        double naturalW, naturalH;
+        if (wasMinimize) {
+            naturalW = startW;
+            naturalH = startH;
+        } else {
+            naturalW = endW;
+            naturalH = endH;
+        }
         double rawW = startW + (endW - startW) * ease;
         double rawH = startH + (endH - startH) * ease;
         double scaleFromNaturalW = rawW / naturalW;
         double scaleFromNaturalH = rawH / naturalH;
-        double uniformScale = fmax(scaleFromNaturalW, scaleFromNaturalH);
-        uniformScale = fmax(0.01, uniformScale); // never smaller than 1%
+        // Window opens must GROW (start small, end at full size), so pick the
+        // SMALLER of the two per-axis ratios — the largest uniform scale that
+        // still fits within the source rect while keeping the window's aspect.
+        // fmax would make the window start larger than its final size (and
+        // therefore appear to shrink) whenever the birth source rect is wider
+        // or taller than the new window.
+        double uniformScale = fmin(scaleFromNaturalW, scaleFromNaturalH);
+        uniformScale = fmax(0.01, uniformScale);   // never smaller than 1%
+        uniformScale = fmin(1.0, uniformScale);    // never larger than the window
 
         double currentW = naturalW * uniformScale;
         double currentH = naturalH * uniformScale;
@@ -3295,35 +3319,34 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
 
         if (animating) {
+            double t = URSClampDouble((now - cw.animationStart) / cw.animationDuration, 0.0, 1.0);
             double srcW = fmax(1.0, (double)cw.width + (2.0 * (double)cw.borderWidth));
             double srcH = fmax(1.0, (double)cw.height + (2.0 * (double)cw.borderWidth));
             double sx = srcW / (double)destWInt;
             double sy = srcH / (double)destHInt;
+
+            double alpha = 1.0;
+            if (cw.animatingFade) {
+                if (cw.animatingMinimize) {
+                    // Minimize: fade OUT with quadratic ease-in
+                    alpha = 1.0 - (t * t);
+                } else {
+                    // Window-open animation (map/birth): fade IN from fully
+                    // transparent with a quadratic ease-out so windows
+                    // materialize rather than just appearing.
+                    double oneMinusT = 1.0 - t;
+                    alpha = 1.0 - (oneMinusT * oneMinusT);
+                }
+                alpha = URSClampDouble(alpha, 0.0, 1.0);
+            }
 
             xcb_render_transform_t transform = URSIdentityTransform();
             transform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
             transform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
             xcb_render_set_picture_transform(conn, cw.picture, transform);
 
-            if (cw.animatingFade) {
-                double t = URSClampDouble((now - cw.animationStart) / cw.animationDuration, 0.0, 1.0);
-                double alpha;
-                if (cw.animatingMinimize) {
-                    // Minimize: fade OUT with quadratic ease-in
-                    alpha = 1.0 - (t * t);
-                } else {
-                    // Birth animation (window-open): start translucent (40%), gradually resolve
-                    // Uses quadratic ease-up from a 0.4 base:
-                    //   alpha = 0.4 + 0.6 * (1 - (1-t)^2)
-                    // Per PRD Sections 9 Phase 3 (translucent appearance) and Phase 5
-                    // (chrome materialization during final third).
-                    double oneMinusT = 1.0 - t;
-                    alpha = 0.4 + 0.6 * (1.0 - (oneMinusT * oneMinusT));
-                }
-                alpha = URSClampDouble(alpha, 0.0, 1.0);
-                if (alpha < 0.999 && self.argbFormat != XCB_NONE) {
-                    alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha];
-                }
+            if (cw.animatingFade && alpha < 0.999 && self.argbFormat != XCB_NONE) {
+                alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha];
             }
         }
 

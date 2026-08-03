@@ -834,6 +834,124 @@ static XCBConnection *sharedInstance;
     rootWindow = nil;
 }
 
+// Fade in and grow slightly for a window that was just mapped.
+// Desktop windows and windows adopted at startup are skipped.
+// If the client carries a _GSWORKSPACE_WINDOW_BIRTH property (set by the
+// Workspace app), animate from that source rect instead of the default 90%
+// grow, and honour its animation type (type 1 = NoAnimation).
+- (void)animateMappedWindow:(xcb_window_t)frameId
+                   clientId:(xcb_window_t)clientId
+                 windowRect:(XCBRect)windowRect
+{
+    if (self.adoptingExistingWindows)
+    {
+        return;
+    }
+
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (!compositorClass || ![compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        return;
+    }
+    id<URSCompositingManaging> compositor = [compositorClass performSelector:@selector(sharedManager)];
+    if (!compositor || ![compositor compositingActive])
+    {
+        return;
+    }
+
+    // Desktop windows must not animate; they always sit at the bottom.
+    XCBWindow *frame = [self windowForXCBId:frameId];
+    if (frame && [frame isKindOfClass:[XCBFrame class]])
+    {
+        XCBWindow *client = [(XCBFrame *)frame childWindowForKey:ClientWindow];
+        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+        if (client && [[client windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]])
+        {
+            return;
+        }
+    }
+
+    // Read _GSWORKSPACE_WINDOW_BIRTH (source rect + animation type) from the
+    // client window, if present.  Layout: 9 x int32 = src(x,y,w,h), dst(x,y,w,h),
+    // animationType.  animationType == 1 means "NoAnimation" (suppress).
+    XCBRect startRect = XCBInvalidRect;
+    NSTimeInterval duration = 0.22;
+    BOOL suppressAnimation = NO;
+
+    if (clientId != XCB_NONE)
+    {
+        XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
+        xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_GSWORKSPACE_WINDOW_BIRTH"];
+        if (birthAtom != XCB_NONE)
+        {
+            xcb_get_property_cookie_t cookie = xcb_get_property([self connection], 0, clientId,
+                                                                  birthAtom, XCB_ATOM_CARDINAL, 0,
+                                                                  GSWORKSPACE_WINDOW_BIRTH_NUM_INTS);
+            xcb_generic_error_t *birthError = NULL;
+            xcb_get_property_reply_t *reply = xcb_get_property_reply([self connection], cookie, &birthError);
+            if (birthError) { free(birthError); reply = NULL; }
+
+            if (reply)
+            {
+                int len = xcb_get_property_value_length(reply);
+                if (len == GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN)
+                {
+                    int32_t *data = (int32_t *)xcb_get_property_value(reply);
+                    int32_t animType = data[GSWORKSPACE_BIRTH_IDX_ANIM_TYPE];
+
+                    if (animType == 1)
+                    {
+                        suppressAnimation = YES;
+                    }
+                    else
+                    {
+                        startRect.position.x = data[GSWORKSPACE_BIRTH_IDX_SRC_X];
+                        startRect.position.y = data[GSWORKSPACE_BIRTH_IDX_SRC_Y];
+                        startRect.size.width = data[GSWORKSPACE_BIRTH_IDX_SRC_W];
+                        startRect.size.height = data[GSWORKSPACE_BIRTH_IDX_SRC_H];
+                        // Expanding from a source rect is a longer, more
+                        // deliberate effect than the default 90% grow.
+                        duration = 0.8;
+                    }
+                }
+                // Delete the property so it doesn't persist past birth.
+                xcb_delete_property([self connection], clientId, birthAtom);
+                free(reply);
+            }
+        }
+    }
+
+    if (suppressAnimation)
+    {
+        return;
+    }
+
+    // If no valid birth source rect, grow from 90% of the final size,
+    // anchored at the same center, while fading in from transparent.
+    if (!FnCheckXCBRectIsValid(startRect) ||
+        startRect.size.width <= 0 || startRect.size.height <= 0)
+    {
+        double w = fmax(1.0, (double)windowRect.size.width);
+        double h = fmax(1.0, (double)windowRect.size.height);
+        double cx = windowRect.position.x + w * 0.5;
+        double cy = windowRect.position.y + h * 0.5;
+        double startW = w * 0.9;
+        double startH = h * 0.9;
+        startRect = XCBMakeRect(
+            XCBMakePoint((int16_t)(cx - startW * 0.5),
+                         (int16_t)(cy - startH * 0.5)),
+            XCBMakeSize((uint16_t)startW, (uint16_t)startH));
+        duration = 0.22;
+    }
+
+
+    [compositor animateWindowTransition:frameId
+                               fromRect:startRect
+                                 toRect:windowRect
+                               duration:duration
+                                   fade:YES];
+}
+
 - (void)handleMapRequest:(xcb_map_request_event_t *)anEvent
 {
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
@@ -1011,75 +1129,6 @@ static XCBConnection *sharedInstance;
             {
                 // Normal map for non-minimized window
                 
-                // Check for window birth animation property
-                XCBRect animStartRect = XCBInvalidRect;
-                BOOL hasAnimationRect = NO;
-
-                xcb_connection_t *conn = [self connection];
-                xcb_window_t win = [window window];
-                XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
-
-                // Read _GSWORKSPACE_WINDOW_BIRTH property (format: 9 x int32)
-                // Per PRD.md section 8: source(x,y,w,h), target(x,y,w,h), animationType
-                xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_GSWORKSPACE_WINDOW_BIRTH"];
-
-                if (birthAtom != XCB_NONE) {
-                    xcb_get_property_cookie_t cookie = xcb_get_property(conn, 0, win, birthAtom, XCB_ATOM_CARDINAL, 0, GSWORKSPACE_WINDOW_BIRTH_NUM_INTS);
-                    xcb_generic_error_t *birthError = NULL;
-                    xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, cookie, &birthError);
-                    if (birthError)
-                    {
-                        free(birthError);
-                        reply = NULL;
-                    }
-
-                    if (reply) {
-                        int len = xcb_get_property_value_length(reply);
-                        if (len == GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN) {
-                            int32_t *data = (int32_t *)xcb_get_property_value(reply);
-
-                            // Parse source rect (index 0-3)
-                            animStartRect.position.x = data[GSWORKSPACE_BIRTH_IDX_SRC_X];
-                            animStartRect.position.y = data[GSWORKSPACE_BIRTH_IDX_SRC_Y];
-                            animStartRect.size.width = data[GSWORKSPACE_BIRTH_IDX_SRC_W];
-                            animStartRect.size.height = data[GSWORKSPACE_BIRTH_IDX_SRC_H];
-
-                            // Parse target rect (index 4-7) for validation
-                            XCBRect birthTargetRect;
-                            birthTargetRect.position.x = data[GSWORKSPACE_BIRTH_IDX_DST_X];
-                            birthTargetRect.position.y = data[GSWORKSPACE_BIRTH_IDX_DST_Y];
-                            birthTargetRect.size.width = data[GSWORKSPACE_BIRTH_IDX_DST_W];
-                            birthTargetRect.size.height = data[GSWORKSPACE_BIRTH_IDX_DST_H];
-
-                            // Parse animation type (index 8)
-                            int32_t animType = data[GSWORKSPACE_BIRTH_IDX_ANIM_TYPE];
-
-                            hasAnimationRect = YES;
-
-                            // Delete the property so it doesn't interfere with future operations
-                            xcb_delete_property(conn, win, birthAtom);
-
-                            //NSLog(@"[MapRequest] Found birth property: src={%d, %d, %hu, %hu} dst={%d, %d, %hu, %hu} type=%d",
-                            //      (int)animStartRect.position.x, (int)animStartRect.position.y,
-                            //      animStartRect.size.width, animStartRect.size.height,
-                            //      (int)birthTargetRect.position.x, (int)birthTargetRect.position.y,
-                            //      birthTargetRect.size.width, birthTargetRect.size.height,
-                            //      animType);
-
-                            // If animation type is NoAnimation, skip the animation
-                            if (animType == 1) {
-                                //NSLog(@"[MapRequest] Birth animation suppressed by animation type (NoAnimation)");
-                                hasAnimationRect = NO;
-                            }
-                        } else {
-                            //NSLog(@"[MapRequest] Birth property present but length=%d (expected %d)", len, GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN);
-                        }
-                        free(reply);
-                    } else {
-                        //NSLog(@"[MapRequest] No reply reading birth property");
-                    }
-                }
-                
                 // Map the window
                 [self mapWindow:frame];
 
@@ -1089,63 +1138,11 @@ static XCBConnection *sharedInstance;
                 }
 
                 [self mapWindow:window];
-                
-                // Trigger animation if we have a start rect
-                if (hasAnimationRect) {
-                    Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                    
-                    if (compositorClass) {
-                        id<URSCompositingManaging> compositor = nil;
-                        if ([compositorClass respondsToSelector:@selector(sharedManager)]) {
-                            compositor = [compositorClass performSelector:@selector(sharedManager)];
-                        }
-                        
-                        if (compositor) {
-                            BOOL compActive = [compositor compositingActive];
-                            XCBRect endRect = [frame windowRect];
-                            //NSLog(@"[MapRequest] compositor present. compositingActive=%d, startRect={%d,%d,%hu,%hu}, endRect={%d,%d,%hu,%hu}",
-                            //      compActive,
-                            //      (int)animStartRect.position.x, (int)animStartRect.position.y, animStartRect.size.width, animStartRect.size.height,
-                            //      (int)endRect.position.x, (int)endRect.position.y, endRect.size.width, endRect.size.height);
 
-                            if (compActive) {
-                                // Compositing mode: use birth animation
-                                [compositor animateWindowTransition:[frame window]
-                                                           fromRect:animStartRect
-                                                             toRect:endRect
-                                                           duration:0.8
-                                                               fade:YES];
-                                //NSLog(@"[MapRequest] Composited birth animation for window %u", [frame window]);
-                            } else {
-                                // Non-compositing mode: use fast zoom rect animation
-                                XCBScreen *screenObj = [[self screens] objectAtIndex:0];
-                                xcb_screen_t *screen = [screenObj screen];
-                                
-                                [compositorClass animateZoomRectsFromRect:animStartRect
-                                                                  toRect:endRect
-                                                              connection:self
-                                                                  screen:screen
-                                                                duration:0.2];
-                                //NSLog(@"[MapRequest] Completed zoom rect window open animation");
-                            }
-                        } else {
-                            //NSLog(@"[MapRequest] No compositor available; falling back to non-compositing behavior");
-                            XCBRect endRect = [frame windowRect];
-                            XCBScreen *screenObj = [[self screens] objectAtIndex:0];
-                            xcb_screen_t *screen = [screenObj screen];
-
-                            Class compClassDynamic = NSClassFromString(@"URSCompositingManager");
-                            if (compClassDynamic && [compClassDynamic respondsToSelector:@selector(animateZoomRectsFromRect:toRect:connection:screen:duration:)]) {
-                                // Use objc_msgSend to call class method with multiple args
-                                void (*msg)(id, SEL, XCBRect, XCBRect, id, xcb_screen_t*, NSTimeInterval) = (void *)objc_msgSend;
-                                msg(compClassDynamic, @selector(animateZoomRectsFromRect:toRect:connection:screen:duration:), animStartRect, endRect, self, screen, 0.2);
-                                //NSLog(@"[MapRequest] Called dynamic animator animateZoomRectsFromRect");
-                            } else {
-                                //NSLog(@"[MapRequest] No animator class/method available for zoom rects");
-                            }
-                        }
-                    }
-                }
+                // Fade in + grow slightly whenever a window is (re)shown.
+                [self animateMappedWindow:[frame window]
+                                 clientId:[window window]
+                               windowRect:[frame windowRect]];
             }
         }
         else
@@ -1874,78 +1871,10 @@ static XCBConnection *sharedInstance;
     [icccmService wmClassForWindow:window];
     [frame configureClient];
 
-    // Check for window birth animation property on newly-created windows.
-    // (Windows mapped a second time are handled earlier in this method.)
-    {
-        XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
-        xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_GSWORKSPACE_WINDOW_BIRTH"];
-
-        if (birthAtom != XCB_NONE) {
-            xcb_get_property_cookie_t cookie = xcb_get_property([self connection], 0, [window window],
-                                                                  birthAtom, XCB_ATOM_CARDINAL, 0, GSWORKSPACE_WINDOW_BIRTH_NUM_INTS);
-            xcb_generic_error_t *birthError = NULL;
-            xcb_get_property_reply_t *reply = xcb_get_property_reply([self connection], cookie, &birthError);
-            if (birthError) { free(birthError); reply = NULL; }
-
-            if (reply) {
-                int len = xcb_get_property_value_length(reply);
-                if (len == GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN) {
-                    int32_t *data = (int32_t *)xcb_get_property_value(reply);
-                    int32_t animType = data[8];
-
-                    if (animType != 1) {  // Not NoAnimation
-                        XCBRect animStartRect = XCBInvalidRect;
-                        animStartRect.position.x = data[0];
-                        animStartRect.position.y = data[1];
-                        animStartRect.size.width = data[2];
-                        animStartRect.size.height = data[3];
-
-                        // Delete so it doesn't persist past birth
-                        xcb_delete_property([self connection], [window window], birthAtom);
-
-                        //NSLog(@"[MapRequest] Birth rect on NEW window %u: src={%d,%d,%hu,%hu}",
-                        //      [window window],
-                        //      (int)animStartRect.position.x, (int)animStartRect.position.y,
-                        //      animStartRect.size.width, animStartRect.size.height);
-
-                        // Trigger compositor animation
-                        Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                        if (compositorClass) {
-                            id<URSCompositingManaging> compositor = nil;
-                            if ([compositorClass respondsToSelector:@selector(sharedManager)])
-                                compositor = [compositorClass performSelector:@selector(sharedManager)];
-
-                            if (compositor) {
-                                XCBRect endRect = [frame windowRect];
-                                if ([compositor compositingActive]) {
-                                    [compositor animateWindowTransition:[frame window]
-                                                               fromRect:animStartRect
-                                                                 toRect:endRect
-                                                               duration:0.8
-                                                                   fade:YES];
-                                    //NSLog(@"[MapRequest] Composited birth animation for NEW window %u", [frame window]);
-                                } else {
-                                    XCBScreen *screenObj = [[self screens] objectAtIndex:0];
-                                    xcb_screen_t *screen = [screenObj screen];
-                                    [compositorClass animateZoomRectsFromRect:animStartRect
-                                                                      toRect:endRect
-                                                                  connection:self
-                                                                      screen:screen
-                                                                    duration:0.2];
-                                    //NSLog(@"[MapRequest] Zoom-rect birth animation for NEW window %u", [frame window]);
-                                }
-                            }
-                        }
-                    } else {
-                        // NoAnimation — still delete the property
-                        xcb_delete_property([self connection], [window window], birthAtom);
-                        //NSLog(@"[MapRequest] Birth rect suppressed (NoAnimation) for NEW window %u", [window window]);
-                    }
-                }
-                free(reply);
-            }
-        }
-    }
+    // Fade in + grow slightly for the newly created window.
+    [self animateMappedWindow:[frame window]
+                     clientId:[window window]
+                   windowRect:[frame windowRect]];
 
     [self setNeedFlush:YES];
     window = nil;

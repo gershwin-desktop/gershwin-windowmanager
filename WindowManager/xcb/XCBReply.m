@@ -50,73 +50,9 @@
 
 - (void) description
 {
-    NSString *errorMessage;
-    
-    if (isError)
-    {
-        switch (message)
-        {
-            case BadRequest:
-                errorMessage = @"BadRequest";
-                break;
-            case BadValue:
-                errorMessage = @"BadValue";
-                break;
-            case BadWindow:
-                errorMessage = @"BadWindow";
-                break;
-            case BadPixmap:
-                errorMessage = @"BadPixmap";
-                break;
-            case BadAtom:
-                errorMessage = @"BadAtom";
-                break;
-            case BadCursor:
-                errorMessage = @"BadCursor";
-                break;
-            case BadFont:
-                errorMessage = @"BadFont";
-                break;
-            case BadMatch:
-                errorMessage = @"BadMatch";
-                break;
-            case BadDrawable:
-                errorMessage = @"BadDreawable";
-                break;
-            case BadAccess:
-                errorMessage = @"BadAccess";
-                break;
-            case BadAlloc:
-                errorMessage = @"BadAlloc";
-                break;
-            case BadColor:
-                errorMessage = @"BadColor";
-                break;
-            case BadGC:
-                errorMessage = @"BadGC";
-                break;
-            case BadIDChoice:
-                errorMessage = @"BadIDChoice";
-                break;
-            case BadName:
-                errorMessage = @"BadName";
-                break;
-            case BadLength:
-                errorMessage = @"BadLength";
-                break;
-            case BadImplementation:
-                errorMessage = @"BadImplementation";
-                break;
-                
-            default:
-                break;
-        }
-        NSLog(@"Error: %@", errorMessage);
-    }
-    
-    //if (!isError)
-    //    NSLog(@"Reply address: %ld", (long)&reply);
-    
+    // Intentionally silent.  BadWindow/BadDrawable errors are expected and
+    // common while a window is being destroyed; logging them only produced
+    // noise (e.g. "Error: BadWindow") on every window close.
 }
 
 - (void) dealloc
