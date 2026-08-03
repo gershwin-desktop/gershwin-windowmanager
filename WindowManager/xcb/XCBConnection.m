@@ -394,6 +394,24 @@ static XCBConnection *sharedInstance;
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
     NSString *dockType = [ewmhService EWMHWMWindowTypeDock];
 
+    // PID of the currently focused application.  Auxiliary and transient
+    // windows (dialogs, tooltips, notifications, menus) must stay above their
+    // OWN application's windows, but must never be raised above a window of a
+    // different application that the user just focused.  Without this guard a
+    // leftover tooltip/notification/dialog from an unfocused app would pop on
+    // top of the active window for no apparent reason whenever any window is
+    // raised.
+    uint32_t fpid = 0;
+    {
+        xcb_get_input_focus_cookie_t focC = xcb_get_input_focus(connection);
+        xcb_get_input_focus_reply_t *focR = xcb_get_input_focus_reply(connection, focC, NULL);
+        if (focR) {
+            XCBWindow *fw = [self windowForXCBId:focR->focus];
+            free(focR);
+            if (fw) fpid = [fw pid];
+        }
+    }
+
     for (XCBWindow *aWindow in [windowsMap allValues])
     {
         if ([[aWindow windowType] isEqualToString:dockType])
@@ -435,14 +453,6 @@ static XCBConnection *sharedInstance;
     // All undecorated (auxiliary) windows of the focused application must
     // stay above their parent after any restack operation.  Broad check:
     // any window with the same PID that is not itself an XCBFrame.
-    uint32_t fpid = 0;
-    xcb_get_input_focus_cookie_t focC = xcb_get_input_focus(connection);
-    xcb_get_input_focus_reply_t *focR = xcb_get_input_focus_reply(connection, focC, NULL);
-    if (focR) {
-        XCBWindow *fw = [self windowForXCBId:focR->focus];
-        free(focR);
-        if (fw) fpid = [fw pid];
-    }
     if (fpid > 0) {
         for (XCBWindow *aWindow in [windowsMap allValues]) {
             if ([aWindow pid] != fpid) continue;
@@ -454,7 +464,9 @@ static XCBConnection *sharedInstance;
     }
 
     // Transient popup windows (dialog, tooltip, notification, utility, splash)
-    // must stay above the dock so they are always visible.
+    // must stay above the dock so they are always visible.  Only transients of
+    // the focused application are raised; transients belonging to other apps
+    // must not cover the window the user is working with.
     {
         NSSet<NSString *> *transientTypes = [NSSet setWithObjects:
             [ewmhService EWMHWMWindowTypeDialog],
@@ -465,9 +477,13 @@ static XCBConnection *sharedInstance;
             nil];
         [self flush];
         for (XCBWindow *aWindow in [windowsMap allValues]) {
-            if ([transientTypes containsObject:[aWindow windowType]]) {
-                [aWindow stackAbove];
-            }
+            if (![transientTypes containsObject:[aWindow windowType]]) continue;
+            if (fpid == 0 || [aWindow pid] != fpid) continue;
+            // Decorated transients already live inside a managed frame; there
+            // is nothing to raise at the root level.
+            if ([aWindow parentWindow] &&
+                [[aWindow parentWindow] isKindOfClass:[XCBFrame class]]) continue;
+            [aWindow stackAbove];
         }
         [self flush];
     }
@@ -1549,6 +1565,9 @@ static XCBConnection *sharedInstance;
         [window updateRectsFromGeometries];
         [window setFirstRun:YES];
         [window setWindowType:name];
+        // Record _NET_WM_PID so z-order/restack logic can tell which windows
+        // belong to the focused application (see restackDockWindowsAbove).
+        [window updatePid];
         // windowTypeReply already freed above if it was non-NULL
         name = nil;
     }
