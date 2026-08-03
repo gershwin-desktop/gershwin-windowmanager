@@ -3193,16 +3193,17 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         t = URSClampDouble(t, 0.0, 1.0);
         BOOL wasMinimize = cw.animatingMinimize;
         BOOL isShrink = cw.animatingShrink;
-        BOOL isBirthAnimation = !wasMinimize && !isShrink;
 
         // Determine ease curve per PRD:
-        // - Birth/unminimize: cubic ease-out f(t)=1-(1-t)^3  — fast start, gradual finish
         // - Minimize: smoothstep f(t)=t²(3-2t)               — symmetric ease-in-out
+        // - Everything else (birth, restore, maximize, shrink/unmaximize):
+        //   cubic ease-out f(t)=1-(1-t)^3.  Shrink is the exact reverse of
+        //   maximize, so it shares maximize's curve.
         double ease;
-        if (isBirthAnimation) {
-            ease = URSEaseOutCubic(t);
-        } else {
+        if (wasMinimize) {
             ease = URSEaseSmooth(t);
+        } else {
+            ease = URSEaseOutCubic(t);
         }
 
         // Log the first frame of animation to help debugging (not spammy)
@@ -3219,38 +3220,6 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         double endW = fmax(1.0, (double)cw.animationEndRect.size.width);
         double endH = fmax(1.0, (double)cw.animationEndRect.size.height);
 
-        // Always preserve the aspect ratio of the actual WINDOW throughout
-        // the animation, regardless of the source rect (icon, or the
-        // _GSWORKSPACE_WINDOW_BIRTH atom rect, which may have any aspect).
-        // For opens (birth/restore) the window is the end rect; for minimize
-        // and shrink (unmaximize) the window is the start rect.  Using
-        // max(start,end) per axis would distort the shape whenever the source
-        // rect is larger than the window in one dimension.
-        double naturalW, naturalH;
-        if (wasMinimize || isShrink) {
-            naturalW = startW;
-            naturalH = startH;
-        } else {
-            naturalW = endW;
-            naturalH = endH;
-        }
-        double rawW = startW + (endW - startW) * ease;
-        double rawH = startH + (endH - startH) * ease;
-        double scaleFromNaturalW = rawW / naturalW;
-        double scaleFromNaturalH = rawH / naturalH;
-        // Window opens must GROW (start small, end at full size), so pick the
-        // SMALLER of the two per-axis ratios — the largest uniform scale that
-        // still fits within the source rect while keeping the window's aspect.
-        // fmax would make the window start larger than its final size (and
-        // therefore appear to shrink) whenever the birth source rect is wider
-        // or taller than the new window.
-        double uniformScale = fmin(scaleFromNaturalW, scaleFromNaturalH);
-        uniformScale = fmax(0.01, uniformScale);   // never smaller than 1%
-        uniformScale = fmin(1.0, uniformScale);    // never larger than the window
-
-        double currentW = naturalW * uniformScale;
-        double currentH = naturalH * uniformScale;
-
         double startCenterX = cw.animationStartRect.position.x + (startW * 0.5);
         double endCenterX = cw.animationEndRect.position.x + (endW * 0.5);
         double currentCenterX = startCenterX + (endCenterX - startCenterX) * ease;
@@ -3258,6 +3227,49 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         double startBottom = cw.animationStartRect.position.y + startH;
         double endBottom = cw.animationEndRect.position.y + endH;
         double currentBottom = startBottom + (endBottom - startBottom) * ease;
+
+        double currentW, currentH;
+
+        if (isShrink) {
+            // Shrink (unmaximize) is the exact reverse of maximize: move the
+            // rect linearly from start (maximized) to end (restored) so it
+            // lands precisely on the target.  Using the aspect-preserving
+            // scale below would stop at the wrong size whenever the maximized
+            // and restored rects have different aspects, then snap/jump to the
+            // final rect when the animation ends.
+            currentW = startW + (endW - startW) * ease;
+            currentH = startH + (endH - startH) * ease;
+        } else {
+            // Always preserve the aspect ratio of the actual WINDOW throughout
+            // the animation, regardless of the source rect (icon, or the
+            // _GSWORKSPACE_WINDOW_BIRTH atom rect, which may have any aspect).
+            // For opens (birth/restore) the window is the end rect; for minimize
+            // the window is the start rect.  Using max(start,end) per axis
+            // would distort the shape whenever the source rect is larger than
+            // the window in one dimension.
+            double naturalW, naturalH;
+            if (wasMinimize) {
+                naturalW = startW;
+                naturalH = startH;
+            } else {
+                naturalW = endW;
+                naturalH = endH;
+            }
+            double rawW = startW + (endW - startW) * ease;
+            double rawH = startH + (endH - startH) * ease;
+            double scaleFromNaturalW = rawW / naturalW;
+            double scaleFromNaturalH = rawH / naturalH;
+            // Always scale the picture uniformly, preserving the window's
+            // natural aspect, and never exceed the window's own size.  For
+            // opens (birth, maximize) this makes the window grow to fill; for
+            // minimize it makes the window close in on the icon.
+            double uniformScale = fmin(scaleFromNaturalW, scaleFromNaturalH);
+            uniformScale = fmax(0.01, uniformScale);   // never smaller than 1%
+            uniformScale = fmin(1.0, uniformScale);    // never larger than the window
+
+            currentW = naturalW * uniformScale;
+            currentH = naturalH * uniformScale;
+        }
 
         destW = fmax(1.0, currentW);
         destH = fmax(1.0, currentH);
