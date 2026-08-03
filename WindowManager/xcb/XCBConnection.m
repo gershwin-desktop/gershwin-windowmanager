@@ -836,7 +836,7 @@ static XCBConnection *sharedInstance;
 
 // Fade in and grow slightly for a window that was just mapped.
 // Desktop windows and windows adopted at startup are skipped.
-// If the client carries a _GSWORKSPACE_WINDOW_BIRTH property (set by the
+// If the client carries a _WINDOW_BIRTH property (set by the
 // Workspace app), animate from that source rect instead of the default 90%
 // grow, and honour its animation type (type 1 = NoAnimation).
 - (void)animateMappedWindow:(xcb_window_t)frameId
@@ -871,22 +871,23 @@ static XCBConnection *sharedInstance;
         }
     }
 
-    // Read _GSWORKSPACE_WINDOW_BIRTH (source rect + animation type) from the
+    // Read _WINDOW_BIRTH (source rect + animation type) from the
     // client window, if present.  Layout: 9 x int32 = src(x,y,w,h), dst(x,y,w,h),
     // animationType.  animationType == 1 means "NoAnimation" (suppress).
     XCBRect startRect = XCBInvalidRect;
     NSTimeInterval duration = 0.22;
     BOOL suppressAnimation = NO;
+    BOOL foundBirthAtom = NO; 
 
     if (clientId != XCB_NONE)
     {
         XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
-        xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_GSWORKSPACE_WINDOW_BIRTH"];
+        xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_WINDOW_BIRTH"];
         if (birthAtom != XCB_NONE)
         {
             xcb_get_property_cookie_t cookie = xcb_get_property([self connection], 0, clientId,
                                                                   birthAtom, XCB_ATOM_CARDINAL, 0,
-                                                                  GSWORKSPACE_WINDOW_BIRTH_NUM_INTS);
+                                                                  WINDOW_BIRTH_NUM_INTS);
             xcb_generic_error_t *birthError = NULL;
             xcb_get_property_reply_t *reply = xcb_get_property_reply([self connection], cookie, &birthError);
             if (birthError) { free(birthError); reply = NULL; }
@@ -894,10 +895,11 @@ static XCBConnection *sharedInstance;
             if (reply)
             {
                 int len = xcb_get_property_value_length(reply);
-                if (len == GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN)
+                if (len == WINDOW_BIRTH_BYTE_LEN)
                 {
+                    foundBirthAtom = YES;
                     int32_t *data = (int32_t *)xcb_get_property_value(reply);
-                    int32_t animType = data[GSWORKSPACE_BIRTH_IDX_ANIM_TYPE];
+                    int32_t animType = data[WINDOW_BIRTH_IDX_ANIM_TYPE];
 
                     if (animType == 1)
                     {
@@ -905,10 +907,10 @@ static XCBConnection *sharedInstance;
                     }
                     else
                     {
-                        startRect.position.x = data[GSWORKSPACE_BIRTH_IDX_SRC_X];
-                        startRect.position.y = data[GSWORKSPACE_BIRTH_IDX_SRC_Y];
-                        startRect.size.width = data[GSWORKSPACE_BIRTH_IDX_SRC_W];
-                        startRect.size.height = data[GSWORKSPACE_BIRTH_IDX_SRC_H];
+                        startRect.position.x = data[WINDOW_BIRTH_IDX_SRC_X];
+                        startRect.position.y = data[WINDOW_BIRTH_IDX_SRC_Y];
+                        startRect.size.width = data[WINDOW_BIRTH_IDX_SRC_W];
+                        startRect.size.height = data[WINDOW_BIRTH_IDX_SRC_H];
                         // Expanding from a source rect is a longer, more
                         // deliberate effect than the default 90% grow.
                         duration = 0.8;
@@ -924,6 +926,33 @@ static XCBConnection *sharedInstance;
     if (suppressAnimation)
     {
         return;
+    }
+
+    // Workspace is the producer of the birth-atom protocol.  Every Workspace
+    // window that is mapped should carry a _WINDOW_BIRTH property
+    // describing where it should grow from.  If a Workspace window is missing
+    // it, the producer side is broken (e.g. the atom was only written for
+    // icon-driven folder opens, or not written at all on non-Linux builds) -
+    // warn so it can be fixed.
+    if (!foundBirthAtom)
+    {
+        XCBWindow *frame = [self windowForXCBId:frameId];
+        XCBWindow *client = nil;
+        if (frame && [frame isKindOfClass:[XCBFrame class]]) {
+            client = [(XCBFrame *)frame childWindowForKey:ClientWindow];
+        }
+        if (client && [[client windowClass] count] >= 2)
+        {
+            NSString *cls = [[client windowClass] objectAtIndex:0];
+            if ([cls isEqualToString:@"Workspace"])
+            {
+                NSLog(@"WARNING: Workspace window 0x%x (\"%@\") mapped without "
+                      @"_WINDOW_BIRTH atom - birth animation "
+                      @"source rect missing",
+                      clientId,
+                      [[client windowClass] objectAtIndex:1]);
+            }
+        }
     }
 
     // If no valid birth source rect, grow from 90% of the final size,
