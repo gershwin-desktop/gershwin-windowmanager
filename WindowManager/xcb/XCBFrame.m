@@ -400,6 +400,15 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     [connection reparentWindow:clientWindow toWindow:self position:position];
+
+    // Add the client to the WM's save-set (ICCCM §4.1.4).  If the window
+    // manager connection dies — even via SIGKILL — the X server automatically
+    // reparents every save-set window back to the root (preserving stacking
+    // and position) before destroying the WM-created frame windows.  Without
+    // this, killing the WM destroys the frames AND the reparented clients with
+    // them, losing windows.
+    xcb_change_save_set([connection connection], XCB_SET_MODE_INSERT, [clientWindow window]);
+
     [connection mapWindow:clientWindow];
     uint32_t border[] = {0};
     // Ensure no borders on frame window

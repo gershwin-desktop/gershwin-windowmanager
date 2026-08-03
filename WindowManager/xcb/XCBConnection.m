@@ -3596,6 +3596,11 @@ static XCBConnection *sharedInstance;
         [self unregisterWindow:[titleBarWindow minimizeWindowButton]];
         [self unregisterWindow:[titleBarWindow maximizeWindowButton]];
         [self unregisterWindow:titleBarWindow];
+        // Client is going away for good: remove it from the save-set so the
+        // X server no longer reparents it if this WM later dies.
+        if (clientWindow != nil) {
+            xcb_change_save_set([self connection], XCB_SET_MODE_DELETE, [clientWindow window]);
+        }
         [self unregisterWindow:clientWindow];
         [[frameWindow getChildren] removeAllObjects];
         [frameWindow destroy];
