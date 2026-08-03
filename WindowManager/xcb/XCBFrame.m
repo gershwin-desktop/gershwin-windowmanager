@@ -989,10 +989,11 @@ void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
     [clientWindow setWindowRect:clientRect];
     [clientWindow setOriginalRect:clientRect];
 
-    // Send synthetic ConfigureNotify to client
+    // Send synthetic ConfigureNotify to client.  Coordinates must be in
+    // ROOT space (ICCCM), i.e. frame origin + client offset inside the frame.
     sendSyntheticConfigureNotify(connection, clientWindow,
-                                  cb,
-                                  [frame titleHeight],
+                                  frameRect.position.x + cb,
+                                  frameRect.position.y + [frame titleHeight],
                                   clientRect.size.width,
                                   clientRect.size.height);
 
@@ -1483,10 +1484,16 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     [clientWindow setWindowRect:clientRect];
     [clientWindow setOriginalRect:clientRect];
 
-    // Send synthetic ConfigureNotify with the calculated dimensions
+    // Send synthetic ConfigureNotify with the calculated dimensions.
+    // Coordinates must be in ROOT space (ICCCM): the client's absolute
+    // position is the frame's origin plus its offset inside the frame.
+    // Using client-relative coords here makes GNUstep believe the window
+    // sits near the top-left of the screen (it interprets synthetic event
+    // coords as root coords), and it would then remember that wrong frame
+    // and restore it after close+reopen.
     sendSyntheticConfigureNotify(conn, clientWindow,
-                                  clientRect.position.x,
-                                  clientRect.position.y,
+                                  targetRect.position.x + clientRect.position.x,
+                                  targetRect.position.y + clientRect.position.y,
                                   clientRect.size.width,
                                   clientRect.size.height);
 

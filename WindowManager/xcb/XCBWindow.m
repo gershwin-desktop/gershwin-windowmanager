@@ -727,9 +727,14 @@
     XCBWindow *rootWindow = [[self onScreen] rootWindow];
     XCBFrame *frame;
 
-    // oldRect is only valid if it was saved during maximize.  Minimize never
-    // saves to oldRect, so fall back to the current windowRect when invalid.
-    if (!FnCheckXCBRectIsValid(oldRect)) {
+    // The window's own rect (windowRect) is preserved through minimize; it is
+    // the maximized rect when the window was maximized before minimizing, or
+    // the normal rect otherwise.  oldRect is the PRE-maximize rect saved only
+    // by maximizeToSize:, so it must not be used here: restoring a maximized
+    // window from its icon would shrink it back to the pre-maximize size.
+    // Minimize never saves to oldRect, so oldRect may even be invalid.
+    if (!FnCheckXCBRectIsValid(windowRect) ||
+        windowRect.size.width == 0 || windowRect.size.height == 0) {
         [self setNormalState];
         return;
     }
@@ -737,10 +742,8 @@
     if ([[frame parentWindow] window] != [rootWindow window])
     {
         frame = (XCBFrame*)self;
-        [connection reparentWindow:frame toWindow:rootWindow position:oldRect.position];
+        [connection reparentWindow:frame toWindow:rootWindow position:windowRect.position];
     }
-
-    windowRect = oldRect;
 
     XCBPoint position = windowRect.position;
     XCBSize size = windowRect.size;
@@ -759,8 +762,8 @@
         XCBTitleBar *titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar];
         XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
 
-        [titleBar setWindowRect:[titleBar oldRect]];
-        [clientWindow setWindowRect:[clientWindow oldRect]];
+        [titleBar setWindowRect:[titleBar windowRect]];
+        [clientWindow setWindowRect:[clientWindow windowRect]];
         [connection mapWindow:titleBar];
 
         [titleBar drawTitleBarComponents];

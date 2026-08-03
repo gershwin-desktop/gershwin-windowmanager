@@ -45,12 +45,28 @@
                                                     toRect:(XCBRect)endRect
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade;
+- (void)animateWindowTransition:(xcb_window_t)windowId
+                                                fromRect:(XCBRect)startRect
+                                                    toRect:(XCBRect)endRect
+                                                duration:(NSTimeInterval)duration
+                                                        fade:(BOOL)fade
+                                                 completion:(dispatch_block_t)completion;
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration;
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration
+                 completion:(dispatch_block_t)completion;
 + (void)animateZoomRectsFromRect:(XCBRect)startRect
                           toRect:(XCBRect)endRect
                       connection:(XCBConnection *)connection
                           screen:(xcb_screen_t *)screen
                         duration:(NSTimeInterval)duration;
 - (void)setSkipShadowForWindow:(xcb_window_t)windowId;
+- (void)invalidateWindowPixmap:(xcb_window_t)windowId;
 - (void)markStackingOrderDirty;
 @end
 
@@ -837,11 +853,14 @@ static XCBConnection *sharedInstance;
 // Fade in and grow slightly for a window that was just mapped.
 // Desktop windows and windows adopted at startup are skipped.
 // If the client carries a _WINDOW_BIRTH property (set by the
-// Workspace app), animate from that source rect instead of the default 90%
-// grow, and honour its animation type (type 1 = NoAnimation).
+// Workspace app) and the window is brand new, animate from that source rect
+// instead of the default 90% grow, and honour its animation type
+// (type 1 = NoAnimation).  The birth rect only describes NEW windows; a
+// re-mapped (e.g. unminimized) window must not use it.
 - (void)animateMappedWindow:(xcb_window_t)frameId
                    clientId:(xcb_window_t)clientId
                  windowRect:(XCBRect)windowRect
+                  newWindow:(BOOL)newWindow
 {
     if (self.adoptingExistingWindows)
     {
@@ -874,12 +893,13 @@ static XCBConnection *sharedInstance;
     // Read _WINDOW_BIRTH (source rect + animation type) from the
     // client window, if present.  Layout: 9 x int32 = src(x,y,w,h), dst(x,y,w,h),
     // animationType.  animationType == 1 means "NoAnimation" (suppress).
+    // Only brand-new windows may use the birth rect.
     XCBRect startRect = XCBInvalidRect;
     NSTimeInterval duration = 0.22;
     BOOL suppressAnimation = NO;
-    BOOL foundBirthAtom = NO; 
+    BOOL foundBirthAtom = NO;
 
-    if (clientId != XCB_NONE)
+    if (newWindow && clientId != XCB_NONE)
     {
         XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
         xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_WINDOW_BIRTH"];
@@ -911,9 +931,9 @@ static XCBConnection *sharedInstance;
                         startRect.position.y = data[WINDOW_BIRTH_IDX_SRC_Y];
                         startRect.size.width = data[WINDOW_BIRTH_IDX_SRC_W];
                         startRect.size.height = data[WINDOW_BIRTH_IDX_SRC_H];
-                        // Expanding from a source rect is a longer, more
-                        // deliberate effect than the default 90% grow.
-                        duration = 0.8;
+                        // Expanding from a source rect is a more deliberate
+                        // effect than the default 90% grow.
+                        duration = 0.4;
                     }
                 }
                 // Delete the property so it doesn't persist past birth.
@@ -1169,9 +1189,11 @@ static XCBConnection *sharedInstance;
                 [self mapWindow:window];
 
                 // Fade in + grow slightly whenever a window is (re)shown.
+                // This is a re-map (e.g. unminimize/unmaximize), so no birth rect.
                 [self animateMappedWindow:[frame window]
                                  clientId:[window window]
-                               windowRect:[frame windowRect]];
+                               windowRect:[frame windowRect]
+                                newWindow:NO];
             }
         }
         else
@@ -1901,9 +1923,11 @@ static XCBConnection *sharedInstance;
     [frame configureClient];
 
     // Fade in + grow slightly for the newly created window.
+    // Brand-new window: the birth rect may apply.
     [self animateMappedWindow:[frame window]
                      clientId:[window window]
-                   windowRect:[frame windowRect]];
+                   windowRect:[frame windowRect]
+                    newWindow:YES];
 
     [self setNeedFlush:YES];
     window = nil;
@@ -2347,29 +2371,47 @@ static XCBConnection *sharedInstance;
             XCBRect startRect = [frame windowRect];
             XCBRect restoredRect = [frame oldRect];  // Get saved pre-maximize rect
 
-            // Use programmatic resize that follows the same code path as manual resize
-            [frame programmaticResizeToRect:restoredRect];
-            [frame setFullScreen:NO];
-            [titleBar setFullScreen:NO];
-            [clientWindow setFullScreen:NO];
-            [frame setIsMaximized:NO];
-            [frame updateAllResizeZonePositions];
-            [frame applyRoundedCornersShapeMask];
+            // Animate the shrink from the current (maximized) rect to the
+            // restored rect while the window is still at its old position,
+            // then actually move/resize the real window when the animation
+            // finishes.  Resizing first would capture the picture at the new
+            // (restored) size and the animation would scale the wrong content.
+            Class compositorClass = NSClassFromString(@"URSCompositingManager");
+            id<URSCompositingManaging> compositor = nil;
+            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+                compositor = [compositorClass performSelector:@selector(sharedManager)];
+            }
 
-            {
-                Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                id<URSCompositingManaging> compositor = nil;
-                if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                    compositor = [compositorClass performSelector:@selector(sharedManager)];
-                }
+            if (compositor && [compositor compositingActive] &&
+                [compositor respondsToSelector:@selector(animateWindowShrink:fromRect:toRect:duration:completion:)]) {
+                [compositor animateWindowShrink:[frame window]
+                                       fromRect:startRect
+                                         toRect:restoredRect
+                                       duration:0.22
+                                     completion:^{
+                    [frame programmaticResizeToRect:restoredRect];
+                    [frame setFullScreen:NO];
+                    [titleBar setFullScreen:NO];
+                    [clientWindow setFullScreen:NO];
+                    [frame setIsMaximized:NO];
+                    [frame updateAllResizeZonePositions];
+                    [frame applyRoundedCornersShapeMask];
+                    if (compositor && [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+                        [compositor invalidateWindowPixmap:[frame window]];
+                    }
+                }];
+            } else {
+                // Use programmatic resize that follows the same code path as manual resize
+                [frame programmaticResizeToRect:restoredRect];
+                [frame setFullScreen:NO];
+                [titleBar setFullScreen:NO];
+                [clientWindow setFullScreen:NO];
+                [frame setIsMaximized:NO];
+                [frame updateAllResizeZonePositions];
+                [frame applyRoundedCornersShapeMask];
                 if (compositor && [compositor compositingActive] &&
-                    [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
-                    XCBRect endRect = [frame windowRect];
-                    [compositor animateWindowTransition:[frame window]
-                                             fromRect:startRect
-                                               toRect:endRect
-                                             duration:0.22
-                                                 fade:NO];
+                    [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+                    [compositor invalidateWindowPixmap:[frame window]];
                 }
             }
 
@@ -2403,28 +2445,73 @@ static XCBConnection *sharedInstance;
         /*** Use programmatic resize that follows the same code path as manual resize ***/
         XCBRect targetRect = XCBMakeRect(XCBMakePoint(workareaX, workareaY),
                                           XCBMakeSize(workareaWidth, workareaHeight));
-        //NSLog(@"[Maximize] frame=%u startRect=(%d,%d %u x %u) target=(%d,%d %u x %u)", [frame window], (int)startRect.position.x, (int)startRect.position.y, (unsigned)startRect.size.width, (unsigned)startRect.size.height, (int)targetRect.position.x, (int)targetRect.position.y, (unsigned)targetRect.size.width, (unsigned)targetRect.size.height);
-        [frame programmaticResizeToRect:targetRect];
-        [frame setFullScreen:YES];
-        [frame setIsMaximized:YES];
-        [titleBar setFullScreen:YES];
-        [clientWindow setFullScreen:YES];
-        [titleBar drawTitleBarComponents];
 
-        {
-            Class compositorClass = NSClassFromString(@"URSCompositingManager");
-            id<URSCompositingManaging> compositor = nil;
-            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                compositor = [compositorClass performSelector:@selector(sharedManager)];
-            }
+        // Animate the grow from the current rect to the maximized rect while
+        // the window is still at its old position, then actually move/resize
+        // the real window when the animation finishes.
+        Class compositorClass = NSClassFromString(@"URSCompositingManager");
+        id<URSCompositingManaging> compositor = nil;
+        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+            compositor = [compositorClass performSelector:@selector(sharedManager)];
+        }
+
+        if (compositor && [compositor compositingActive] &&
+            [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:completion:)]) {
+            [compositor animateWindowTransition:[frame window]
+                                       fromRect:startRect
+                                         toRect:targetRect
+                                       duration:0.22
+                                           fade:NO
+                                     completion:^{
+                [frame programmaticResizeToRect:targetRect];
+                [frame setFullScreen:YES];
+                [frame setIsMaximized:YES];
+                [titleBar setFullScreen:YES];
+                [clientWindow setFullScreen:YES];
+                [titleBar drawTitleBarComponents];
+                [frame updateAllResizeZonePositions];
+                [frame applyRoundedCornersShapeMask];
+                if (compositor && [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+                    [compositor invalidateWindowPixmap:[frame window]];
+                }
+            }];
+        } else if (compositor && [compositor compositingActive] &&
+                   [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
+            // Fallback without a completion hook: animate, then resize shortly
+            // after so the picture is captured at the old rect.
+            [compositor animateWindowTransition:[frame window]
+                                       fromRect:startRect
+                                         toRect:targetRect
+                                       duration:0.22
+                                           fade:NO];
+            dispatch_block_t finishMaximize = ^{
+                [frame programmaticResizeToRect:targetRect];
+                [frame setFullScreen:YES];
+                [frame setIsMaximized:YES];
+                [titleBar setFullScreen:YES];
+                [clientWindow setFullScreen:YES];
+                [titleBar drawTitleBarComponents];
+                [frame updateAllResizeZonePositions];
+                [frame applyRoundedCornersShapeMask];
+                if (compositor && [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+                    [compositor invalidateWindowPixmap:[frame window]];
+                }
+            };
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(0.22 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), finishMaximize);
+        } else {
+            [frame programmaticResizeToRect:targetRect];
+            [frame setFullScreen:YES];
+            [frame setIsMaximized:YES];
+            [titleBar setFullScreen:YES];
+            [clientWindow setFullScreen:YES];
+            [titleBar drawTitleBarComponents];
+            [frame updateAllResizeZonePositions];
+            [frame applyRoundedCornersShapeMask];
             if (compositor && [compositor compositingActive] &&
-                [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
-                XCBRect endRect = [frame windowRect];
-                [compositor animateWindowTransition:[frame window]
-                                         fromRect:startRect
-                                           toRect:endRect
-                                         duration:0.22
-                                             fade:NO];
+                [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+                [compositor invalidateWindowPixmap:[frame window]];
             }
         }
         

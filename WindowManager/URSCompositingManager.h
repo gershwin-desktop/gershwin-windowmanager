@@ -63,6 +63,21 @@
                                                     toRect:(XCBRect)endRect
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade;
+- (void)animateWindowTransition:(xcb_window_t)windowId
+                                                fromRect:(XCBRect)startRect
+                                                    toRect:(XCBRect)endRect
+                                                duration:(NSTimeInterval)duration
+                                                        fade:(BOOL)fade
+                                                 completion:(dispatch_block_t)completion;
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration;
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration
+                 completion:(dispatch_block_t)completion;
 
 // Non-compositing zoom rect animation (outline-based, fast)
 + (void)animateZoomRectsFromRect:(XCBRect)startRect

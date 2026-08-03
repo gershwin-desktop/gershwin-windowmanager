@@ -77,6 +77,7 @@
 // Animation state
 @property (assign, nonatomic) BOOL animating;
 @property (assign, nonatomic) BOOL animatingMinimize;
+@property (assign, nonatomic) BOOL animatingShrink;
 @property (assign, nonatomic) BOOL animatingFade;
 @property (assign, nonatomic) NSTimeInterval animationStart;
 @property (assign, nonatomic) NSTimeInterval animationDuration;
@@ -114,6 +115,7 @@
         _mappedAt = 0;
         _animating = NO;
         _animatingMinimize = NO;
+        _animatingShrink = NO;
         _animatingFade = NO;
         _animationStart = 0;
         _animationDuration = 0;
@@ -2330,7 +2332,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     if (self.animationTimer || self.activeAnimations == 0) {
         return;
     }
-    self.animationTimer = [NSTimer scheduledTimerWithTimeInterval:0.033
+    self.animationTimer = [NSTimer scheduledTimerWithTimeInterval:0.016
                                                            target:self
                                                          selector:@selector(animationTimerFired:)
                                                          userInfo:nil
@@ -2381,12 +2383,12 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                      fromRect:(XCBRect)startRect
                        toRect:(XCBRect)endRect {
-        [self animateWindowTransition:windowId
-                                                 fromRect:startRect
-                                                     toRect:endRect
-                                                 duration:0.8
-                                                         fade:YES
-                                                minimizing:YES];
+    [self animateWindowTransition:windowId
+                         fromRect:startRect
+                           toRect:endRect
+                         duration:0.4
+                             fade:YES
+                    minimizing:YES];
 }
 
 - (void)animateWindowMinimize:(xcb_window_t)windowId
@@ -2410,12 +2412,38 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 - (void)animateWindowRestore:(xcb_window_t)windowId
                     fromRect:(XCBRect)startRect
                       toRect:(XCBRect)endRect {
-        [self animateWindowTransition:windowId
-                                                 fromRect:startRect
-                                                     toRect:endRect
-                                                 duration:0.8
-                                                         fade:YES
-                                                minimizing:NO];
+    [self animateWindowTransition:windowId
+                         fromRect:startRect
+                           toRect:endRect
+                         duration:0.4
+                             fade:YES
+                    minimizing:NO];
+}
+
+// Shrink (e.g. unmaximize) animation: the window's own (start) rect is the
+// natural size and it scales down to the end rect, without being hidden at
+// the end.  Completion fires from finishAnimationForWindow:.
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration {
+    [self animateWindowShrink:windowId fromRect:startRect toRect:endRect
+                     duration:duration completion:nil];
+}
+
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration
+                 completion:(dispatch_block_t)completion {
+    [self animateWindow:windowId
+               fromRect:startRect
+                 toRect:endRect
+            minimizing:NO
+                duration:duration
+                    fade:NO
+                  shrink:YES
+              completion:completion];
 }
 
 - (void)animateWindowTransition:(xcb_window_t)windowId
@@ -2436,8 +2464,21 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                                                     toRect:(XCBRect)endRect
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade
+                                                completion:(dispatch_block_t)completion {
+        [self animateWindow:windowId fromRect:startRect toRect:endRect
+                 minimizing:NO duration:duration fade:fade
+                     shrink:NO completion:completion];
+}
+
+- (void)animateWindowTransition:(xcb_window_t)windowId
+                                                fromRect:(XCBRect)startRect
+                                                    toRect:(XCBRect)endRect
+                                                duration:(NSTimeInterval)duration
+                                                        fade:(BOOL)fade
                                              minimizing:(BOOL)minimizing {
-        [self animateWindow:windowId fromRect:startRect toRect:endRect minimizing:minimizing duration:duration fade:fade];
+        [self animateWindow:windowId fromRect:startRect toRect:endRect
+                 minimizing:minimizing duration:duration fade:fade
+                     shrink:NO completion:nil];
 }
 
 - (void)animateWindow:(xcb_window_t)windowId
@@ -2445,7 +2486,9 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                              toRect:(XCBRect)endRect
                      minimizing:(BOOL)minimizing
                          duration:(NSTimeInterval)duration
-                                 fade:(BOOL)fade {
+                                 fade:(BOOL)fade
+                             shrink:(BOOL)shrink
+                         completion:(dispatch_block_t)completion {
     //NSLog(@"[Compositor] animateWindow called for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f fade=%d minimizing=%d compositingActive=%d",
           //windowId,
           //(int)startRect.position.x, (int)startRect.position.y, startRect.size.width, startRect.size.height,
@@ -2455,6 +2498,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     if (!self.compositingActive || windowId == XCB_NONE) {
         NSLog(@"[Compositor] animateWindow aborted: compositingActive=%d, windowId=%u",
               (int)self.compositingActive, windowId);
+        if (completion) completion();
         return;
     }
 
@@ -2466,6 +2510,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 
     if (!cw) {
         NSLog(@"[Compositor] animateWindow aborted: could not create composite window for %u", windowId);
+        if (completion) completion();
         return;
     }
 
@@ -2478,7 +2523,9 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     cw.animationDuration = duration;
     cw.animating = YES;
     cw.animatingMinimize = minimizing;
+    cw.animatingShrink = shrink;
     cw.animatingFade = fade;
+    cw.animationCompletion = completion;
 
     if (!wasAnimating) {
         self.activeAnimations += 1;
@@ -2500,6 +2547,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 
     cw.animating = NO;
     cw.animatingMinimize = NO;
+    cw.animatingShrink = NO;
     cw.animatingFade = NO;
     cw.animationStart = 0;
     cw.animationDuration = 0;
@@ -3144,7 +3192,8 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         double t = (now - cw.animationStart) / cw.animationDuration;
         t = URSClampDouble(t, 0.0, 1.0);
         BOOL wasMinimize = cw.animatingMinimize;
-        BOOL isBirthAnimation = !wasMinimize;
+        BOOL isShrink = cw.animatingShrink;
+        BOOL isBirthAnimation = !wasMinimize && !isShrink;
 
         // Determine ease curve per PRD:
         // - Birth/unminimize: cubic ease-out f(t)=1-(1-t)^3  — fast start, gradual finish
@@ -3174,11 +3223,11 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         // the animation, regardless of the source rect (icon, or the
         // _GSWORKSPACE_WINDOW_BIRTH atom rect, which may have any aspect).
         // For opens (birth/restore) the window is the end rect; for minimize
-        // the window is the start rect.  Using max(start,end) per axis would
-        // distort the shape whenever the source rect is larger than the
-        // window in one dimension.
+        // and shrink (unmaximize) the window is the start rect.  Using
+        // max(start,end) per axis would distort the shape whenever the source
+        // rect is larger than the window in one dimension.
         double naturalW, naturalH;
-        if (wasMinimize) {
+        if (wasMinimize || isShrink) {
             naturalW = startW;
             naturalH = startH;
         } else {
@@ -3332,10 +3381,11 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
                     alpha = 1.0 - (t * t);
                 } else {
                     // Window-open animation (map/birth): fade IN from fully
-                    // transparent with a quadratic ease-out so windows
-                    // materialize rather than just appearing.
+                    // transparent.  A cubic ease-out makes the window opaque
+                    // much sooner than the quadratic curve, so it reads as a
+                    // quick materialization rather than a lingering ghost.
                     double oneMinusT = 1.0 - t;
-                    alpha = 1.0 - (oneMinusT * oneMinusT);
+                    alpha = 1.0 - (oneMinusT * oneMinusT * oneMinusT);
                 }
                 alpha = URSClampDouble(alpha, 0.0, 1.0);
             }
