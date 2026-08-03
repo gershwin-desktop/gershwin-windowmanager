@@ -1,3 +1,9 @@
 obj/
 *.app
 tmp/
+tests.log
+tests.sum
+test_*.out
+test_*.err
+make-check.mak
+make-check.env
