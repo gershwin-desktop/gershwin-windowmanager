@@ -46,7 +46,7 @@ static const XCBRect XCBInvalidRect = {{0xffff, 0xffff}, {0xffff, 0xffff}};
 // The atom name is intentionally generic (no vendor prefix) so the
 // protocol could be standardized across desktops.
 
-#define WINDOW_BIRTH_ATOM "_WINDOW_BIRTH"
+#define WINDOW_BIRTH_ATOM "_WINDOW_BIRTH_ANIMATION"
 #define WINDOW_BIRTH_NUM_INTS 9
 #define WINDOW_BIRTH_BYTE_LEN (WINDOW_BIRTH_NUM_INTS * 4)
 
@@ -56,7 +56,7 @@ typedef NS_ENUM(int32_t, WindowBirthAnimationType) {
     WindowBirthAnimationNoAnimation = 1,  // Suppress animation (Reduce Motion)
 };
 
-// Layout of the 9 int32 values written to the _WINDOW_BIRTH property:
+// Layout of the 9 int32 values written to the _WINDOW_BIRTH_ANIMATION property:
 //   [0] = sourceX      [1] = sourceY      [2] = sourceWidth    [3] = sourceHeight
 //   [4] = targetX      [5] = targetY      [6] = targetWidth    [7] = targetHeight
 //   [8] = animationType
@@ -72,6 +72,16 @@ typedef NS_ENUM(int32_t, WindowBirthAnimationType) {
 #define WINDOW_BIRTH_IDX_DST_W 6
 #define WINDOW_BIRTH_IDX_DST_H 7
 #define WINDOW_BIRTH_IDX_ANIM_TYPE 8
+
+// Close animation protocol: the Workspace sends a _WINDOW_CLOSE_ANIMATION
+// client message (data32: [0]=animationType, [1..4]=target x,y,w,h in X11
+// root coords) while the window is still mapped.  The WM captures a snapshot,
+// then the client's UnmapNotify triggers the shrink/fade toward the target.
+typedef NS_ENUM(int32_t, WindowCloseAnimationType) {
+    WindowCloseAnimationShrinkToIcon = 0,  // Shrink+fade toward the folder icon
+    WindowCloseAnimationNoAnimation  = 1,  // Suppress animation (Reduce Motion)
+    WindowCloseAnimationFade         = 2,  // No target - plain fade
+};
 
 /*** Utility functions ***/
 

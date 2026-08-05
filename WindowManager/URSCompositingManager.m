@@ -57,6 +57,11 @@
 // the new (larger or smaller) frame instead of leaving a grey gap.
 @property (assign, nonatomic) uint16_t pictureWidth;
 @property (assign, nonatomic) uint16_t pictureHeight;
+// Frozen copy of the window's content taken at close-animation start.  The
+// live drawable picture (IncludeInferiors on the frame) loses the client
+// content the moment the app unmaps its window, so a close animation must
+// paint from this snapshot instead.  Freed with the picture in freeWindowData:.
+@property (assign, nonatomic) xcb_pixmap_t snapshotPixmap;
 // Cached geometry
 @property (assign, nonatomic) int16_t x;
 @property (assign, nonatomic) int16_t y;
@@ -79,6 +84,9 @@
 @property (assign, nonatomic) BOOL animatingMinimize;
 @property (assign, nonatomic) BOOL animatingShrink;
 @property (assign, nonatomic) BOOL animatingFade;
+/* Set while a window is closing: the picture must survive unmap/re-map so the
+ * shrink+fade animation renders from the captured frame. */
+@property (assign, nonatomic) BOOL closeAnimating;
 @property (assign, nonatomic) NSTimeInterval animationStart;
 @property (assign, nonatomic) NSTimeInterval animationDuration;
 @property (assign, nonatomic) XCBRect animationStartRect;
@@ -1453,6 +1461,13 @@
         cw.shadowPixmap = XCB_NONE;
     }
 
+    // Free the frozen close-animation snapshot (its picture is cw.picture,
+    // freed above).
+    if (cw.snapshotPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, cw.snapshotPixmap);
+        cw.snapshotPixmap = XCB_NONE;
+    }
+
     // Reset dimensions so windowExtents: falls through to the geometric
     // estimation block.  Without this, unionExtentsForCompositeWindows:
     // computes a bounding box from stale shadowWidth/Height even after
@@ -1666,6 +1681,14 @@
 
     xcb_connection_t *conn = [self.connection connection];
 
+    // Never invalidate the frozen snapshot of a close-animating window: the
+    // client is already unmapped, so recreating the picture from the live
+    // drawable would produce an empty frame (invisible animation).  The
+    // snapshot captured at prepare time is the only valid content left.
+    if (cw.closeAnimating) {
+        return;
+    }
+
     if (cw.picture != XCB_NONE) {
         xcb_render_free_picture(conn, cw.picture);
         cw.picture = XCB_NONE;
@@ -1843,9 +1866,11 @@
         }
 
         cw.damaged = NO;
-        // OPTIMIZATION: Force picture recreation on remap (window may have new content)
-        cw.pictureValid = NO;
-        cw.needsPictureCreation = YES;
+        if (!cw.closeAnimating) {
+            // OPTIMIZATION: Force picture recreation on remap (window may have new content)
+            cw.pictureValid = NO;
+            cw.needsPictureCreation = YES;
+        }
         // Create shadow for newly mapped window
         if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE) {
             [self createShadowForWindow:cw];
@@ -1890,14 +1915,17 @@
 
         cw.viewable = NO;
         cw.damaged = NO;
-        cw.pictureValid = NO;
-        cw.needsPictureCreation = YES;
 
         if (cw.animating) {
-            // Keep resources alive until animation completes
+            /* Keep resources AND the cached picture alive so a close/shrink
+             * animation can still render the last captured frame even though
+             * the client already unmapped the window. */
+            cw.pictureValid = YES;
             continue;
         }
 
+        cw.pictureValid = NO;
+        cw.needsPictureCreation = YES;
         [self freeWindowData:cw delete:NO];
     }
 
@@ -1996,6 +2024,13 @@
     // recreation of the picture to get fresh content.
     xcb_connection_t *conn = [self.connection connection];
 
+    // Never invalidate the frozen snapshot of a close-animating window (see
+    // invalidateWindowPixmap:): the client is already unmapped, so a fresh
+    // picture from the live drawable would be empty.
+    if (cw.closeAnimating) {
+        return;
+    }
+
     if (cw.picture != XCB_NONE) {
         xcb_render_free_picture(conn, cw.picture);
         cw.picture = XCB_NONE;
@@ -2069,6 +2104,14 @@
 
 - (void)repairWindow:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];
+
+    // Never invalidate the frozen snapshot of a close-animating window (see
+    // invalidateWindowPixmap:).  The client is already unmapped, so a fresh
+    // picture from the live drawable would be empty and the animation would
+    // paint nothing.
+    if (cw.closeAnimating) {
+        return;
+    }
 
     // Always use full window extents instead of the delta from
     // xcb_damage_subtract.  The X Damage extension may report a sub-rect
@@ -2391,6 +2434,27 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                     minimizing:YES];
 }
 
+/* Mark a window as close-animating so its compositor picture survives the
+ * unmap/re-map churn during the shrink+fade close animation. */
+- (void)setCloseAnimating:(BOOL)closeAnimating forWindow:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (cw) {
+        cw.closeAnimating = closeAnimating;
+    }
+}
+
+/* Capture the close-animation snapshot NOW, while the client is still mapped.
+ * Called from the Workspace close message (prepare phase); the animation itself
+ * is triggered later by the client's UnmapNotify.  Must be called before the
+ * unmap, or the frame's IncludeInferiors picture has already lost the client. */
+- (void)captureCloseSnapshotNowForWindow:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (cw) {
+        cw.closeAnimating = YES;
+        [self captureCloseSnapshotForWindow:cw];
+    }
+}
+
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                      fromRect:(XCBRect)startRect
                        toRect:(XCBRect)endRect
@@ -2517,6 +2581,10 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     BOOL wasAnimating = cw.animating;
 
+    /* The close snapshot was captured during the prepare phase (Workspace
+     * close message), while the client was still mapped.  It must NOT be
+     * re-captured here: by the time the UnmapNotify triggers the animation the
+     * client is already unmapped, so a fresh capture would lose the content. */
     cw.animationStartRect = startRect;
     cw.animationEndRect = endRect;
     cw.animationStart = now;
@@ -2531,8 +2599,16 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         self.activeAnimations += 1;
     }
 
-    cw.pictureValid = NO;
-    cw.needsPictureCreation = YES;
+    if (cw.closeAnimating) {
+        /* The close snapshot (captured above) already replaced cw.picture with
+         * a frozen copy; do not invalidate it, or paintWindow: would recreate
+         * the live drawable picture and lose the client content again. */
+        cw.pictureValid = YES;
+        cw.needsPictureCreation = NO;
+    } else {
+        cw.pictureValid = NO;
+        cw.needsPictureCreation = YES;
+    }
 
     [self startAnimationTimerIfNeeded];
     [self scheduleComposite];
@@ -2549,6 +2625,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     cw.animatingMinimize = NO;
     cw.animatingShrink = NO;
     cw.animatingFade = NO;
+    cw.closeAnimating = NO;
     cw.animationStart = 0;
     cw.animationDuration = 0;
     cw.animationStartRect = XCBInvalidRect;
@@ -2600,6 +2677,17 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     
     for (int i = 0; i < num_children; i++) {
         [self.windowStackingOrder addObject:@(children[i])];
+    }
+    
+    /* Keep close-animating windows in the paint list even if they are
+     * momentarily unmapped (the client's orderOut raced the re-map): the
+     * animation must still render to completion. */
+    for (NSNumber *key in self.cwindows) {
+        URSCompositeWindow *cw = self.cwindows[key];
+        if (cw && cw.animating && cw.closeAnimating
+            && ![self.windowStackingOrder containsObject:key]) {
+            [self.windowStackingOrder addObject:key];
+        }
     }
     
     free(tree_reply);
@@ -3242,13 +3330,18 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         } else {
             // Always preserve the aspect ratio of the actual WINDOW throughout
             // the animation, regardless of the source rect (icon, or the
-            // _GSWORKSPACE_WINDOW_BIRTH atom rect, which may have any aspect).
+            // _WINDOW_BIRTH_ANIMATION atom rect, which may have any aspect).
             // For opens (birth/restore) the window is the end rect; for minimize
             // the window is the start rect.  Using max(start,end) per axis
             // would distort the shape whenever the source rect is larger than
             // the window in one dimension.
             double naturalW, naturalH;
-            if (wasMinimize) {
+            if (wasMinimize || cw.closeAnimating) {
+                // Minimize AND close shrink FROM the window's natural size
+                // (the start rect) down to the icon.  Close is the exact
+                // reverse of birth: using end as natural would render the
+                // window at icon size from the very first frame, which reads
+                // as an instant vanish.
                 naturalW = startW;
                 naturalH = startH;
             } else {
@@ -3338,7 +3431,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     // OPTIMIZATION: Lazy picture creation - only create when first painting
     // NOTE: The underlying NameWindowPixmap is automatically updated by X server on damage
     // so we only need to recreate when pictureValid is false (size change, etc.)
-    if (!cw.pictureValid || cw.needsPictureCreation) {
+    if ((!cw.pictureValid || cw.needsPictureCreation) && !cw.closeAnimating) {
         if (cw.picture != XCB_NONE) {
             xcb_render_free_picture(conn, cw.picture);
             cw.picture = XCB_NONE;
@@ -3388,8 +3481,10 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 
             double alpha = 1.0;
             if (cw.animatingFade) {
-                if (cw.animatingMinimize) {
-                    // Minimize: fade OUT with quadratic ease-in
+                if (cw.animatingMinimize || cw.closeAnimating) {
+                    // Minimize/close: fade OUT (start opaque, end transparent).
+                    // Close must fade out, not in like birth, or the window
+                    // begins fully transparent and reads as an instant vanish.
                     alpha = 1.0 - (t * t);
                 } else {
                     // Window-open animation (map/birth): fade IN from fully
@@ -3496,6 +3591,81 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
 
 // Note: Child window painting is handled automatically by IncludeInferiors
 // No need for explicit recursive painting
+
+/* Freeze the window's current content (frame + client, via IncludeInferiors)
+ * into a fresh pixmap so a close animation can keep painting it after the app
+ * unmaps the client.  The picture created by getWindowPicture: is a live view
+ * of the frame drawable - once the client child unmaps, that picture loses the
+ * client content and the animation would render an empty frame.  Sets
+ * snapshotPixmap (freed in freeWindowData:) and replaces cw.picture with a
+ * picture on the snapshot. */
+- (void)captureCloseSnapshotForWindow:(URSCompositeWindow *)cw {
+    xcb_connection_t *conn = [self.connection connection];
+    if (!cw || cw.windowId == XCB_NONE || cw.depth == 0) {
+        return;
+    }
+
+    uint16_t snapW = cw.width + 2 * cw.borderWidth;
+    uint16_t snapH = cw.height + 2 * cw.borderWidth;
+    if (snapW == 0 || snapH == 0) {
+        return;
+    }
+
+    xcb_render_pictformat_t format = [self findVisualFormat:cw.visual];
+    if (format == XCB_NONE) {
+        format = [self findFormatForDepth:cw.depth];
+    }
+    if (format == XCB_NONE) {
+        return;
+    }
+
+    // Free any previous snapshot (a recycled frame must not leak the old pixmap).
+    if (cw.snapshotPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, cw.snapshotPixmap);
+        cw.snapshotPixmap = XCB_NONE;
+    }
+
+    cw.snapshotPixmap = xcb_generate_id(conn);
+    xcb_create_pixmap(conn, cw.depth, cw.snapshotPixmap, self.rootWindow, snapW, snapH);
+
+    // Composite the live window content (children included via IncludeInferiors)
+    // into the snapshot pixmap, then draw that onto the snapshot picture.  A
+    // plain copy_area from the frame drawable would only copy the frame's own
+    // pixels, omitting the client and titlebar children.
+    xcb_render_picture_t snapshotPicture = xcb_generate_id(conn);
+    xcb_render_create_picture(conn, snapshotPicture, cw.snapshotPixmap, format, 0, NULL);
+
+    xcb_render_picture_t livePicture = [self getWindowPicture:cw];
+    if (livePicture == XCB_NONE) {
+        xcb_render_free_picture(conn, snapshotPicture);
+        xcb_free_pixmap(conn, cw.snapshotPixmap);
+        cw.snapshotPixmap = XCB_NONE;
+        return;
+    }
+
+    xcb_render_composite(conn, XCB_RENDER_PICT_OP_SRC,
+                         livePicture, XCB_NONE, snapshotPicture,
+                         0, 0, 0, 0, 0, 0,
+                         snapW, snapH);
+    xcb_render_free_picture(conn, livePicture);
+    xcb_render_free_picture(conn, snapshotPicture);
+
+    // Replace the live picture with one on the frozen snapshot.
+    if (cw.picture != XCB_NONE) {
+        xcb_render_free_picture(conn, cw.picture);
+        cw.picture = XCB_NONE;
+    }
+    cw.picture = xcb_generate_id(conn);
+    uint32_t pa_mask = XCB_RENDER_CP_SUBWINDOW_MODE;
+    uint32_t pa_values[] = { XCB_SUBWINDOW_MODE_INCLUDE_INFERIORS };
+    xcb_render_create_picture(conn, cw.picture, cw.snapshotPixmap, format, pa_mask, pa_values);
+    const char *filter = "good";
+    xcb_render_set_picture_filter(conn, cw.picture, strlen(filter), filter, 0, NULL);
+    cw.pictureValid = YES;
+    cw.needsPictureCreation = NO;
+    cw.pictureWidth = snapW;
+    cw.pictureHeight = snapH;
+}
 
 - (xcb_render_picture_t)getWindowPicture:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];

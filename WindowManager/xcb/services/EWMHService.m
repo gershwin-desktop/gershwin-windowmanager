@@ -494,9 +494,21 @@
         EWMHWMActionClose,
         EWMHWMActionAbove,
         EWMHWMActionBelow,
+
+        // Gershwin window-animation protocol.  Advertising these atoms tells
+        // clients (Workspace) that this WM implements the spatial open/close
+        // animation protocol, so they set _WINDOW_BIRTH_ANIMATION and send
+        // _WINDOW_CLOSE_ANIMATION only when the WM actually consumes them.
+        @"_WINDOW_BIRTH_ANIMATION",
+        @"_WINDOW_CLOSE_ANIMATION",
     };
 
     NSArray *rootAtoms = [NSArray arrayWithObjects:rootProperties count:sizeof(rootProperties)/sizeof(NSString*)];
+
+    // Make sure the window-animation protocol atoms are interned so the
+    // _NET_SUPPORTED array below carries real atom ids (FnFromNSArrayAtomsToXcbAtomTArray
+    // only reads the cache; uncached names would map to 0).
+    [atomService cacheAtoms: @[ @"_WINDOW_BIRTH_ANIMATION", @"_WINDOW_CLOSE_ANIMATION" ]];
 
     xcb_atom_t atomsTransformed[[rootAtoms count]];
     FnFromNSArrayAtomsToXcbAtomTArray(rootAtoms, atomsTransformed, atomService);

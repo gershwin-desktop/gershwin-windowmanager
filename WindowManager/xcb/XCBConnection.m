@@ -30,6 +30,8 @@
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
 - (BOOL)compositingActive;
+- (void)setCloseAnimating:(BOOL)closeAnimating forWindow:(xcb_window_t)windowId;
+- (void)captureCloseSnapshotNowForWindow:(xcb_window_t)windowId;
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                                          fromRect:(XCBRect)startRect
                                              toRect:(XCBRect)endRect;
@@ -783,6 +785,40 @@ static XCBConnection *sharedInstance;
         free(reply);
     }
 
+    /* Close animation, unmap-driven: the Workspace close message (received
+     * before the app's orderOut) only PREPARES the animation - it captures a
+     * snapshot of the still-mapped window and stores the target rect.  The
+     * app's UnmapNotify IS the close event; it triggers the shrink/fade, like
+     * KDE fading every window on unmap.  Only windows carrying the close
+     * atom get the animation; everything else tears down immediately.
+     *
+     * Note: the frame itself is never unmapped by the app - only the client
+     * child is - so the frame stays viewable and in the paint list on its own;
+     * the compositor's closeAnimating keeps its picture alive. */
+    if (frameWindow && [frameWindow isKindOfClass:[XCBFrame class]])
+    {
+        XCBFrame *closeFrame = (XCBFrame *)frameWindow;
+        if (closeFrame.closeAnimating)
+        {
+            frameWindow = nil;
+            scr = nil;
+            ewmhService = nil;
+            rootWindow = nil;
+            return;
+        }
+        if (closeFrame.closeAnimationPrepared)
+        {
+            /* This UnmapNotify is the close event: start the shrink/fade now
+             * and defer the teardown until it completes. */
+            [self startCloseAnimationForFrame:closeFrame];
+            frameWindow = nil;
+            scr = nil;
+            ewmhService = nil;
+            rootWindow = nil;
+            return;
+        }
+    }
+
     if (frameWindow &&
         ![frameWindow isMinimized] &&
         [frameWindow window] != [[scr rootWindow] window])
@@ -852,11 +888,12 @@ static XCBConnection *sharedInstance;
 
 // Fade in and grow slightly for a window that was just mapped.
 // Desktop windows and windows adopted at startup are skipped.
-// If the client carries a _WINDOW_BIRTH property (set by the
-// Workspace app) and the window is brand new, animate from that source rect
+// If the client carries a _WINDOW_BIRTH_ANIMATION property (set by the
+// Workspace app) when it is mapped, animate from that source rect
 // instead of the default 90% grow, and honour its animation type
-// (type 1 = NoAnimation).  The birth rect only describes NEW windows; a
-// re-mapped (e.g. unminimized) window must not use it.
+// (type 1 = NoAnimation).  The property is present only when a folder was
+// opened; a re-mapped window without a fresh property (e.g. unminimized)
+// must not use it.
 - (void)animateMappedWindow:(xcb_window_t)frameId
                    clientId:(xcb_window_t)clientId
                  windowRect:(XCBRect)windowRect
@@ -890,19 +927,25 @@ static XCBConnection *sharedInstance;
         }
     }
 
-    // Read _WINDOW_BIRTH (source rect + animation type) from the
+    // Read _WINDOW_BIRTH_ANIMATION (source rect + animation type) from the
     // client window, if present.  Layout: 9 x int32 = src(x,y,w,h), dst(x,y,w,h),
     // animationType.  animationType == 1 means "NoAnimation" (suppress).
-    // Only brand-new windows may use the birth rect.
+    // Read the birth rect whenever a fresh _WINDOW_BIRTH_ANIMATION property is present.
+    // Workspace sets it only on a real folder open (never on unminimize), so
+    // gating on newWindow would make the birth animation fire only once per
+    // window: a reopened folder reuses the same X window id, and the re-map
+    // (newWindow:NO) would skip the freshly-set property.  The property is
+    // deleted below, so a plain re-map such as unminimize (no fresh property)
+    // still gets its own separate restore animation, not a birth.
     XCBRect startRect = XCBInvalidRect;
     NSTimeInterval duration = 0.22;
     BOOL suppressAnimation = NO;
     BOOL foundBirthAtom = NO;
 
-    if (newWindow && clientId != XCB_NONE)
+    if (clientId != XCB_NONE)
     {
         XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
-        xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_WINDOW_BIRTH"];
+        xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_WINDOW_BIRTH_ANIMATION"];
         if (birthAtom != XCB_NONE)
         {
             xcb_get_property_cookie_t cookie = xcb_get_property([self connection], 0, clientId,
@@ -949,7 +992,7 @@ static XCBConnection *sharedInstance;
     }
 
     // Workspace is the producer of the birth-atom protocol.  Every Workspace
-    // window that is mapped should carry a _WINDOW_BIRTH property
+    // window that is mapped should carry a _WINDOW_BIRTH_ANIMATION property
     // describing where it should grow from.  If a Workspace window is missing
     // it, the producer side is broken (e.g. the atom was only written for
     // icon-driven folder opens, or not written at all on non-Linux builds) -
@@ -967,7 +1010,7 @@ static XCBConnection *sharedInstance;
             if ([cls isEqualToString:@"Workspace"])
             {
                 NSLog(@"WARNING: Workspace window 0x%x (\"%@\") mapped without "
-                      @"_WINDOW_BIRTH atom - birth animation "
+                      @"_WINDOW_BIRTH_ANIMATION atom - birth animation "
                       @"source rect missing",
                       clientId,
                       [[client windowClass] objectAtIndex:1]);
@@ -1947,6 +1990,160 @@ static XCBConnection *sharedInstance;
     [self unmapWindow:window];
     [self setNeedFlush:YES];
     window = nil;
+}
+
+/* Finder-style close animation protocol.  The Workspace app sends a
+ * _WINDOW_CLOSE_ANIMATION client message from windowWillClose: while the
+ * window is still mapped.  data32: [0]=animationType, [1..4]=target x,y,w,h
+ * (X11 root coords).  This only PREPARES the animation (captures a snapshot of
+ * the still-mapped window and stores the target rect on the frame); the app's
+ * subsequent orderOut / UnmapNotify triggers the actual shrink+fade.  The
+ * message name is vendor-neutral (like the _WINDOW_BIRTH_ANIMATION atoms) so
+ * the protocol could be standardized. */
+- (void)prepareCloseAnimationForClient:(xcb_window_t)clientId
+                          animationType:(int32_t)animationType
+                             targetRect:(XCBRect)targetRect
+{
+    XCBWindow *window = [self windowForXCBId:clientId];
+    if (window == nil) {
+        return;
+    }
+    XCBWindow *frame = nil;
+    if ([[window parentWindow] isKindOfClass:[XCBFrame class]]) {
+        frame = (XCBFrame *)[window parentWindow];
+    } else {
+        return;
+    }
+
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    id<URSCompositingManaging> compositor = nil;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        compositor = [compositorClass performSelector:@selector(sharedManager)];
+    }
+    if (!compositor || ![compositor compositingActive]) {
+        // No compositor: nothing to animate; the app's own orderOut closes it.
+        return;
+    }
+
+    XCBWindow *target = (XCBWindow *)frame;
+    /* The animation runs on the FRAME (the compositor only paints top-level
+     * windows), so the snapshot and closeAnimating flag must target the frame,
+     * not the client - the client is unmapped before the animation starts and
+     * its picture would be empty anyway. */
+
+    /* Store the parameters and mark the frame so the client's UnmapNotify
+     * (the close event) starts the animation. */
+    [(XCBFrame *)frame setCloseAnimationType: animationType];
+    [(XCBFrame *)frame setCloseAnimationTargetRect: targetRect];
+    [(XCBFrame *)frame setCloseAnimationPrepared: YES];
+
+    /* Capture a snapshot of the still-mapped window NOW (the client has not
+     * been ordered out yet) and keep the frame's picture alive across the
+     * client's unmap.  The frame itself is never unmapped by the app - only
+     * the client child is - so the frame stays in the paint list and viewable
+     * while closeAnimating. */
+    if ([compositor respondsToSelector:@selector(captureCloseSnapshotNowForWindow:)]) {
+        [compositor captureCloseSnapshotNowForWindow:[target window]];
+    }
+}
+
+/* Trigger the shrink/fade close animation for a frame whose close message was
+ * prepared.  Called from handleUnMapNotify: when the client's UnmapNotify
+ * arrives - that event IS the window close.  The animation completion performs
+ * the frame teardown (reparent the already-unmapped client to root, undecorate,
+ * unregister, destroy the frame). */
+- (void)startCloseAnimationForFrame:(XCBFrame *)frame
+{
+    if (frame == nil) {
+        return;
+    }
+    XCBRect targetRect = [frame closeAnimationTargetRect];
+    int32_t animationType = [frame closeAnimationType];
+
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    id<URSCompositingManaging> compositor = nil;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        compositor = [compositorClass performSelector:@selector(sharedManager)];
+    }
+    if (!compositor || ![compositor compositingActive]) {
+        return;
+    }
+
+    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+    XCBWindow *titleBar = [frame childWindowForKey:TitleBar];
+    /* Animate the frame, not the client: the compositor only paints top-level
+     * windows (children of root), so animating the client's composite window
+     * would never advance (no paintWindow calls, no finishAnimation).  Birth
+     * and minimize animate the frame for the same reason. */
+    XCBWindow *target = (XCBWindow *)frame;
+    XCBRect startRect = [frame windowRect];
+
+    [frame setCloseAnimating: YES];
+    /* The frame itself is never unmapped by the app - only the client child
+     * is - so it stays in the paint list and viewable while closeAnimating. */
+    if ([compositor respondsToSelector:@selector(setCloseAnimating:forWindow:)]) {
+        [compositor setCloseAnimating:YES forWindow:[target window]];
+    }
+
+    dispatch_block_t hideWindows = ^{
+        /* Full close teardown, mirroring handleUnMapNotify: - reparent the
+         * already-unmapped client to the root, undecorate, unregister, and
+         * destroy the frame. */
+        if (frame != nil) {
+            [frame setCloseAnimating: NO];
+        }
+        if (clientWindow != nil) {
+            XCBWindow *rootWin = [[clientWindow queryTree] rootWindow];
+            [self reparentWindow:clientWindow toWindow:rootWin position:[frame windowRect].position];
+            [clientWindow setDecorated:NO];
+        }
+        if (frame != nil) {
+            [self unregisterWindow:frame];
+            [[frame getChildren] removeAllObjects];
+            [frame destroy];
+        }
+        if (titleBar != nil) {
+            [self unregisterWindow:titleBar];
+        }
+        if (clientWindow != nil) {
+            [self unregisterWindow:clientWindow];
+        }
+    };
+
+    if (animationType == WindowCloseAnimationShrinkToIcon
+        && FnCheckXCBRectIsValid(targetRect)
+        && targetRect.size.width > 0 && targetRect.size.height > 0) {
+        // Shrink+fade toward the folder icon's current position.
+        if ([compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:completion:)]) {
+            [compositor animateWindowTransition:[target window]
+                                       fromRect:startRect
+                                         toRect:targetRect
+                                       duration:0.40
+                                           fade:YES
+                                     completion:hideWindows];
+            return;
+        }
+    } else {
+        // Plain fade when no valid target is available.
+        XCBRect centerRect = startRect;
+        centerRect.position.x += centerRect.size.width / 4;
+        centerRect.position.y += centerRect.size.height / 4;
+        centerRect.size.width /= 2;
+        centerRect.size.height /= 2;
+        if ([compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:completion:)]) {
+            [compositor animateWindowTransition:[target window]
+                                       fromRect:startRect
+                                         toRect:centerRect
+                                       duration:0.40
+                                           fade:YES
+                                     completion:hideWindows];
+            return;
+        }
+    }
+
+    // No usable compositor transition method - clear the flag so the normal
+    // unmap teardown proceeds.
+    [frame setCloseAnimating: NO];
 }
 
 - (void)handleConfigureWindowRequest:(xcb_configure_request_event_t *)anEvent
@@ -3176,6 +3373,22 @@ static XCBConnection *sharedInstance;
     if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_BOTTOM_RIGHT"]) {
         //NSLog(@"[ClientMessage] Tile Bottom Right requested");
         [self tileActiveWindowToZone:SnapZoneBottomRight];
+        return;
+    }
+    if ([atomMessageName isEqualToString:@"_WINDOW_CLOSE_ANIMATION"]) {
+        // data32: [0]=animationType, [1..4]=target x,y,w,h (X11 root coords).
+        int32_t animType = (anEvent->format == 32 && anEvent->type != XCB_NONE)
+                           ? (int32_t)anEvent->data.data32[0] : WindowCloseAnimationFade;
+        XCBRect targetRect = XCBInvalidRect;
+        if (anEvent->format == 32) {
+            targetRect = XCBMakeRect(XCBMakePoint(anEvent->data.data32[1],
+                                                   anEvent->data.data32[2]),
+                                      XCBMakeSize(anEvent->data.data32[3],
+                                                   anEvent->data.data32[4]));
+        }
+        [self prepareCloseAnimationForClient:anEvent->window
+                               animationType:animType
+                                  targetRect:targetRect];
         return;
     }
 

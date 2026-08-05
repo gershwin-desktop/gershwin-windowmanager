@@ -52,6 +52,17 @@ typedef NS_ENUM(NSInteger, childrenMask)
 @property (nonatomic, assign) BOOL bottomBorderClicked;
 @property (nonatomic, assign) BOOL leftBorderClicked;
 @property (nonatomic, assign) BOOL topBorderClicked;
+/* Set while a close animation is in flight; handleUnMapNotify: skips the
+ * frame teardown until the animation completes (so the compositor can render
+ * the shrink/fade over the still-mapped window). */
+@property (nonatomic, assign) BOOL closeAnimating;
+/* Close-animation parameters carried from the Workspace close message until
+ * the client's UnmapNotify starts the animation.  The message only prepares
+ * (captures a snapshot while the client is still mapped); the unmap event is
+ * what triggers the shrink/fade, mirroring how KDE fades windows on unmap. */
+@property (nonatomic, assign) int32_t closeAnimationType;
+@property (nonatomic, assign) XCBRect closeAnimationTargetRect;
+@property (nonatomic, assign) BOOL closeAnimationPrepared;
 @property (nonatomic, assign) XCBPoint offset;
 
 - (id) initWithClientWindow:(XCBWindow*) aClientWindow withConnection:(XCBConnection*) aConnection;
