@@ -1376,11 +1376,19 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 {
     xcb_configure_notify_event_t event;
     XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
-    // Use cached in-memory rects — no blocking xcb_get_geometry round-trip.
+    // Use the frame's cached rect to derive the client geometry instead of the
+    // client's own cache: configureForEvent: resizes the client (and flushes)
+    // but never updates the client's cached rect, so reading the stale cache
+    // here would send a synthetic ConfigureNotify describing the pre-resize
+    // size.  The client (GNUstep) processes that as the final geometry and its
+    // tracked frame ends up desynced from the real window.
     XCBRect rect = [self windowRect];
-    XCBRect clientRect = [clientWindow windowRect];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+
+    XCBRect clientRect = XCBMakeRect(XCBMakePoint(self.clientBorder, height),
+                                     XCBMakeSize(rect.size.width - 2 * self.clientBorder,
+                                                 rect.size.height - height - self.clientBorder));
 
     /*** synthetic event: coordinates must be in root space. ***/
 
