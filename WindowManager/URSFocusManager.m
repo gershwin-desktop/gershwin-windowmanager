@@ -167,6 +167,32 @@
     xcb_window_t windowId = [clientWindow window];
     NSNumber *windowIdNum = @(windowId);
 
+    // Don't steal focus from an already-focused window.  A window that maps
+    // while another is focused (e.g. a background app finishing startup, or
+    // an automation-driven launch) must not yank focus - that is what kept
+    // xterm's titlebar "active" while Processes stole focus a moment after
+    // activate had focused xterm, and the two active states never resolved.
+    // Exceptions: the newly mapped window IS the focused window, or it is a
+    // sibling of the focused one (same app - a dialog/alert/sheet of the
+    // frontmost app may still grab focus).
+    if (self.lastFocusedWindowId != XCB_NONE
+        && self.lastFocusedWindowId != windowId)
+      {
+        XCBWindow *focused = [self windowForClientWindowId:self.lastFocusedWindowId];
+        BOOL sameApp = NO;
+        if (focused && [focused respondsToSelector: @selector(window)])
+          {
+            EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+            uint32_t newPid = [ewmh netWMPidForWindow:clientWindow];
+            uint32_t curPid = [ewmh netWMPidForWindow:focused];
+            sameApp = (newPid != (uint32_t)-1 && newPid == curPid);
+          }
+        if (!sameApp)
+          {
+            return;
+          }
+      }
+
     //NSLog(@"[Focus] Focusing newly mapped window %u", windowId);
     if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {
         [clientWindow focus];

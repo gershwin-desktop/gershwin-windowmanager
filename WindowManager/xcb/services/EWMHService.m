@@ -857,6 +857,13 @@
             }
         }
 
+        // Always publish the active window on the root, even when the window
+        // was already the topmost and we skipped the raise/focus above.
+        // Menu.app tracks _NET_ACTIVE_WINDOW to show the frontmost app's menu,
+        // and without this an automation request for an already-topmost window
+        // would leave the property pointing at a stale window.
+        [self updateNetActiveWindow:aWindow];
+
         return;
     }
 
