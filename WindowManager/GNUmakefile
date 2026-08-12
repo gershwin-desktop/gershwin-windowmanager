@@ -1,6 +1,7 @@
 PACKAGE_NAME = uroswm
 
 include $(GNUSTEP_MAKEFILES)/common.make
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
 WindowManager_INSTALL_DIR = /System/Library/CoreServices/Applications
 WindowManager_PRINCIPAL_CLASS = UROSWMApplication
 
@@ -117,4 +118,5 @@ ADDITIONAL_OBJCFLAGS += -DURS_PROFILING=1
 endif
 
 include $(GNUSTEP_MAKEFILES)/application.make
+
 

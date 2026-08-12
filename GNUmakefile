@@ -1,3 +1,4 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
 # Top-level GNUmakefile for gershwin-windowmanager
 
 .PHONY: all clean install
@@ -10,3 +11,4 @@ install:
 
 clean:
 	$(MAKE) -C WindowManager -f GNUmakefile clean
+
