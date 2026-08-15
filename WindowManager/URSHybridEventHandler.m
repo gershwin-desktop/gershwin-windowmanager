@@ -72,12 +72,22 @@ static CGFloat WMLastScaleFactor = 1.0;
   CGFloat factor = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
   if (factor == 0.0)
     factor = 1.0;
+}
 
-  if (factor == WMLastScaleFactor)
-    return;
+- (void)reassertRootWindowProperties
+{
+  XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
+  EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:[self connection]];
+  [ewmhService putPropertiesForRootWindow:rootWin andWmWindow:[self selectionManagerWindow]];
+}
 
-  WMLastScaleFactor = factor;
-  [self applyScaleFactor:factor];
+- (void)startPropertyReassertion
+{
+  [NSTimer scheduledTimerWithTimeInterval: 5.0
+                                   target: self
+                                 selector: @selector(reassertRootWindowProperties)
+                                 userInfo: nil
+                                  repeats: YES];
 }
 
 - (void)applyScaleFactor:(CGFloat)factor
@@ -201,6 +211,12 @@ static CGFloat WMLastScaleFactor = 1.0;
         [NSApp terminate:nil];
         return;
     }
+
+    // Periodically re-publish root _NET_SUPPORTING_WM_CHECK and _GNUSTEP_FRAME_OFFSETS
+    // so they persist even if clobbered by other components (e.g. Menu's Global Menu
+    // window overwriting root's check property).  This prevents GNUstep's single-shot
+    // _checkWindowManager from failing at startup due to a stale/overwritten property.
+    [self startPropertyReassertion];
 
     // Wire selectionManagerWindow into the focus manager now that it exists
     self.focusManager.selectionManagerWindow = self.selectionManagerWindow;
