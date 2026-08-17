@@ -79,6 +79,12 @@ static CGFloat WMLastScaleFactor = 1.0;
   XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
   EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:[self connection]];
   [ewmhService putPropertiesForRootWindow:rootWin andWmWindow:[self selectionManagerWindow]];
+  /* Keep _GNUSTEP_FRAME_OFFSETS in sync too: it is published before the
+   * compositor activates (when clientBorder is still the scale factor), so
+   * without re-publishing it here the GNUstep backend would keep applying
+   * the 1px border offsets while the WM frames clients flush, drifting
+   * every window by a pixel per open/close cycle. */
+  [ewmhService updateGNUStepFrameOffsetsForRootWindow:rootWin];
 }
 
 - (void)startPropertyReassertion
@@ -319,6 +325,18 @@ static CGFloat WMLastScaleFactor = 1.0;
         //NSLog(@"[WindowManager] ✓ Compositing successfully activated!");
         //NSLog(@"[WindowManager] ✓ Windows will use XRender for transparency effects");
         //NSLog(@"[WindowManager] ================================================");
+
+        /* The root _GNUSTEP_FRAME_OFFSETS were published with the
+         * non-compositing clientBorder (1px) when the WM registered, before
+         * the compositor was active.  Now that clients are framed flush
+         * (clientBorder 0), re-publish so the GNUstep backend does not keep
+         * applying 1px side/bottom offsets that drift window geometry by a
+         * pixel per open/close cycle. */
+        {
+          XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
+          EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:[self connection]];
+          [ewmh updateGNUStepFrameOffsetsForRootWindow:rootWin];
+        }
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowManager] ❌ EXCEPTION initializing compositing: %@", exception.reason);
