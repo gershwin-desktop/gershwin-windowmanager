@@ -7,12 +7,16 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
 
 - Build the app: `cd WindowManager && make` (top-level `GNUmakefile` just
   forwards there). Single target, no framework. Must build warning-free.
+  `make PROFILE=1` enables CPU instrumentation (summary every 10s and on
+  SIGUSR1).
 - Install: `sudo make install GNUSTEP_INSTALLATION_DOMAIN=SYSTEM`. The app is
   installed to `/System/Library/CoreServices/Applications/WindowManager.app/WindowManager`
   (that exact path is what the running WM is; there is no LOCAL copy).
 - To test changes: install, then restart the WM process. The desktop start
   script (`gershwin-system/Library/Scripts/Gershwin.sh`) launches it via
-  `(WindowManager &)`; killing and relaunching it manually works too.
+  `(WindowManager &)`; killing and relaunching it manually works too. For a
+  sandboxed smoke test on a nested server, `WindowManager/test-with-xephyr.sh`
+  builds and runs the WM plus test windows in Xephyr (default `:10`).
 - **Arc is ON**: sources are compiled with `-fobjc-arc`. Do not add
   retain/release/autorelease. This is unusual for GNUstep and easy to get
   wrong.
@@ -27,8 +31,8 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
 
 ## Branching
 
-- Work on `dev` (29 commits ahead of `master`). Never commit to `master`/
-  `main`. `origin/HEAD -> origin/master`, but development happens on `dev`.
+- Work on `dev` (ahead of `master`; `origin/HEAD -> origin/master`). Never
+  commit to `master`/`main`.
 
 ## Architecture (see ARCHITECTURE.md)
 

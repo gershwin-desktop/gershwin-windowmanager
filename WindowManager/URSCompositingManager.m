@@ -1174,7 +1174,10 @@
         if (unionRegion == XCB_NONE) {
             unionRegion = extents;
         } else {
-            xcb_xfixes_union_region(conn, unionRegion, unionRegion, extents);
+            // xcb_xfixes_union_region signature is (c, source1, source2,
+            // destination): sources first, destination LAST.  Passing the
+            // destination first silently overwrites the last argument instead.
+            xcb_xfixes_union_region(conn, unionRegion, extents, unionRegion);
             xcb_xfixes_destroy_region(conn, extents);
         }
     }
@@ -2163,15 +2166,17 @@
     
     xcb_connection_t *conn = [self.connection connection];
     
-    // Clip to screen region
+    // Clip to screen region.  xcb_xfixes_intersect_region takes (c, source1,
+    // source2, destination) - sources first, destination last.
     if (self.screenRegion == XCB_NONE) {
         self.screenRegion = [self getScreenRegion];
     }
-    xcb_xfixes_intersect_region(conn, damage, damage, self.screenRegion);
+    xcb_xfixes_intersect_region(conn, damage, self.screenRegion, damage);
     
     if (self.allDamage != XCB_NONE) {
-        // Union with existing damage
-        xcb_xfixes_union_region(conn, self.allDamage, self.allDamage, damage);
+        // Union with existing damage.  Same (source1, source2, destination)
+        // argument order as above.
+        xcb_xfixes_union_region(conn, self.allDamage, damage, self.allDamage);
         xcb_xfixes_destroy_region(conn, damage);
     } else {
         self.allDamage = damage;
@@ -2229,6 +2234,96 @@
     xcb_xfixes_region_t region = xcb_generate_id(conn);
     xcb_xfixes_create_region(conn, region, 1, &r);
     return region;
+}
+
+// CPU-side bounding box of a composite window (window + shadow), mirroring
+// windowExtents: but without allocating a server region.  Used by paintAll:
+// to decide which windows must be repainted and to expand the repaint set,
+// without a per-window X round trip.
+- (xcb_rectangle_t)windowExtentsRect:(URSCompositeWindow *)cw {
+    int16_t wx = cw.x;
+    int16_t wy = cw.y;
+    int16_t ww = cw.width + 2 * cw.borderWidth;
+    int16_t wh = cw.height + 2 * cw.borderWidth;
+
+    // Same shadow estimation as windowExtents: - the shadow may not yet
+    // exist, so estimate from the shadow configuration constants.
+    uint16_t sWidth = cw.shadowWidth;
+    uint16_t sHeight = cw.shadowHeight;
+    int16_t sOffX = cw.shadowOffsetX;
+    int16_t sOffY = cw.shadowOffsetY;
+
+    if (sWidth == 0 && sHeight == 0 && !cw.overrideRedirect
+        && self.argbFormat != XCB_NONE && self.gaussianSize > 0)
+    {
+        sWidth = cw.width + 2 * cw.borderWidth + self.gaussianSize;
+        sHeight = cw.height + 2 * cw.borderWidth + self.gaussianSize;
+        sOffX = SHADOW_OFFSET_X;
+        sOffY = SHADOW_OFFSET_Y;
+    }
+
+    if (cw.shadowPicture != XCB_NONE || (sWidth > 0 && sHeight > 0)) {
+        int16_t sx = wx + sOffX;
+        int16_t sy = wy + sOffY;
+        int16_t sx2 = sx + (int16_t)sWidth;
+        int16_t sy2 = sy + (int16_t)sHeight;
+        int16_t wx2 = wx + ww;
+        int16_t wy2 = wy + wh;
+
+        int16_t bx = (sx < wx) ? sx : wx;
+        int16_t by = (sy < wy) ? sy : wy;
+        int16_t bx2 = (sx2 > wx2) ? sx2 : wx2;
+        int16_t by2 = (sy2 > wy2) ? sy2 : wy2;
+
+        xcb_rectangle_t r = { bx, by, (uint16_t)(bx2 - bx), (uint16_t)(by2 - by) };
+        return r;
+    }
+
+    xcb_rectangle_t r = { wx, (uint16_t)wy, (uint16_t)ww, (uint16_t)wh };
+    return r;
+}
+
+// CPU-side bounding box of an animation's full travel range (start rect,
+// end rect, borders and shadow padding), mirroring the damage the animation
+// timer registers each frame.  A superset of every interpolated frame rect.
+// Used by paintAll: to decide whether an animating window must be repainted
+// and to expand the repaint set so higher windows stay on top.
+- (xcb_rectangle_t)animationUnionRect:(URSCompositeWindow *)cw {
+    XCBRect s = cw.animationStartRect;
+    XCBRect e = cw.animationEndRect;
+    if (!FnCheckXCBRectIsValid(s) || !FnCheckXCBRectIsValid(e)) {
+        xcb_rectangle_t r = { cw.x, cw.y,
+            (uint16_t)(cw.width + 2 * cw.borderWidth),
+            (uint16_t)(cw.height + 2 * cw.borderWidth) };
+        return r;
+    }
+    int16_t x1 = MIN(s.position.x, e.position.x);
+    int16_t y1 = MIN(s.position.y, e.position.y);
+    int16_t x2 = MAX(s.position.x + (int16_t)s.size.width,
+                     e.position.x + (int16_t)e.size.width) + 2 * cw.borderWidth;
+    int16_t y2 = MAX(s.position.y + (int16_t)s.size.height,
+                     e.position.y + (int16_t)e.size.height) + 2 * cw.borderWidth;
+    uint16_t shadowPad = self.gaussianSize + abs(SHADOW_OFFSET_X);
+    x1 -= shadowPad;
+    y1 -= shadowPad;
+    x2 += shadowPad;
+    y2 += shadowPad;
+    xcb_rectangle_t r = { x1, y1, (uint16_t)(x2 - x1), (uint16_t)(y2 - y1) };
+    return r;
+}
+
+// CPU-side rectangle intersection test (no X round-trip).  Used to skip
+// windows whose extents cannot overlap the repaint region.
+static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
+    if (a.width == 0 || a.height == 0 || b.width == 0 || b.height == 0) {
+        return NO;
+    }
+    int32_t aR = (int32_t)a.x + (int32_t)a.width;
+    int32_t aB = (int32_t)a.y + (int32_t)a.height;
+    int32_t bR = (int32_t)b.x + (int32_t)b.width;
+    int32_t bB = (int32_t)b.y + (int32_t)b.height;
+    return ((int32_t)a.x < bR && (int32_t)b.x < aR &&
+            (int32_t)a.y < bB && (int32_t)b.y < aB);
 }
 
 - (xcb_xfixes_region_t)getScreenRegion {
@@ -2794,6 +2889,51 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     
     NSUInteger num_windows = [self.windowStackingOrder count];
 
+    // OPTIMIZATION: Clip ALL rendering into rootBuffer to the damage region.
+    // The X server clips every subsequent fill/composite that targets
+    // rootBuffer, so the background fill, window composites and shadow strips
+    // only touch pixels that actually changed.  Undamaged areas of the
+    // persistent rootBuffer keep their previously-painted content, which is
+    // still correct.  The clip is reset to XCB_NONE below, before the buffer
+    // is presented.  Without this, every DAMAGE_NOTIFY caused a full-screen
+    // background refill plus a full repaint of every window.
+    if (region != XCB_NONE) {
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, region, 0, 0);
+    }
+
+    // Bounding box of the damage region, used to skip windows that cannot
+    // possibly overlap the damage.  A single round trip here replaces a full
+    // per-window repaint pass for undamaged windows.
+    xcb_rectangle_t damageBBox = {0, 0, self.screenWidth, self.screenHeight};
+    if (region != XCB_NONE) {
+        xcb_xfixes_fetch_region_cookie_t fetchCookie = xcb_xfixes_fetch_region(conn, region);
+        xcb_xfixes_fetch_region_reply_t *fetchReply = xcb_xfixes_fetch_region_reply(conn, fetchCookie, NULL);
+        if (fetchReply) {
+            damageBBox = fetchReply->extents;
+            free(fetchReply);
+        }
+    }
+
+    // Region of rootBuffer whose pixels are FRESH this cycle: the background
+    // fill erased the damage area, and every window composite below is opaque
+    // and re-covers its window rect.  Semi-transparent shadow strips must only
+    // be composited over fresh pixels - painting them over their own stale
+    // pixels from the previous frame darkens the shadow every cycle ("shadow
+    // drawn multiple times").  As windows are repainted we union their window
+    // rect into this region, so the shadow of a window that overlaps a
+    // repainted lower window is repainted over that window's fresh content.
+    // This is the precise region; a bounding box would over-cover and
+    // reintroduce the double-shadow artifact in the box corners.
+    xcb_xfixes_region_t freshRegion = XCB_NONE;
+    if (region != XCB_NONE) {
+        freshRegion = xcb_generate_id(conn);
+        xcb_xfixes_create_region(conn, freshRegion, 0, NULL);
+        // xcb_xfixes_union_region takes (c, source1, source2, destination) -
+        // sources first, destination last.  Copy the damage region into the
+        // freshly-created empty freshRegion.
+        xcb_xfixes_union_region(conn, freshRegion, region, freshRegion);
+    }
+
     // Fill rootBuffer with the desktop background (image or solid colour)
     // from ~/Library/Preferences/org.gnustep.Workspace.plist desktopinfo.
     // This ensures areas not covered by any window show the user's chosen
@@ -2831,6 +2971,15 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
     BOOL menuShadowPainted = NO;
 
+    // Cumulative area whose pixels were refreshed this cycle (damage plus the
+    // full extents of every repainted window).  A window must be repainted if
+    // it overlaps the damage region OR if it overlaps a lower window that was
+    // repainted this cycle - that window's opaque composite would otherwise
+    // cover the upper window's pixels, breaking z-order.  Starting from the
+    // damage bounding box captures both the background-fill area and the
+    // animation-union damage.
+    xcb_rectangle_t paintedBBox = damageBBox;
+
     // Paint windows from bottom to top (so higher z-order windows are on top)
     for (NSUInteger i = 0; i < num_windows; i++) {
         xcb_window_t win = [self.windowStackingOrder[i] unsignedIntValue];
@@ -2861,16 +3010,108 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) {
             continue;
         }
-        
-        [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:region];
+
+        if (!cw.animating) {
+            // OPTIMIZATION: Skip windows whose full extents (window + shadow)
+            // cannot overlap the refreshed area.  Their pixels in rootBuffer
+            // were painted on an earlier pass and nothing changed underneath
+            // them, so repainting them (composite + up to 4 shadow strips) is
+            // wasted X traffic.  Animating windows are always repainted:
+            // their geometry moves every frame, and the animation timer
+            // damages the union of the start and end rects so the tracked
+            // position may trail the current frame.
+            xcb_rectangle_t windowBBox = [self windowExtentsRect:cw];
+            if (!URSRectIntersects(windowBBox, paintedBBox)) {
+                continue;
+            }
+
+            // Clip the window's OPAQUE composite to its full window rect
+            // (frame + client), not to the damage sub-rectangle.  The frame's
+            // grey back_pixel is part of the frame drawable; a composite
+            // restricted to the damage region leaves previously-painted frame
+            // pixels stale, so that back_pixel can leak through as a dark
+            // border.  The composite fully re-covers its rect, which also
+            // heals any transient back_pixel captured while the client was
+            // still rendering.  The semi-transparent shadow strips must NOT
+            // use this clip - paintWindow: switches them to the fresh region
+            // (see below) so they are never composited over stale pixels.
+            xcb_rectangle_t winRect = { cw.x, cw.y,
+                (uint16_t)(cw.width + 2 * cw.borderWidth),
+                (uint16_t)(cw.height + 2 * cw.borderWidth) };
+            xcb_render_set_picture_clip_rectangles(conn, self.rootBuffer, 0, 0, 1, &winRect);
+
+            [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion];
+
+            // The opaque composite refreshed the window rect, so shadows that
+            // overlap it may be repainted over it this cycle.
+            if (freshRegion != XCB_NONE) {
+                xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
+                xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
+                xcb_xfixes_union_region(conn, freshRegion, winRegion, freshRegion);
+                xcb_xfixes_destroy_region(conn, winRegion);
+            }
+
+            // This window now owns its full extents in the root buffer, so
+            // any higher window overlapping it must also be repainted this
+            // cycle to stay on top.
+            int32_t bx = MIN(paintedBBox.x, windowBBox.x);
+            int32_t by = MIN(paintedBBox.y, windowBBox.y);
+            int32_t bx2 = MAX((int32_t)paintedBBox.x + (int32_t)paintedBBox.width,
+                              (int32_t)windowBBox.x + (int32_t)windowBBox.width);
+            int32_t by2 = MAX((int32_t)paintedBBox.y + (int32_t)paintedBBox.height,
+                              (int32_t)windowBBox.y + (int32_t)windowBBox.height);
+            paintedBBox.x = bx;
+            paintedBBox.y = by;
+            paintedBBox.width = (uint16_t)(bx2 - bx);
+            paintedBBox.height = (uint16_t)(by2 - by);
+        } else {
+            // Animating windows move every frame; the animation timer damages
+            // the full start..end union, so a skip based on the static window
+            // rect would miss frames.  Clip them to the fresh region (damage
+            // plus the full rects of every window repainted below them), NOT
+            // to the raw damage region: when a lower window repaints over the
+            // animation, its opaque composite erases the animation window's
+            // pixels across the lower window's WHOLE rect, and clipping the
+            // animation window to just the damage sub-rect would leave the
+            // rest of it cut away until the next timer tick - visible
+            // flicker.  The fresh region covers the full erased area, so the
+            // animation window repaints completely.  Their shadow strips are
+            // skipped during animation.
+            xcb_rectangle_t animBBox = [self animationUnionRect:cw];
+            if (!URSRectIntersects(animBBox, paintedBBox)) {
+                continue;
+            }
+            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, freshRegion, 0, 0);
+            [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion];
+
+            // This window now owns its animation range in the root buffer, so
+            // any higher window overlapping it must also be repainted this
+            // cycle to stay on top.
+            int32_t bx = MIN(paintedBBox.x, animBBox.x);
+            int32_t by = MIN(paintedBBox.y, animBBox.y);
+            int32_t bx2 = MAX((int32_t)paintedBBox.x + (int32_t)paintedBBox.width,
+                              (int32_t)animBBox.x + (int32_t)animBBox.width);
+            int32_t by2 = MAX((int32_t)paintedBBox.y + (int32_t)paintedBBox.height,
+                              (int32_t)animBBox.y + (int32_t)animBBox.height);
+            paintedBBox.x = bx;
+            paintedBBox.y = by;
+            paintedBBox.width = (uint16_t)(bx2 - bx);
+            paintedBBox.height = (uint16_t)(by2 - by);
+        }
 
         // Paint Menu.app shadow right after the first (bottommost) window,
         // typically the desktop, so the shadow sits below all other windows
-        // but above the desktop/background.
+        // but above the desktop/background.  Only when the refreshed area
+        // overlaps the menu shadow extents - otherwise the shadow pixels in
+        // rootBuffer are still valid and repainting them is wasted work.
         if (!menuShadowPainted && menuCW
             && menuCW.shadowPicture != XCB_NONE
             && ![self.noShadowWindows containsObject:@(menuCW.windowId)]) {
-            [self paintMenuShadow:menuCW];
+            xcb_rectangle_t menuBBox = [self windowExtentsRect:menuCW];
+            if (URSRectIntersects(menuBBox, paintedBBox)) {
+                xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, freshRegion, 0, 0);
+                [self paintMenuShadow:menuCW];
+            }
             menuShadowPainted = YES;
         }
     }
@@ -2879,6 +3120,10 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     // subsequent XRender operations (e.g., createSolidPicture or shadow
     // uploads) between paint cycles.
     xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, XCB_NONE, 0, 0);
+
+    if (freshRegion != XCB_NONE) {
+        xcb_xfixes_destroy_region(conn, freshRegion);
+    }
 
     if (self.presentAvailable) {
         // Vblank-synced presentation via X Present extension.
@@ -3541,7 +3786,18 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     // the window and avoids any temporary picture allocation.
     BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
     BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
-    if (cw.shadowPicture != XCB_NONE && !animating && !skipShadow && cw.picture != XCB_NONE && cw.damaged) {
+    if (cw.shadowPicture != XCB_NONE && !animating && !skipShadow && cw.picture != XCB_NONE && cw.pictureValid) {
+        // The composite above ran under a clip to the window's full rect.
+        // The shadow strips are semi-transparent and must ONLY be composited
+        // over pixels that are fresh this cycle (background fill or a lower
+        // window's opaque composite).  Restrict them to the fresh region
+        // passed in - painting them over their own stale pixels from the
+        // previous frame darkens the shadow every cycle.  The picture must be
+        // valid (created from the window drawable) rather than merely damaged:
+        // windows adopted at startup or with static content never receive a
+        // DamageNotify, so cw.damaged stays NO and their shadow would never be
+        // painted.
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
         int16_t shadowX = screenX + cw.shadowOffsetX;
         int16_t shadowY = screenY + cw.shadowOffsetY;
         uint16_t drawShadowWidth = cw.shadowWidth;
