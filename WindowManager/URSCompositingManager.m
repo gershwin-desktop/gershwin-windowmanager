@@ -49,6 +49,12 @@
 @property (assign, nonatomic) BOOL viewable;
 @property (assign, nonatomic) BOOL redirected;
 @property (assign, nonatomic) BOOL overrideRedirect;
+// Transparent-background detection: windows whose edges are (almost fully)
+// translucent must never get a rectangular drop shadow — it would outline
+// empty space around their irregular content (e.g. GL effect overlays).
+@property (assign, nonatomic) BOOL backgroundTransparentChecked;
+@property (assign, nonatomic) BOOL backgroundTransparent;
+@property (assign, nonatomic) int transparentProbeAttempts;
 // OPTIMIZATION: Lazy picture creation - defer until first paint
 @property (assign, nonatomic) BOOL pictureValid;
 @property (assign, nonatomic) BOOL needsPictureCreation;
@@ -109,6 +115,9 @@
         _viewable = NO;
         _redirected = YES;
         _overrideRedirect = NO;
+        _backgroundTransparentChecked = NO;
+        _backgroundTransparent = NO;
+        _transparentProbeAttempts = 0;
         // OPTIMIZATION: Lazy picture creation
         _pictureValid = NO;
         _needsPictureCreation = YES;
@@ -171,6 +180,7 @@
 // Cached atoms for window type checks (used in shadow creation)
 @property (assign, nonatomic) xcb_atom_t wmTypeAtom;
 @property (assign, nonatomic) xcb_atom_t wmTypeDockAtom;
+@property (assign, nonatomic) xcb_atom_t wmTypeNotificationAtom; // shadow-free overlays
 @property (assign, nonatomic) xcb_atom_t wmNameAtom;    // _NET_WM_NAME
 @property (assign, nonatomic) xcb_atom_t wmUtf8Atom;    // UTF8_STRING
 
@@ -406,6 +416,15 @@
       xcb_intern_atom_reply_t *d_r = xcb_intern_atom_reply(conn, d_c, NULL);
       self.wmTypeDockAtom = d_r ? d_r->atom : XCB_NONE;
       free(d_r);
+    }
+    {
+      xcb_connection_t *conn = [self.connection connection];
+      xcb_intern_atom_cookie_t n_c = xcb_intern_atom(conn, 0,
+          strlen("_NET_WM_WINDOW_TYPE_NOTIFICATION"),
+          "_NET_WM_WINDOW_TYPE_NOTIFICATION");
+      xcb_intern_atom_reply_t *n_r = xcb_intern_atom_reply(conn, n_c, NULL);
+      self.wmTypeNotificationAtom = n_r ? n_r->atom : XCB_NONE;
+      free(n_r);
     }
     {
       xcb_connection_t *conn = [self.connection connection];
@@ -1347,6 +1366,84 @@
     [self.connection flush];
 }
 
+#pragma mark - Transparent Background Detection
+
+// Probe the alpha channel along the window's edge strips.  Returns
+//   1  background is (almost fully) transparent
+//   0  background is opaque
+//  -1  undetermined yet (client has not painted / probe failed) - caller
+//      must retry on a later paint pass instead of guessing.
+- (int)detectTransparentBackground:(URSCompositeWindow *)cw {
+    xcb_connection_t *conn = [self.connection connection];
+
+    // Only ARGB windows can have a translucent background.
+    if (cw.depth != 32)
+        return 0;
+    // Without at least one damage notification the backing store contents are
+    // undefined; deciding from them would misclassify freshly mapped windows.
+    if (!cw.damaged)
+        return -1;
+    uint16_t w = cw.width, h = cw.height;
+    if (w < 8 || h < 8)
+        return 0;
+    // Fail-safe: after repeated failed probes treat as opaque so windows
+    // never end up permanently without a shadow due to probing trouble.
+    if (cw.transparentProbeAttempts > 5)
+        return 0;
+    cw.transparentProbeAttempts++;
+
+    const int T = 4;   // strip thickness
+    const int I = 2;   // sample inset within strip == inset from edge
+    int opaque = 0, total = 0;
+
+    struct { int16_t x, y; uint16_t sw, sh; } strips[4] = {
+        { 0,          0,          w, T },   // top
+        { 0, (int16_t)(h - T),    w, T },   // bottom
+        { 0,          0,          T, h },   // left
+        { (int16_t)(w - T), 0,    T, h },   // right
+    };
+
+    for (int s = 0; s < 4; s++) {
+        xcb_get_image_cookie_t cookie =
+            xcb_get_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.windowId,
+                          strips[s].x, strips[s].y, strips[s].sw, strips[s].sh,
+                          (uint32_t)~0);
+        xcb_get_image_reply_t *img = xcb_get_image_reply(conn, cookie, NULL);
+        if (!img || img->depth != 32) {
+            free(img);
+            return -1;
+        }
+        uint32_t *data = (uint32_t *)xcb_get_image_data(img);
+        uint32_t stride = strips[s].sw;
+        uint32_t len = img->length * 4 / 4; /* bytes */
+        (void)len;
+        if (s < 2) {
+            uint32_t row = I;
+            for (uint32_t x = 0; x < strips[s].sw; x += (strips[s].sw > 64 ? strips[s].sw / 64 : 1)) {
+                uint32_t px = data[row * stride + x];
+                total++;
+                if (((px >> 24) & 0xFF) >= 16)
+                    opaque++;
+            }
+        } else {
+            uint32_t col = I;
+            for (uint32_t y = 0; y < strips[s].sh; y += (strips[s].sh > 64 ? strips[s].sh / 64 : 1)) {
+                uint32_t px = data[y * stride + col];
+                total++;
+                if (((px >> 24) & 0xFF) >= 16)
+                    opaque++;
+            }
+        }
+        free(img);
+    }
+
+    if (total == 0)
+        return -1;
+    // Rounded corners etc. leave a few transparent samples on normal windows,
+    // so require an overwhelming translucent majority to skip the shadow.
+    return (opaque * 100 < total * 12) ? 1 : 0;
+}
+
 #pragma mark - No-Shadow Window Registration
 
 - (void)setSkipShadowForWindow:(xcb_window_t)windowId {
@@ -1496,6 +1593,9 @@
     // OPTIMIZATION: Reset lazy picture flags
     cw.pictureValid = NO;
     cw.needsPictureCreation = YES;
+    // Re-probe background transparency on the next map/paint cycle
+    cw.backgroundTransparentChecked = NO;
+    cw.transparentProbeAttempts = 0;
 }
 
 - (void)updateWindow:(xcb_window_t)window {
@@ -1790,6 +1890,9 @@
             // Reset lazy picture flags so picture is recreated
             cw.pictureValid = NO;
             cw.needsPictureCreation = YES;
+            // Re-probe background transparency (geometry/content changed)
+            cw.backgroundTransparentChecked = NO;
+            cw.transparentProbeAttempts = 0;
         }
     }
     
@@ -1873,6 +1976,9 @@
             // OPTIMIZATION: Force picture recreation on remap (window may have new content)
             cw.pictureValid = NO;
             cw.needsPictureCreation = YES;
+            // Re-probe background transparency on remap
+            cw.backgroundTransparentChecked = NO;
+            cw.transparentProbeAttempts = 0;
         }
         // Create shadow for newly mapped window
         if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE) {
@@ -3385,6 +3491,27 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         return;
     }
 
+    // General rule: never paint a drop shadow around a window with a
+    // transparent background - the shadow rectangle would outline empty
+    // space around the irregular content (like a GL effect overlay).
+    if (!cw.overrideRedirect && cw.depth == 32) {
+        if (cw.backgroundTransparentChecked) {
+            if (cw.backgroundTransparent)
+                return;
+        } else {
+            int probe = [self detectTransparentBackground:cw];
+            if (probe < 0) {
+                // Undetermined (not painted yet): defer.  The shadow is
+                // created on a later pass once real content is available.
+                return;
+            }
+            cw.backgroundTransparentChecked = YES;
+            cw.backgroundTransparent = (probe == 1);
+            if (probe == 1)
+                return;
+        }
+    }
+
     // Skip shadow for the Dock panel (a DOCK-type window with _NET_WM_NAME "Dock").
     // The MenuBar is also DOCK type but keeps its shadow.  Relying solely on
     // setSkipShadowForWindow: from the connection layer can fail if the compositor
@@ -3401,6 +3528,15 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             && typeReply->format == 32 && typeReply->length > 0) {
             xcb_atom_t *atoms = (xcb_atom_t *)xcb_get_property_value(typeReply);
             for (uint32_t i = 0; i < typeReply->length; i++) {
+                // NOTIFICATION-type windows are pure visual overlays (e.g. a
+                // smoke effect rising above an app window); a drop shadow
+                // would outline their full transparent rectangle.
+                if (self.wmTypeNotificationAtom != XCB_NONE
+                    && atoms[i] == self.wmTypeNotificationAtom) {
+                    [self.noShadowWindows addObject:@(cw.windowId)];
+                    free(typeReply);
+                    return;
+                }
                 if (atoms[i] == self.wmTypeDockAtom) {
                     // It is a DOCK-type window — verify _NET_WM_NAME is "Dock".
                     xcb_get_property_cookie_t nameCookie =
