@@ -521,6 +521,18 @@ static XCBConnection *sharedInstance;
     ewmhService = nil;
 }
 
+// Called from the compositor damage path.  Records content activity for
+// framed clients (drives the titlebar spinner); no-op for everything else.
+- (void)noteClientContentDamage:(xcb_window_t)windowId
+{
+    XCBWindow *w = [self windowForXCBId:windowId];
+    if (!w || ![w decorated])
+        return;
+    if (![[w parentWindow] isKindOfClass:[XCBFrame class]])
+        return;
+    [(XCBFrame *)[w parentWindow] noteContentChanged];
+}
+
 // X window id of the LOWEST root-level child that belongs to another
 // managed, decorated, ordinary window (frame).  Desktops, docks, menus and
 // fullscreen frames never count as peers: removing keep-above must place a

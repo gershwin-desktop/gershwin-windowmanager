@@ -2059,6 +2059,13 @@
         return;
     }
 
+    // Content-activity tap: if the damaged surface is a managed framed
+    // client, remember when its content last changed.  Works while the
+    // window is shaded/hidden too - the client stays mapped and redirected,
+    // so damage keeps flowing regardless of clipping.  Cheap no-op for
+    // frames, titlebars, buttons and unknown windows.
+    [self.connection noteClientContentDamage:windowId];
+
     URSCompositeWindow *cw = [self findCWindow:windowId];
 
     if (cw) {
@@ -2094,6 +2101,28 @@
     [self updateAbsolutePositionForWindow:cw];
     [self repairWindow:cw];
     URS_PROFILE_END(damageNotify);
+}
+
+// Re-acquire and repaint one window's content right now.  Used by direct
+// X-drawing animations (titlebar spinner) that bypass the damage pipeline:
+// their drawing never produces Damage events, so without this nudge the
+// compositor would keep showing its stale cached picture.
+- (void)repairRegionForWindow:(xcb_window_t)windowId {
+    if (!self.compositingActive) {
+        return;
+    }
+
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw) {
+        [self addWindow:windowId];
+        cw = [self findCWindow:windowId];
+    }
+    if (!cw) {
+        return;
+    }
+
+    [self updateAbsolutePositionForWindow:cw];
+    [self repairWindow:cw];
 }
 
 - (void)handleExposeEvent:(xcb_window_t)windowId {

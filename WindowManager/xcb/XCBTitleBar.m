@@ -8,6 +8,27 @@
 
 #import "XCBTitleBar.h"
 #import "URSThemeIntegration.h"
+#import <AppKit/AppKit.h>
+#import <math.h>
+
+// Scale factor mirroring the eau theme's GSWScaleFactor(): reads the
+// GSScaleFraction user default, falls back to the screen's backing scale.
+static inline CGFloat ShadeScaleFactor(void)
+{
+    CGFloat s = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
+    if (s <= 0.0)
+        s = [[NSScreen mainScreen] backingScaleFactor];
+    if (s <= 0.0)
+        s = 1.0;
+    return s;
+}
+
+// Loose typing for the compositor (kept out via NSClassFromString lookup
+// elsewhere in the xcb layer); call sites guard with respondsToSelector.
+@protocol URSCompositorShadeAPI <NSObject>
+- (void)invalidateWindowPixmap:(xcb_window_t)windowId;
+- (void)repairRegionForWindow:(xcb_window_t)windowId;
+@end
 
 @implementation XCBTitleBar
 
@@ -22,6 +43,9 @@
 @synthesize titleBarDownColor;
 @synthesize ewmhService;
 @synthesize titleIsSet;
+@synthesize spinnerPhase;
+@synthesize spinnerGC;
+@synthesize spinnerDrawn;
 
 
 - (id) initWithFrame:(XCBFrame *)aFrame withConnection:(XCBConnection *)aConnection
@@ -304,6 +328,170 @@
     // preferences. The window manager may not have a preferences file yet on first run.
     BOOL gsthemeEnabled = [[URSThemeIntegration sharedInstance] enabled];
     return gsthemeEnabled;
+}
+
+#pragma mark - Content-Activity Spinner
+
+// Layout constants matching the eau theme titlebar (see AppearanceMetrics.h
+// and URSThemeIntegration's local defines): the theme centers the title
+// between the left orb region and the right button region.
+#define SPINNER_ORB_REGION_WIDTH (68.0 * ShadeScaleFactor())
+#define SPINNER_TITLE_FONT_SIZE (13.0 * ShadeScaleFactor())
+
+// 8 spokes, unit direction vectors in 1/1000 (45 degree steps)
+static const int SPINNER_DIR[8][2] = {
+    {1000, 0}, {707, 707}, {0, 1000}, {-707, 707},
+    {-1000, 0}, {-707, -707}, {0, -1000}, {707, -707}
+};
+
+// X position just after the drawn title text.  Mirrors the eau theme's
+// centered-title layout so the glyph hugs the text end without the theme
+// needing to know about us.
+- (CGFloat)spinnerTargetX
+{
+    CGFloat scale = ShadeScaleFactor();
+    CGFloat tbW = [self windowRect].size.width;
+    CGFloat tbH = [self windowRect].size.height;
+
+    BOOL orbStyle = [URSThemeIntegration isOrbButtonStyle];
+    CGFloat left = orbStyle ? SPINNER_ORB_REGION_WIDTH : 0.0;
+
+    XCBFrame *frame = nil;
+    if ([[self parentWindow] isKindOfClass:[XCBFrame class]])
+        frame = (XCBFrame *)[self parentWindow];
+    XCBWindow *clientWindow = frame ? [frame childWindowForKey:ClientWindow] : nil;
+    BOOL hasMaximize = clientWindow ? [clientWindow canResize] : YES;
+
+    CGFloat rightReserve = orbStyle ? (6.0 * scale)
+                                    : ((hasMaximize ? 2.0 : 1.0) * tbH);
+
+    NSString *title = windowTitle ?: @"";
+    NSDictionary *attrs = @{ NSFontAttributeName:
+        [NSFont systemFontOfSize:SPINNER_TITLE_FONT_SIZE] };
+    CGFloat textW = [title sizeWithAttributes:attrs].width;
+
+    CGFloat workW = tbW - left - rightReserve;
+    if (workW < 20.0)
+        workW = 20.0;
+
+    CGFloat centeredX = left + workW / 2.0 - textW / 2.0;
+    CGFloat textLeft = MAX(centeredX, left);
+    CGFloat textEnd = MIN(textLeft + textW, tbW - rightReserve);
+
+    CGFloat x = textEnd + 5.0 * scale;
+    return MIN(x, tbW - rightReserve - 14.0);
+}
+
+// Draw the current spinner phase into the TITLEBAR's own pixmap and blit
+// just the spinner rectangle through the normal drawArea pipeline.  No
+// child window: the themed bar stays the single source of truth and the
+// compositor sees an ordinary titlebar update.
+- (void)drawSpinnerPhase:(int)phase
+{
+    xcb_pixmap_t pix = [self isAbove] ? [self pixmap] : [self dPixmap];
+    if (!pix || !self.connection)
+        return;
+
+    xcb_connection_t *conn = [self.connection connection];
+
+    if (self.spinnerGC == 0)
+    {
+        self.spinnerGC = xcb_generate_id(conn);
+        xcb_create_gc(conn, self.spinnerGC, pix, 0, NULL);
+    }
+
+    CGFloat scale = ShadeScaleFactor();
+    CGFloat originX = [self spinnerTargetX];
+    CGFloat tbH = [self windowRect].size.height;
+    int16_t rx = (int16_t)originX;
+    int16_t ry = (int16_t)((tbH - 14.0 * scale) / 2.0);
+    int16_t size = (int16_t)(14.0 * scale);
+    if (size < 8) size = 8;
+    int16_t center = size / 2;
+    int16_t rOut = (int16_t)(size / 2 - 1.0 * scale);
+    int16_t rIn = (int16_t)(rOut - 2.5 * scale);
+    if (rIn < 1) rIn = 1;
+
+    // Trailing fade: leading spoke darkest, tail lightest.  ARGB: the alpha
+    // byte must be set or every spoke renders fully transparent on the
+    // 32-bit titlebar visual.
+    const uint32_t grays[8] = { 0xFF1a1a1a, 0xFF333333, 0xFF4d4d4d, 0xFF666666,
+                                0xFF808080, 0xFF999999, 0xFFb3b3b3, 0xFFd0d0d0 };
+
+    for (int i = 0; i < 8; i++)
+    {
+        int spoke = (phase + i) % 8;
+        int dx = SPINNER_DIR[spoke][0];
+        int dy = SPINNER_DIR[spoke][1];
+
+        xcb_segment_t seg[1] = {{
+            (int16_t)(center + rx + dx * rIn / 1000),
+            (int16_t)(center + ry + dy * rIn / 1000),
+            (int16_t)(center + rx + dx * rOut / 1000),
+            (int16_t)(center + ry + dy * rOut / 1000)
+        }};
+
+        uint32_t fg = grays[i];
+        xcb_change_gc(conn, self.spinnerGC, XCB_GC_FOREGROUND, &fg);
+        xcb_poly_segment(conn, pix, self.spinnerGC, 1, seg);
+    }
+
+    // Blit the spinner rectangle from the pixmap onto the titlebar window
+    // through the normal pipeline, then refresh the compositor's cached
+    // picture for the titlebar (direct X drawing produces no Damage).
+    XCBRect blit = XCBMakeRect(XCBMakePoint(rx, ry),
+                               XCBMakeSize((uint16_t)size + 1, (uint16_t)size + 1));
+    [self drawArea:blit];
+
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        id<URSCompositorShadeAPI> spinnerCompositor =
+            [compositorClass performSelector:@selector(sharedManager)];
+        if (spinnerCompositor)
+        {
+            if ([spinnerCompositor respondsToSelector:@selector(invalidateWindowPixmap:)])
+                [spinnerCompositor invalidateWindowPixmap:[self window]];
+            if ([spinnerCompositor respondsToSelector:@selector(repairRegionForWindow:)])
+                [spinnerCompositor repairRegionForWindow:[self window]];
+        }
+    }
+
+    xcb_flush(conn);
+}
+
+// Called by the spinner engine tick.  While active: advance the phase and
+// repaint the glyph.  When activity ends: restore the clean theme-rendered
+// bar once, erasing the glyph.
+- (void)updateSpinnerForActivity:(BOOL)active
+{
+    if (active)
+    {
+        self.spinnerPhase = (self.spinnerPhase + 1) % 8;
+        [self drawSpinnerPhase:self.spinnerPhase];
+    }
+    else if (self.spinnerDrawn)
+    {
+        self.spinnerDrawn = NO;
+
+        // Full re-render wipes the glyph; works for both the GSTheme and
+        // the legacy path.
+        if ([self isGSThemeActive])
+        {
+            XCBFrame *frame = nil;
+            if ([[self parentWindow] isKindOfClass:[XCBFrame class]])
+                frame = (XCBFrame *)[self parentWindow];
+            if (frame)
+            {
+                [URSThemeIntegration renderGSThemeToWindow:self
+                                                    frame:frame
+                                                    title:windowTitle
+                                                   active:[self isAbove]];
+                return;
+            }
+        }
+        [self drawTitleBarComponents];
+    }
 }
 
 @end

@@ -37,6 +37,10 @@ typedef NS_ENUM(NSInteger, childrenMask)
     ResizeZoneGrowBox = 18  // Theme-defined grow box overlay
 };
 
+// Posted (rarely - only on the stale-to-active transition) when a frame's
+// client content started changing after being idle; wakes the spinner engine.
+extern NSString *URSWindowTitleContentChangedNotification;
+
 @interface XCBFrame : XCBWindow
 {
     NSMutableDictionary *children;
@@ -86,6 +90,21 @@ typedef NS_ENUM(NSInteger, childrenMask)
 - (void) applyRoundedCornersShapeMask;
 - (void) clearShapeMasks;
 - (void) programmaticResizeToRect:(XCBRect)targetRect;
+
+// WindowShade: roll the window up into its titlebar (double-click or
+// _NET_WM_STATE_SHADED).  The client stays mapped and untouched - it is only
+// clipped by the smaller parent frame.
+- (void) shade;
+- (void) unshade;
+- (void) toggleShade;
+@property (nonatomic, assign) BOOL shadeAnimationInProgress;
+
+// Timestamp of the most recent damage on this frame's CLIENT content.
+// The client stays mapped and rendering while shaded, so this keeps
+// advancing even when the content is hidden - it drives the titlebar
+// activity spinner.  0 = never damaged since map.
+@property (nonatomic, assign) NSTimeInterval lastContentChange;
+- (void) noteContentChanged;
 
 // Theme-driven resize zones
 - (void) createResizeZonesFromTheme;

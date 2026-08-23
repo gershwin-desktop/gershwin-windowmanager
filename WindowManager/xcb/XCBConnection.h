@@ -95,6 +95,7 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void) restackDockWindowsAbove;
 - (void) lowerNormalWindowBeneathAllPeers:(XCBWindow *)aWindow;
 - (void) lowerNormalWindowAboveDesktop:(XCBWindow *)aWindow;
+- (void) noteClientContentDamage:(xcb_window_t)windowId;
 - (NSMutableDictionary *) windowsMap;
 - (void) setWindowsMap:(NSMutableDictionary *)aWindowsMap;
 - (void) closeConnection;

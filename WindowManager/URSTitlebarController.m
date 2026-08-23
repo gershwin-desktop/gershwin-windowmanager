@@ -21,7 +21,68 @@
 
     _connection = aConnection;
 
+    // Wake the spinner engine when any frame's hidden/shown content starts
+    // changing after being idle (see XCBFrame -noteContentChanged).
+    [[NSNotificationCenter defaultCenter]
+        addObserver:self
+           selector:@selector(spinnerActivityDetected:)
+               name:URSWindowTitleContentChangedNotification
+             object:nil];
+
     return self;
+}
+
+#pragma mark - Content-Activity Spinner Engine
+
+- (void)spinnerActivityDetected:(NSNotification *)notification
+{
+    [self startSpinnerEngineIfNeeded];
+}
+
+// One tick advances every active spinner and maps/unmaps spinners as the
+// 2-second activity window opens and closes.  Stops itself once nothing has
+// been active for a full sweep - no timers while the desktop is quiet.
+- (void)spinnerTick:(NSTimer *)timer
+{
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    BOOL anyActive = NO;
+
+    for (XCBWindow *w in [[self.connection windowsMap] allValues])
+    {
+        if (![w isKindOfClass:[XCBFrame class]])
+            continue;
+        XCBFrame *frame = (XCBFrame *)w;
+        XCBTitleBar *titlebar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+        if (!titlebar || ![titlebar isKindOfClass:[XCBTitleBar class]])
+            continue;
+
+        BOOL active = frame.lastContentChange > 0 &&
+                      (now - frame.lastContentChange) < 2.0;
+        if (active) {
+            anyActive = YES;
+            [titlebar updateSpinnerForActivity:active];
+        }
+    }
+
+    if (!anyActive)
+    {
+        [timer invalidate];
+        self.spinnerTimer = nil;
+    }
+}
+
+- (void)startSpinnerEngineIfNeeded
+{
+    if (self.spinnerTimer)
+        return;
+
+    self.spinnerTimer = [NSTimer timerWithTimeInterval:0.1
+                                               target:self
+                                             selector:@selector(spinnerTick:)
+                                             userInfo:nil
+                                              repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:self.spinnerTimer
+                              forMode:NSDefaultRunLoopMode];
 }
 
 #pragma mark - Button Hit Detection
@@ -96,6 +157,48 @@
     return GSThemeTitleBarButtonNone;
 }
 
+#pragma mark - Double-Click Detection
+
+// True when this press is the second click of a double-click on the same
+// titlebar (same frame, close in time, cursor at the same SCREEN position).
+// Always updates the tracker.
+//
+// Wall-clock time is used because X server timestamps cannot be trusted for
+// click pacing - XTEST/synthetic input may repeat identical stamps, which
+// would turn every click into a double-click.  Distance uses root
+// coordinates because event_x/event_y are relative to the titlebar: grabbing
+// the same spot twice yields identical relative coordinates even when the
+// window (and the cursor) moved far in between, which made two quick
+// consecutive window drags look like a double-click.
+- (BOOL)isDoubleClickOnTitlebar:(xcb_button_press_event_t *)pressEvent
+                          frame:(XCBFrame *)frame
+{
+    if (!frame) return NO;
+
+    // handleButtonPress issues ALLOW_REPLAY_POINTER for every unconsumed
+    // press, so the SAME press is delivered to us twice.  A redelivery
+    // carries the identical X timestamp: never treat it as a second click
+    // and do not let it corrupt the tracker.
+    if (frame == self.lastTitleClickFrame &&
+        pressEvent->time == self.lastTitleClickXTime)
+        return NO;
+
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    BOOL doubleClick =
+        self.lastTitleClickFrame == frame &&
+        (now - self.lastTitleClickWallTime) <= 0.4 &&
+        abs((int)pressEvent->root_x - (int)self.lastTitleClickRootX) <= 4 &&
+        abs((int)pressEvent->root_y - (int)self.lastTitleClickRootY) <= 4;
+
+    self.lastTitleClickWallTime = now;
+    self.lastTitleClickXTime = pressEvent->time;
+    self.lastTitleClickRootX = pressEvent->root_x;
+    self.lastTitleClickRootY = pressEvent->root_y;
+    self.lastTitleClickFrame = frame;
+
+    return doubleClick;
+}
+
 #pragma mark - Button Press Handling
 
 - (BOOL)handleTitlebarButtonPress:(xcb_button_press_event_t *)pressEvent
@@ -118,6 +221,24 @@
                                              forTitlebar:titlebar];
 
         if (button == GSThemeTitleBarButtonNone) {
+            // Double-click on the empty titlebar area toggles WindowShade.
+            XCBFrame *clickedFrame = nil;
+            if ([[titlebar parentWindow] isKindOfClass:[XCBFrame class]]) {
+                clickedFrame = (XCBFrame *)[titlebar parentWindow];
+            }
+            if (pressEvent->detail == 1 &&
+                [self isDoubleClickOnTitlebar:pressEvent frame:clickedFrame]) {
+                xcb_allow_events([self.connection connection],
+                                 XCB_ALLOW_ASYNC_POINTER, pressEvent->time);
+                [titlebar ungrabPointer];
+                self.connection.dragState = NO;
+                self.connection.resizeState = NO;
+
+                [clickedFrame toggleShade];
+
+                [self.connection flush];
+                return YES;
+            }
             return NO;
         }
 

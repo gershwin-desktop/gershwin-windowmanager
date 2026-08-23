@@ -1291,23 +1291,39 @@
             screen = nil;
         }
 
-        /*** TODO: test and complete it, but shading support has really low priority ***/
+        /*** WindowShade (titlebar double-click uses the same XCBFrame methods) ***/
 
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateShaded] ||
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateShaded])
         {
-            BOOL shaded = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow shaded]);
+            // Same target resolution as the above/below states: the flag is
+            // reported on the CLIENT, but the frame is what gets resized.
+            XCBWindow *stateOwner = aWindow;
+            XCBFrame *topLevel = nil;
 
-            if (shaded)
+            if ([aWindow isKindOfClass:[XCBFrame class]])
             {
-                if ([aWindow isMinimized])
-                    return;
-
-                [aWindow shade];
-                [aWindow setShaded:shaded];
+                topLevel = (XCBFrame *)aWindow;
+                stateOwner = [topLevel childWindowForKey:ClientWindow] ?: aWindow;
+            }
+            else if ([aWindow decorated] &&
+                     [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+            {
+                topLevel = (XCBFrame *)[aWindow parentWindow];
             }
 
-            [self updateNetWmState:aWindow];
+            BOOL wasShaded = [stateOwner shaded];
+            BOOL shade = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && !wasShaded);
+
+            if (topLevel)
+            {
+                if (shade && !wasShaded)
+                    [topLevel shade];
+                else if (!shade && wasShaded)
+                    [topLevel unshade];
+            }
+
+            [self updateNetWmState:stateOwner];
         }
 
         /*** TODO: test ***/

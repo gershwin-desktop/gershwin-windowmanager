@@ -98,6 +98,10 @@
 // Perform repair immediately without deferring (for critical updates like cursor blinking)
 - (void)performRepairNow;
 
+// Re-acquire and repaint one window's content right now.  Used by direct
+// X-drawing animations (titlebar spinner) that bypass the damage pipeline.
+- (void)repairRegionForWindow:(xcb_window_t)windowId;
+
 // Mark a window to skip shadow rendering (e.g. snap preview overlay)
 - (void)setSkipShadowForWindow:(xcb_window_t)windowId;
 - (void)clearSkipShadowForWindow:(xcb_window_t)windowId;

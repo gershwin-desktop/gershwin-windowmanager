@@ -1409,11 +1409,6 @@
     icccmService = nil;
 }
 
-- (void) shade
-{
-    [connection unmapWindow:self];
-}
-
 - (void) putWindowBackgroundWithPixmap:(xcb_pixmap_t)aPixmap
 {
     uint32_t mask = XCB_CW_BACK_PIXMAP;

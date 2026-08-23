@@ -42,6 +42,16 @@ XCB_EVENT_MASK_KEY_PRESS
 @property (strong, nonatomic) EWMHService *ewmhService;
 @property (nonatomic, assign) BOOL titleIsSet;
 
+// Content-activity spinner: small rotating indicator painted into the
+// titlebar pixmap right after the title text whenever the (possibly
+// hidden/shaded) client content changed within the last 2 seconds.
+@property (nonatomic, assign) int spinnerPhase;
+@property (nonatomic, assign) xcb_gcontext_t spinnerGC;
+@property (nonatomic, assign) BOOL spinnerDrawn;
+
+- (void) updateSpinnerForActivity:(BOOL)active;
+- (CGFloat) spinnerTargetX;
+
 - (id) initWithFrame:(XCBFrame*) aFrame withConnection:(XCBConnection*) aConnection;
 - (void) drawArcsForColor:(TitleBarColor)aColor;
 
