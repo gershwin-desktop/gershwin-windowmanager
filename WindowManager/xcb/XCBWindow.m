@@ -952,8 +952,13 @@
 
     uint32_t values[1] = {XCB_STACK_MODE_ABOVE};
     xcb_configure_window([connection connection], window, XCB_CONFIG_WINDOW_STACK_MODE, &values);
-    isAbove = YES;
-    isBelow = NO;
+
+    // Deliberately does NOT touch isAbove/isBelow: those flag the EWMH
+    // keep-above / keep-below state and must only change through explicit
+    // _NET_WM_STATE handling.  Ordinary raises (click-to-focus, map,
+    // unminimize) happen constantly and would otherwise corrupt the state
+    // reported to pagers.  Active-look is driven separately via setIsAbove:
+    // on titlebars from the focus code.
 
     [ewmhService updateNetClientList];
     ewmhService = nil;
@@ -963,8 +968,6 @@
 {
     uint32_t values[1] = {XCB_STACK_MODE_BELOW};
     xcb_configure_window([connection connection], window, XCB_CONFIG_WINDOW_STACK_MODE, &values);
-    isAbove = NO;
-    isBelow = YES;
 
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
     [ewmhService updateNetClientList];

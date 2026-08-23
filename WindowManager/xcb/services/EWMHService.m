@@ -855,6 +855,15 @@
                 frame = nil;
                 titleBar = nil;
             }
+            else if ([aWindow isKindOfClass:[XCBFrame class]])
+            {
+                // Activation requests addressed to the frame id (what
+                // pagers resolve via WM_NAME) must raise the frame too;
+                // it has no parent frame, so the branch above never fired
+                // and the window was focused but left buried.
+                [(XCBFrame *)aWindow stackAbove];
+                [connection restackDockWindowsAbove];
+            }
         }
 
         // Always publish the active window on the root, even when the window
@@ -892,26 +901,84 @@
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateAbove] ||
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateAbove])
         {
-            BOOL above = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow isAbove]);
+            // The keep-above flag is reported through _NET_WM_STATE on the
+            // CLIENT window, but the frame is what actually takes part in
+            // root-level stacking.  Messages may address either id, so both
+            // objects are resolved up front; without this, requests were
+            // either silently ignored (client addressed: only the client was
+            // restacked inside its frame) or left the window stuck above its
+            // peers forever (no restack on remove/toggle-off).
+            XCBWindow *topLevel = aWindow;
+            XCBWindow *stateOwner = aWindow;
 
-            if (above)
+            if ([aWindow isKindOfClass:[XCBFrame class]])
             {
-                [aWindow stackAbove];
-                [connection restackDockWindowsAbove];
+                topLevel = aWindow;
+                stateOwner = [(XCBFrame *)aWindow childWindowForKey:ClientWindow] ?: aWindow;
+            }
+            else if ([aWindow decorated] &&
+                     [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+            {
+                topLevel = [aWindow parentWindow];
             }
 
-            [self updateNetWmState:aWindow];
+            BOOL wasAbove = [stateOwner isAbove];
+            BOOL above = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && !wasAbove);
+
+            // Only restack when the state really changes; a redundant REMOVE
+            // on an ordinary window must not move anything.
+            if (above && !wasAbove)
+            {
+                [topLevel stackAbove];
+                [connection restackDockWindowsAbove];
+                [stateOwner setIsAbove:YES];
+                [stateOwner setIsBelow:NO];
+            }
+            else if (!above && wasAbove)
+            {
+                [connection lowerNormalWindowBeneathAllPeers:topLevel];
+                [stateOwner setIsAbove:NO];
+            }
+
+            [self updateNetWmState:stateOwner];
         }
 
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateBelow] ||
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateBelow])
         {
-            BOOL below = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow isBelow]);
+            XCBWindow *topLevel = aWindow;
+            XCBWindow *stateOwner = aWindow;
 
-            if (below)
-                [aWindow stackBelow];
+            if ([aWindow isKindOfClass:[XCBFrame class]])
+            {
+                topLevel = aWindow;
+                stateOwner = [(XCBFrame *)aWindow childWindowForKey:ClientWindow] ?: aWindow;
+            }
+            else if ([aWindow decorated] &&
+                     [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+            {
+                topLevel = [aWindow parentWindow];
+            }
 
-            [self updateNetWmState:aWindow];
+            BOOL wasBelow = [stateOwner isBelow];
+            BOOL below = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && !wasBelow);
+
+            if (below && !wasBelow)
+            {
+                // Keep-below stops at the desktop layer; a window must never
+                // disappear underneath it.
+                [connection lowerNormalWindowAboveDesktop:topLevel];
+                [stateOwner setIsBelow:YES];
+                [stateOwner setIsAbove:NO];
+            }
+            else if (!below && wasBelow)
+            {
+                // Removing keep-below returns the window to ordinary stacking.
+                [connection lowerNormalWindowBeneathAllPeers:topLevel];
+                [stateOwner setIsBelow:NO];
+            }
+
+            [self updateNetWmState:stateOwner];
         }
 
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateMaximizedHorz] ||

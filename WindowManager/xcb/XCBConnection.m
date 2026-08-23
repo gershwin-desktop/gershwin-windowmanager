@@ -517,7 +517,159 @@ static XCBConnection *sharedInstance;
         }
     }
 
+
     ewmhService = nil;
+}
+
+// X window id of the LOWEST root-level child that belongs to another
+// managed, decorated, ordinary window (frame).  Desktops, docks, menus and
+// fullscreen frames never count as peers: removing keep-above must place a
+// window among its normal siblings, not below (or above) special layers.
+- (xcb_window_t)lowestManagedNormalFrameIdExcluding:(xcb_window_t)excludeWin
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    NSString *dockType = [ewmhService EWMHWMWindowTypeDock];
+    NSString *desktopType = [ewmhService EWMHWMWindowTypeDesktop];
+    NSString *menuType = [ewmhService EWMHWMWindowTypeMenu];
+    NSString *popupMenuType = [ewmhService EWMHWMWindowTypePopupMenu];
+    NSString *dropdownMenuType = [ewmhService EWMHWMWindowTypeDropdownMenu];
+
+    xcb_window_t rootWin = [[[[self screens] firstObject] rootWindow] window];
+    xcb_query_tree_cookie_t treeCookie = xcb_query_tree(connection, rootWin);
+    xcb_query_tree_reply_t *treeReply = xcb_query_tree_reply(connection, treeCookie, NULL);
+    xcb_window_t peer = 0;
+
+    if (treeReply)
+    {
+        int n = xcb_query_tree_children_length(treeReply);
+        xcb_window_t *kids = xcb_query_tree_children(treeReply);
+
+        // Children are listed bottom-most first, so scan from the start.
+        for (int i = 0; i < n && peer == 0; i++)
+        {
+            if (kids[i] == excludeWin)
+                continue;
+
+            XCBWindow *managed = [self windowForXCBId:kids[i]];
+            if (![managed isKindOfClass:[XCBFrame class]])
+                continue;
+
+            XCBWindow *client = [(XCBFrame *)managed childWindowForKey:ClientWindow];
+            if (!client)
+                continue;
+
+            // Fullscreen frames live above the dock layer, not in the
+            // normal sibling order.
+            if ([client fullScreen])
+                continue;
+
+            NSString *type = [client windowType];
+            if ([type isEqualToString:dockType] ||
+                [type isEqualToString:desktopType] ||
+                [type isEqualToString:menuType] ||
+                [type isEqualToString:popupMenuType] ||
+                [type isEqualToString:dropdownMenuType])
+                continue;
+
+            peer = kids[i];
+        }
+        free(treeReply);
+    }
+
+    ewmhService = nil;
+    return peer;
+}
+
+// Place aWindow directly beneath the LOWEST other managed normal frame,
+// i.e. beneath ALL of them, so a removed keep-above (_NET_WM_STATE_ABOVE)
+// or keep-below state returns the window to ordinary stacking instead of
+// leaving it stuck above (or at the very bottom of) its peers.
+- (void)lowerNormalWindowBeneathAllPeers:(XCBWindow *)aWindow
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    BOOL isDesktop = [aWindow windowType] &&
+        [[aWindow windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]];
+    ewmhService = nil;
+
+    if (!aWindow || isDesktop)
+        return;
+
+    uint32_t selfWin = [aWindow window];
+    xcb_window_t peer = [self lowestManagedNormalFrameIdExcluding:selfWin];
+
+    if (peer != 0)
+    {
+        uint32_t values[2] = { peer, XCB_STACK_MODE_BELOW };
+        xcb_configure_window(connection,
+                             selfWin,
+                             XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE,
+                             values);
+        [self flush];
+    }
+
+    [self restackDockWindowsAbove];
+}
+
+// Place aWindow directly above the lowest desktop window.  Used when
+// _NET_WM_STATE_BELOW is added: "below" must not push a window underneath
+// the desktop layer, where it would be invisible.
+//
+// The desktop surface cannot be looked up through windowsMap: Workspace's
+// desktop window is kept UNMANAGED (a plain root child), so its type must
+// be read straight off the tree.
+- (void)lowerNormalWindowAboveDesktop:(XCBWindow *)aWindow
+{
+    if (!aWindow)
+        return;
+
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self];
+    xcb_atom_t desktopTypeAtom = [atomService atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDesktop]];
+    xcb_atom_t typePropertyAtom = [atomService atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowType]];
+    ewmhService = nil;
+    atomService = nil;
+
+    xcb_window_t rootWin = [[[[self screens] firstObject] rootWindow] window];
+    xcb_query_tree_cookie_t treeCookie = xcb_query_tree(connection, rootWin);
+    xcb_query_tree_reply_t *treeReply = xcb_query_tree_reply(connection, treeCookie, NULL);
+
+    if (treeReply)
+    {
+        int n = xcb_query_tree_children_length(treeReply);
+        xcb_window_t *kids = xcb_query_tree_children(treeReply);
+        xcb_window_t desktopWin = 0;
+
+        // Bottom-most root child carrying _NET_WM_WINDOW_TYPE_DESKTOP,
+        // managed or not.
+        for (int i = 0; i < n && desktopWin == 0; i++)
+        {
+            xcb_get_property_cookie_t pc = xcb_get_property(connection,
+                                                            0,
+                                                            kids[i],
+                                                            typePropertyAtom,
+                                                            XCB_ATOM_ATOM,
+                                                            0,
+                                                            32);
+            xcb_get_property_reply_t *pr = xcb_get_property_reply(connection, pc, NULL);
+            if (pr && xcb_get_property_value_length(pr) > 0
+                && ((xcb_atom_t *)xcb_get_property_value(pr))[0] == desktopTypeAtom)
+                desktopWin = kids[i];
+            free(pr);
+        }
+        free(treeReply);
+
+        if (desktopWin != 0 && desktopWin != [aWindow window])
+        {
+            uint32_t values[2] = { desktopWin, XCB_STACK_MODE_ABOVE };
+            xcb_configure_window(connection,
+                                 [aWindow window],
+                                 XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE,
+                                 values);
+            [self flush];
+        }
+    }
+
+    [self restackDockWindowsAbove];
 }
 
 - (void)closeConnection
@@ -1690,6 +1842,16 @@ static XCBConnection *sharedInstance;
             [borderColor getRed:&r green:&g blue:&b alpha:&a];
             borderPixel = ((uint8_t)(r * 255) << 16) | ((uint8_t)(g * 255) << 8) | (uint8_t)(b * 255);
         }
+    }
+
+    // Without a compositor the only window outline is the frame background
+    // showing through the clientBorder strips around the client.  Theme stroke
+    // colors are tuned for composited drop shadows and can be near-invisible
+    // here, so pin the strips to a fixed mid grey that separates windows on
+    // any background.  With compositing on, drop shadows separate windows and
+    // the theme color applies.
+    if (!compositorActive) {
+        borderPixel = 0x808080;
     }
 
     XCBVisual *visual = nil;
