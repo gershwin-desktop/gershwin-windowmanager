@@ -3144,7 +3144,18 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
             xcb_rectangle_t winRect = { cw.x, cw.y,
                 (uint16_t)(cw.width + 2 * cw.borderWidth),
                 (uint16_t)(cw.height + 2 * cw.borderWidth) };
-            xcb_render_set_picture_clip_rectangles(conn, self.rootBuffer, 0, 0, 1, &winRect);
+            // Clip the opaque composite to the FULL window rect.  Use a region
+            // clip (set_picture_clip_region) rather than set_picture_clip_rectangles:
+            // the two clip mechanisms are not mutually exclusive on every X server,
+            // so a rectangle clip does not reliably replace the damage-region clip
+            // set above.  The result was the composite being silently restricted to
+            // the damage sub-rectangle, leaving the rest of the window stale and
+            // the frame's grey back_pixel bleeding through.  A region clip made
+            // from the same rect always replaces the damage-region clip.
+            xcb_xfixes_region_t winClip = xcb_generate_id(conn);
+            xcb_xfixes_create_region(conn, winClip, 1, &winRect);
+            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, winClip, 0, 0);
+            xcb_xfixes_destroy_region(conn, winClip);
 
             [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion];
 
