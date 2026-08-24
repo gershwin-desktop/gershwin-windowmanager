@@ -46,6 +46,7 @@ static inline CGFloat ShadeScaleFactor(void)
 @synthesize spinnerPhase;
 @synthesize spinnerGC;
 @synthesize spinnerDrawn;
+@synthesize spinnerRenderFrame;
 
 
 - (id) initWithFrame:(XCBFrame *)aFrame withConnection:(XCBConnection *)aConnection
@@ -354,7 +355,9 @@ static const int SPINNER_DIR[8][2] = {
     CGFloat tbH = [self windowRect].size.height;
 
     BOOL orbStyle = [URSThemeIntegration isOrbButtonStyle];
-    CGFloat left = orbStyle ? SPINNER_ORB_REGION_WIDTH : 0.0;
+    // Edge layout reserves the square close button (width == bar height) on
+    // the left; orb layout reserves the orb region.
+    CGFloat left = orbStyle ? SPINNER_ORB_REGION_WIDTH : tbH;
 
     XCBFrame *frame = nil;
     if ([[self parentWindow] isKindOfClass:[XCBFrame class]])
@@ -366,9 +369,23 @@ static const int SPINNER_DIR[8][2] = {
                                     : ((hasMaximize ? 2.0 : 1.0) * tbH);
 
     NSString *title = windowTitle ?: @"";
-    NSDictionary *attrs = @{ NSFontAttributeName:
-        [NSFont systemFontOfSize:SPINNER_TITLE_FONT_SIZE] };
-    CGFloat textW = [title sizeWithAttributes:attrs].width;
+    // Measure with the SAME font the theme renders titles with (theme
+    // bundle NSFont/NSFontSize, falling back to system font) - a system-font
+    // estimate runs short and the spinner overlaps the last characters.
+    NSString *themeFontName = @"LuxiSans";
+    CGFloat themeFontSize = 13.0;
+    GSTheme *theme = [URSThemeIntegration currentTheme];
+    if (theme && [theme bundle] && [[theme bundle] infoDictionary]) {
+        NSString *fontName = [[theme bundle] infoDictionary][@"NSFont"];
+        NSString *fontSize = [[theme bundle] infoDictionary][@"NSFontSize"];
+        if (fontName) themeFontName = fontName;
+        if (fontSize) themeFontSize = [fontSize floatValue];
+    }
+    NSFont *titleFont = [NSFont fontWithName:themeFontName
+                                        size:themeFontSize * scale] ?:
+                         [NSFont systemFontOfSize:SPINNER_TITLE_FONT_SIZE];
+    CGFloat textW = [title sizeWithAttributes:
+        @{ NSFontAttributeName: titleFont }].width;
 
     CGFloat workW = tbW - left - rightReserve;
     if (workW < 20.0)
@@ -378,8 +395,8 @@ static const int SPINNER_DIR[8][2] = {
     CGFloat textLeft = MAX(centeredX, left);
     CGFloat textEnd = MIN(textLeft + textW, tbW - rightReserve);
 
-    CGFloat x = textEnd + 5.0 * scale;
-    return MIN(x, tbW - rightReserve - 14.0);
+    CGFloat x = textEnd + 8.0 * scale;
+    return MIN(x, tbW - rightReserve - tbH);
 }
 
 // Draw the current spinner phase into the TITLEBAR's own pixmap and blit
@@ -388,6 +405,27 @@ static const int SPINNER_DIR[8][2] = {
 // compositor sees an ordinary titlebar update.
 - (void)drawSpinnerPhase:(int)phase
 {
+    if ([self isGSThemeActive])
+    {
+        // Theme path: let renderGSThemeToWindow overlay the theme spinner
+        // frame (common_ProgressSpinning_N) after the title text.  Blending,
+        // dPixmap sync and compositor notification stay in the existing
+        // render pipeline.
+        self.spinnerRenderFrame = phase % 8;
+        XCBFrame *frame = nil;
+        if ([[self parentWindow] isKindOfClass:[XCBFrame class]])
+            frame = (XCBFrame *)[self parentWindow];
+        if (frame)
+            [URSThemeIntegration renderGSThemeToWindow:self
+                                                frame:frame
+                                                title:windowTitle
+                                               active:[self isAbove]];
+        return;
+    }
+
+    // Legacy (non-GSTheme) path: hand-drawn spokes straight into the pixmap.
+    if (phase < 0)
+        [self drawTitleBarComponents];
     xcb_pixmap_t pix = [self isAbove] ? [self pixmap] : [self dPixmap];
     if (!pix || !self.connection)
         return;
@@ -412,9 +450,6 @@ static const int SPINNER_DIR[8][2] = {
     int16_t rIn = (int16_t)(rOut - 2.5 * scale);
     if (rIn < 1) rIn = 1;
 
-    // Trailing fade: leading spoke darkest, tail lightest.  ARGB: the alpha
-    // byte must be set or every spoke renders fully transparent on the
-    // 32-bit titlebar visual.
     const uint32_t grays[8] = { 0xFF1a1a1a, 0xFF333333, 0xFF4d4d4d, 0xFF666666,
                                 0xFF808080, 0xFF999999, 0xFFb3b3b3, 0xFFd0d0d0 };
 
@@ -436,9 +471,6 @@ static const int SPINNER_DIR[8][2] = {
         xcb_poly_segment(conn, pix, self.spinnerGC, 1, seg);
     }
 
-    // Blit the spinner rectangle from the pixmap onto the titlebar window
-    // through the normal pipeline, then refresh the compositor's cached
-    // picture for the titlebar (direct X drawing produces no Damage).
     XCBRect blit = XCBMakeRect(XCBMakePoint(rx, ry),
                                XCBMakeSize((uint16_t)size + 1, (uint16_t)size + 1));
     [self drawArea:blit];
@@ -460,37 +492,20 @@ static const int SPINNER_DIR[8][2] = {
     xcb_flush(conn);
 }
 
-// Called by the spinner engine tick.  While active: advance the phase and
-// repaint the glyph.  When activity ends: restore the clean theme-rendered
-// bar once, erasing the glyph.
 - (void)updateSpinnerForActivity:(BOOL)active
 {
     if (active)
     {
         self.spinnerPhase = (self.spinnerPhase + 1) % 8;
         [self drawSpinnerPhase:self.spinnerPhase];
+        self.spinnerDrawn = YES;
     }
     else if (self.spinnerDrawn)
     {
+        // Activity window closed: render the clean bar once (spinner frame
+        // -1 draws nothing).
         self.spinnerDrawn = NO;
-
-        // Full re-render wipes the glyph; works for both the GSTheme and
-        // the legacy path.
-        if ([self isGSThemeActive])
-        {
-            XCBFrame *frame = nil;
-            if ([[self parentWindow] isKindOfClass:[XCBFrame class]])
-                frame = (XCBFrame *)[self parentWindow];
-            if (frame)
-            {
-                [URSThemeIntegration renderGSThemeToWindow:self
-                                                    frame:frame
-                                                    title:windowTitle
-                                                   active:[self isAbove]];
-                return;
-            }
-        }
-        [self drawTitleBarComponents];
+        [self drawSpinnerPhase:-1];
     }
 }
 

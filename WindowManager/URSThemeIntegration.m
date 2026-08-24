@@ -1230,6 +1230,37 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // Restore graphics state
         [gctx restoreGraphicsState];
 
+        // *** CONTENT-ACTIVITY SPINNER OVERLAY ***
+        // When the window manager flagged this titlebar as showing content
+        // activity, draw the system theme spinner frame (the same
+        // common_ProgressSpinning_N art every NSProgressIndicator uses)
+        // right after the title text, at full titlebar height and square.
+        if ([titlebar respondsToSelector:@selector(spinnerRenderFrame)] &&
+            [(XCBTitleBar *)titlebar spinnerRenderFrame] >= 0) {
+            static NSMutableArray<NSImage *> *spinnerFrames = nil;
+            if (!spinnerFrames) {
+                spinnerFrames = [[NSMutableArray alloc] init];
+                for (int i = 1; i <= 16; i++) {
+                    NSImage *img = [NSImage imageNamed:
+                        [NSString stringWithFormat:@"common_ProgressSpinning_%d", i]];
+                    if (!img) break;
+                    [spinnerFrames addObject:img];
+                }
+            }
+
+            int frameIdx = [(XCBTitleBar *)titlebar spinnerRenderFrame];
+            if (spinnerFrames.count > 0) {
+                NSImage *spin = spinnerFrames[frameIdx % (int)spinnerFrames.count];
+                CGFloat side = titlebarSize.height;
+                CGFloat sx = [(XCBTitleBar *)titlebar spinnerTargetX];
+                NSRect spinRect = NSMakeRect(sx, 0, side, side);
+                [spin drawInRect:spinRect
+                        fromRect:NSZeroRect
+                      operation:NSCompositeSourceOver
+                       fraction:1.0];
+            }
+        }
+
         // *** BUTTON DRAWING ***
         CGFloat titlebarWidth = titlebarSize.width;
         CGFloat buttonHeight = titlebarSize.height;

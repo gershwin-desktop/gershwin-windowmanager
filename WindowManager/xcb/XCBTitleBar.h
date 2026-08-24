@@ -48,6 +48,9 @@ XCB_EVENT_MASK_KEY_PRESS
 @property (nonatomic, assign) int spinnerPhase;
 @property (nonatomic, assign) xcb_gcontext_t spinnerGC;
 @property (nonatomic, assign) BOOL spinnerDrawn;
+// >= 0 while the theme render should overlay the spinner frame at
+// spinnerTargetX; -1 renders the clean bar.
+@property (nonatomic, assign) int spinnerRenderFrame;
 
 - (void) updateSpinnerForActivity:(BOOL)active;
 - (CGFloat) spinnerTargetX;
