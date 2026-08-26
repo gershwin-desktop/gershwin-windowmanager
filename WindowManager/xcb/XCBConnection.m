@@ -30,6 +30,7 @@
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
 - (BOOL)compositingActive;
+- (void)updateBypassCompositorForWindow:(xcb_window_t)windowId;
 - (void)setCloseAnimating:(BOOL)closeAnimating forWindow:(xcb_window_t)windowId;
 - (void)captureCloseSnapshotNowForWindow:(xcb_window_t)windowId;
 - (void)animateWindowMinimize:(xcb_window_t)windowId
@@ -3401,7 +3402,7 @@ static XCBConnection *sharedInstance;
     }
 }
 
-- (void) handlePropertyNotify:(xcb_property_notify_event_t*)anEvent
+ - (void) handlePropertyNotify:(xcb_property_notify_event_t*)anEvent
 {
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self];
 
@@ -3414,6 +3415,19 @@ static XCBConnection *sharedInstance;
         atomService = nil;
         name = nil;
         return;
+    }
+
+    if ([name isEqualToString:@"_NET_WM_BYPASS_COMPOSITOR"])
+    {
+        // The client may set this only after the window is mapped, so re-apply
+        // the compositor's redirect state when it changes.  See
+        // -updateBypassCompositorForWindow: in URSCompositingManager.
+        Class compositorClass = NSClassFromString(@"URSCompositingManager");
+        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+        {
+            id<URSCompositingManaging> compositor = [compositorClass performSelector:@selector(sharedManager)];
+            [compositor updateBypassCompositorForWindow:anEvent->window];
+        }
     }
 
     if ([name isEqualToString:@"WM_HINTS"])

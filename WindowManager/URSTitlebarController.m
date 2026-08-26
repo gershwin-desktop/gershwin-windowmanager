@@ -56,13 +56,22 @@
         if (!titlebar || ![titlebar isKindOfClass:[XCBTitleBar class]])
             continue;
 
-        BOOL active = frame.lastContentChange > 0 &&
-                      (now - frame.lastContentChange) < 2.0;
-        if (active)
-            anyActive = YES;
+        // Only roll-up (WindowShade) windows show the activity spinner: a
+        // visible window already displays its own content changing, so a
+        // titlebar spinner would be redundant noise.  While shaded the client
+        // is clipped out and the spinner is the only visible sign of activity.
+        BOOL active = NO;
+        if ([frame shaded])
+          {
+            active = frame.lastContentChange > 0 &&
+                     (now - frame.lastContentChange) < 2.0;
+            if (active)
+                anyActive = YES;
+          }
 
         // Drive the spinner both ways (active AND inactive) so it can fade
-        // out after the 2s activity window closes.
+        // out after the 2s activity window closes.  Non-shaded windows are
+        // always driven inactive so any leftover spinner is cleared.
         [titlebar updateSpinnerForActivity:active];
 
         // Keep the engine alive while any spinner is still fading out.

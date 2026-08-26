@@ -1313,29 +1313,17 @@
     cw.redirected = YES;
     cw.overrideRedirect = attr->override_redirect;
 
-    // Check _NET_WM_BYPASS_COMPOSITOR: if set to 1, the client requests
-    // the compositor to not redirect (composite) this window.  Opaque
-    // frequently-updating windows like terminals benefit from this.
-    if (self.bypassCompositorAtom != XCB_NONE)
-      {
-        xcb_get_property_cookie_t prop_cookie =
-            xcb_get_property(conn, 0, windowId,
-                             self.bypassCompositorAtom, XCB_ATOM_CARDINAL, 0, 1);
-        xcb_get_property_reply_t *prop_reply =
-            xcb_get_property_reply(conn, prop_cookie, NULL);
-        if (prop_reply && prop_reply->type == XCB_ATOM_CARDINAL
-            && prop_reply->format == 32 && prop_reply->value_len > 0)
-          {
-            uint32_t bypass = *(uint32_t *)xcb_get_property_value(prop_reply);
-            if (bypass == 1)
-              {
-                cw.redirected = NO;
-                xcb_composite_unredirect_window(conn, windowId,
-                                                XCB_COMPOSITE_REDIRECT_MANUAL);
-              }
-          }
-        free(prop_reply);
-      }
+    // Register early so updateBypassCompositorForWindow: can resolve this
+    // window (it is also re-applied later when the property changes).
+    self.cwindows[@(windowId)] = cw;
+
+    // Honor _NET_WM_BYPASS_COMPOSITOR.  This may arrive only AFTER addWindow
+    // (e.g. Terminal.app sets it in -showWindow: once the X window exists), so
+    // it is also re-applied from the PropertyNotify handler — see
+    // handlePropertyNotify: in XCBConnection.  If the window ends up unredirected
+    // it draws directly to the screen, so resize/redraw never depends on the
+    // compositor's per-damage repaint path.
+    [self updateBypassCompositorForWindow:windowId];
 
     // Track parent and compute absolute position in root coordinates
     xcb_query_tree_cookie_t tree_cookie = xcb_query_tree(conn, windowId);
@@ -1350,17 +1338,6 @@
         cw.parentWindowId = XCB_NONE;
     }
     [self updateAbsolutePositionForWindow:cw];
-    
-    if (cw.redirected) {
-      // Create damage object for the window (only for composited windows).
-      // Use DELTA_RECTANGLES instead of NON_EMPTY so we keep receiving
-      // notifications for ongoing client redraws even if one notify is dropped.
-      // NON_EMPTY can stall forever when the empty->non-empty transition event is
-      // missed, which manifests as content only updating when unrelated events
-      // (for example titlebar hover redraws) force a repaint.
-      cw.damage = xcb_generate_id(conn);
-      xcb_damage_create(conn, cw.damage, windowId, XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
-    }
 
     // Content-activity detection: a dedicated Damage object on the managed
     // CLIENT window (not the frame).  The frame Damage only reports VISIBLE
@@ -1386,11 +1363,81 @@
     
     // OPTIMIZATION: Mark stacking order dirty (will be rebuilt on next paint)
     self.stackingOrderDirty = YES;
-    
+
     free(attr);
     free(geom);
-    
+
     [self.connection flush];
+}
+
+// (Re-)evaluate _NET_WM_BYPASS_COMPOSITOR for a managed window and apply or
+// remove the per-window redirect accordingly.  Called from addWindow: (where
+// the property may already be set) and from the PropertyNotify handler (where
+// the client sets it only after the window is mapped).  Idempotent: does
+// nothing if the desired state already matches.  Keeps cw.damage in sync with
+// cw.redirected so a window that becomes unredirected is no longer tracked by
+// the compositor's damage loop, and one that becomes redirected starts getting
+// damage notifications again.
+- (void)updateBypassCompositorForWindow:(xcb_window_t)windowId
+{
+    xcb_connection_t *conn = [self.connection connection];
+
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw)
+        return;
+
+    BOOL wantBypass = NO;
+    if (self.bypassCompositorAtom != XCB_NONE) {
+        xcb_get_property_cookie_t prop_cookie =
+            xcb_get_property(conn, 0, windowId,
+                             self.bypassCompositorAtom, XCB_ATOM_CARDINAL, 0, 1);
+        xcb_get_property_reply_t *prop_reply =
+            xcb_get_property_reply(conn, prop_cookie, NULL);
+        if (prop_reply && prop_reply->type == XCB_ATOM_CARDINAL
+            && prop_reply->format == 32 && prop_reply->value_len > 0) {
+            uint32_t bypass = *(uint32_t *)xcb_get_property_value(prop_reply);
+            wantBypass = (bypass == 1);
+        }
+        free(prop_reply);
+    }
+
+    BOOL currentlyBypassed = !cw.redirected;
+
+    if (wantBypass && !currentlyBypassed) {
+        // Transition to unredirected: drop the damage object and let the
+        // window draw directly to the screen.
+        cw.redirected = NO;
+        if (cw.damage != XCB_NONE) {
+            xcb_damage_destroy(conn, cw.damage);
+            cw.damage = XCB_NONE;
+        }
+        xcb_composite_unredirect_window(conn, windowId,
+                                        XCB_COMPOSITE_REDIRECT_MANUAL);
+        [self damageScreen];
+    } else if (!wantBypass && currentlyBypassed) {
+        // Transition back to redirected (was bypassed): re-establish the
+        // damage object and re-redirect.  Freshly added windows are already
+        // redirected by the root's REDIRECT_MANUAL, so this path is only for
+        // a runtime property change away from bypass.
+        cw.redirected = YES;
+        if (cw.damage == XCB_NONE) {
+            cw.damage = xcb_generate_id(conn);
+            xcb_damage_create(conn, cw.damage, windowId,
+                              XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
+        }
+        xcb_composite_redirect_window(conn, windowId,
+                                      XCB_COMPOSITE_REDIRECT_MANUAL);
+        [self damageScreen];
+    } else {
+        // No bypass-state change: make sure a redirected window still has its
+        // damage object (this is the common addWindow case where the property
+        // is absent).  Without it the compositor would never repaint content.
+        if (cw.redirected && cw.damage == XCB_NONE) {
+            cw.damage = xcb_generate_id(conn);
+            xcb_damage_create(conn, cw.damage, windowId,
+                              XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
+        }
+    }
 }
 
 #pragma mark - Transparent Background Detection
