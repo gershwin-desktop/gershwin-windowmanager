@@ -25,9 +25,17 @@
         return;
     }
 
-    // Ensure AppKit global UI (including menu bar visuals) reflects the
-    // window that was just focused via X11 path.
-    [NSApp activateIgnoringOtherApps:YES];
+    // The WindowManager is not a user-facing application and must NOT take
+    // part in the cross-app activation protocol.  Calling
+    // -activateIgnoringOtherApps: here broadcasts a distributed
+    // NSApplicationDidBecomeActiveNotification (NSWorkspace's
+    // _GSWorkspaceCenter forwards it to the distributed notification center,
+    // gdnc).  Every other GNUstep app then resigns and broadcasts
+    // NSApplicationDidResignActiveNotification, and the resulting
+    // resign/become pair ping-pongs through gdnc forever - the "two active
+    // states never resolved" problem described further below.  The newly
+    // focused app activates itself through the backend as soon as it gains
+    // X11 input focus, so the WM has no reason to activate itself at all.
     [NSApp updateWindows];
 
     NSMenu *menu = [NSApp mainMenu];
