@@ -509,8 +509,42 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
 /*** performance while resizing pixel by pixel is critical so we do everything we can to improve it also if the message signature looks bad ***/
 
-- (void) resize:(xcb_motion_notify_event_t *)anEvent xcbConnection:(xcb_connection_t*)aXcbConnection
-{
+ // While shaded there is no vertical content to resize, so the resize
+ // cursor must not advertise a resize that is disabled.  Flip every
+ // resize-zone/handle window's cursor between its resize cursor and the
+ // normal left pointer according to the shade state.
+ - (void)updateResizeCursorForShadedState
+ {
+     BOOL shaded = [self shaded];
+
+     XCBWindow *handle = [self childWindowForKey:ResizeHandle];
+     if (handle) {
+         if (shaded) [handle showLeftPointerCursor];
+         else        [handle showResizeCursorForPosition:BottomRightCorner];
+     }
+
+     struct { childrenMask key; MousePosition pos; } map[] = {
+         { ResizeZoneN,    TopBorder },
+         { ResizeZoneS,    BottomBorder },
+         { ResizeZoneE,    RightBorder },
+         { ResizeZoneW,    LeftBorder },
+         { ResizeZoneNE,   TopRightCorner },
+         { ResizeZoneNW,   TopLeftCorner },
+         { ResizeZoneSE,   BottomRightCorner },
+         { ResizeZoneSW,   BottomLeftCorner },
+         { ResizeZoneGrowBox, BottomRightCorner }
+     };
+     for (int i = 0; i < (int)(sizeof(map) / sizeof(map[0])); i++) {
+         XCBWindow *zone = [self childWindowForKey:map[i].key];
+         if (!zone)
+             continue;
+         if (shaded) [zone showLeftPointerCursor];
+         else        [zone showResizeCursorForPosition:map[i].pos];
+     }
+ }
+
+ - (void) resize:(xcb_motion_notify_event_t *)anEvent xcbConnection:(xcb_connection_t*)aXcbConnection
+ {
     int clientBorder = self.clientBorder;
 
     /* Always use the current service titlebar height so interactive resizes
@@ -532,17 +566,21 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
 
-    /** height **/
+    /** height - disabled while shaded (the frame is clipped to the
+     *  titlebar, so there is no vertical content to resize; corners keep
+     *  their horizontal component below). **/
 
     if (bottomBorderClicked && !rightBorderClicked && !leftBorderClicked)
     {
-        resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
     }
 
 
     if (topBorderClicked && !rightBorderClicked && !leftBorderClicked && !bottomBorderClicked)
     {
-        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
     }
 
 
@@ -551,27 +589,33 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     // SE corner (bottom-right)
     if (rightBorderClicked && bottomBorderClicked && !leftBorderClicked && !topBorderClicked)
     {
-        resizeFromAngleForEvent(anEvent, aXcbConnection, self, minWidthHint, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromAngleForEvent(anEvent, aXcbConnection, self, minWidthHint, minHeightHint, titleHeight, clientBorder);
+        else
+            resizeFromRightForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
     // NW corner (top-left) - combine top and left resizes
     if (topBorderClicked && leftBorderClicked && !rightBorderClicked && !bottomBorderClicked)
     {
-        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
         resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
     // NE corner (top-right) - combine top and right resizes
     if (topBorderClicked && rightBorderClicked && !leftBorderClicked && !bottomBorderClicked)
     {
-        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
         resizeFromRightForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
     // SW corner (bottom-left) - combine bottom and left resizes
     if (bottomBorderClicked && leftBorderClicked && !rightBorderClicked && !topBorderClicked)
     {
-        resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
         resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
@@ -1397,9 +1441,23 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
+    // While shaded the frame is clipped to the titlebar, so its cached rect
+    // height is tiny.  Reporting that clipped height to the client would make
+    // the application (GNUstep) shrink the client to ~0 and stop drawing;
+    // on unshade no fresh ConfigureNotify is sent, leaving the window blank
+    // (only the frame and shadow render).  The client content never actually
+    // shrinks when shaded - only the parent clip changes - so report the
+    // client's full, unshaded geometry (saved as oldRect at shade time).
+    uint16_t frameHeight = rect.size.height;
+    if ([self shaded]) {
+        XCBRect full = [self oldRect];
+        if (FnCheckXCBRectIsValid(full) && full.size.height > frameHeight)
+            frameHeight = full.size.height;
+    }
+
     XCBRect clientRect = XCBMakeRect(XCBMakePoint(self.clientBorder, height),
                                      XCBMakeSize(rect.size.width - 2 * self.clientBorder,
-                                                 rect.size.height - height - self.clientBorder));
+                                                 frameHeight - height - self.clientBorder));
 
     /*** synthetic event: coordinates must be in root space. ***/
 
@@ -1671,6 +1729,9 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     // by unshade instead of queueing up a second shade.
     [self setShadeFlags:YES];
 
+    // Disabled vertical resize also means no resize cursor while shaded.
+    [self updateResizeCursorForShadedState];
+
     uint16_t fromHeight = startRect.size.height;
     [self animateFrameHeightFrom:fromHeight toHeight:targetHeight];
 }
@@ -1693,13 +1754,47 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     {
         // No usable saved geometry - just clear the state.
         [self setShadeFlags:NO];
+        [self updateResizeCursorForShadedState];
         return;
     }
 
+    // Render the window's CURRENT contents into the compositor's pixmap
+    // BEFORE rolling the shade open.  While shaded the frame was clipped
+    // shut but the client stayed mapped and redirected, so a fresh pixmap
+    // capture now hands the compositor the up-to-date content to reveal.
+    // Doing this up front avoids a one-frame artifact on the very first
+    // animation step: applyFrameHeight: frees the composite picture, and
+    // without a render here that freed picture would be composited before
+    // it is recreated for the new (taller) frame.
+    [self paintContentBeforeShadeRoll];
+
     // Same motion in reverse: roll back down out of the titlebar.
     [self setShadeFlags:NO];
+
+    // Resize is enabled again: restore the resize cursors on the zones/handle.
+    [self updateResizeCursorForShadedState];
+
     [self animateFrameHeightFrom:[self windowRect].size.height
                         toHeight:fullRect.size.height];
+}
+
+// Re-acquire and paint the frame's current content immediately (no animation).
+// Used by unshade to guarantee fresh content before the roll-out step that
+// frees and recreates the composite picture.
+- (void)paintContentBeforeShadeRoll
+{
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (!compositorClass || ![compositorClass respondsToSelector:@selector(sharedManager)])
+        return;
+
+    id<URSCompositorShadeAPI> compositor = [compositorClass performSelector:@selector(sharedManager)];
+    if (!compositor)
+        return;
+
+    if ([compositor respondsToSelector:@selector(invalidateWindowPixmap:)])
+        [compositor invalidateWindowPixmap:[self window]];
+    if ([compositor respondsToSelector:@selector(performRepairNow)])
+        [compositor performRepairNow];
 }
 
 - (void)toggleShade
@@ -1718,10 +1813,15 @@ static const NSTimeInterval URSWindowTitleActivityWindow = 2.0;
 
 // Called from the compositor's damage path for every damaged client
 // surface.  Must stay cheap: a timestamp write, plus one notification only
-// on the idle-to-active transition.
+// on the idle-to-active transition.  Activity is sampled at most every 100ms -
+// the spinner ticks at 100ms, so finer resolution is wasted work and a busy
+// terminal can emit hundreds of damage events per second.
 - (void)noteContentChanged
 {
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (_lastContentChange > 0 && (now - _lastContentChange) < 0.1)
+        return;
+
     BOOL wasIdle = (_lastContentChange <= 0) ||
                    (now - _lastContentChange >= URSWindowTitleActivityWindow);
     _lastContentChange = now;

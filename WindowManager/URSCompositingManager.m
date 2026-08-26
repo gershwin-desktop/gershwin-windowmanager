@@ -41,6 +41,12 @@
 @property (assign, nonatomic) xcb_window_t windowId;
 @property (assign, nonatomic) xcb_window_t parentWindowId;
 @property (assign, nonatomic) xcb_damage_damage_t damage;
+// Separate Damage object on the managed CLIENT window (not the frame) used
+// purely for content-activity detection.  Created only for framed clients.
+// Unlike the frame Damage, this reports every client redraw even while the
+// window is WindowShaded, because the client stays mapped and the frame's
+// own (clipped) Damage would be silent.  See -noteClientContentDamage:.
+@property (assign, nonatomic) xcb_damage_damage_t clientDamage;
 
 @property (assign, nonatomic) xcb_render_picture_t picture;
 @property (assign, nonatomic) xcb_xfixes_region_t borderSize;
@@ -108,6 +114,7 @@
         _windowId = XCB_NONE;
         _parentWindowId = XCB_NONE;
         _damage = XCB_NONE;
+        _clientDamage = XCB_NONE;
         _picture = XCB_NONE;
         _borderSize = XCB_NONE;
         _extents = XCB_NONE;
@@ -1355,6 +1362,26 @@
       xcb_damage_create(conn, cw.damage, windowId, XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
     }
 
+    // Content-activity detection: a dedicated Damage object on the managed
+    // CLIENT window (not the frame).  The frame Damage only reports VISIBLE
+    // changes, so while WindowShaded (client clipped out) it goes silent even
+    // though the app keeps drawing.  The client-level object keeps reporting,
+    // which is what makes the titlebar spinner work for shaded, active windows
+    // (e.g. a Terminal.app still receiving output).  Resolved here because the
+    // frame and its client are both known once the window is tracked.
+    {
+      XCBWindow *trackedWin = [self.connection windowForXCBId:windowId];
+      if ([trackedWin isKindOfClass:[XCBFrame class]]) {
+        XCBFrame *frame = (XCBFrame *)trackedWin;
+        XCBWindow *client = [frame childWindowForKey:ClientWindow];
+        if (client && [client window] != XCB_NONE) {
+          cw.clientDamage = xcb_generate_id(conn);
+          xcb_damage_create(conn, cw.clientDamage, [client window],
+                            XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
+        }
+      }
+    }
+
     self.cwindows[@(windowId)] = cw;
     
     // OPTIMIZATION: Mark stacking order dirty (will be rebuilt on next paint)
@@ -1580,6 +1607,12 @@
     if (shouldDelete && cw.damage != XCB_NONE) {
         xcb_damage_destroy(conn, cw.damage);
         cw.damage = XCB_NONE;
+    }
+
+    // Destroy the client-level activity Damage object alongside the frame one.
+    if (shouldDelete && cw.clientDamage != XCB_NONE) {
+        xcb_damage_destroy(conn, cw.clientDamage);
+        cw.clientDamage = XCB_NONE;
     }
     
     // Flush immediately so the X server frees the resources before the
@@ -2052,19 +2085,21 @@
     xcb_composite_redirect_window(conn, windowId, XCB_COMPOSITE_REDIRECT_MANUAL);
 }
 
-- (void)handleDamageNotify:(xcb_window_t)windowId {
+- (void)handleDamageNotify:(xcb_window_t)windowId
+                     area:(xcb_rectangle_t)area {
     URS_PROFILE_BEGIN(damageNotify);
     if (!self.compositingActive) {
         URS_PROFILE_END(damageNotify);
         return;
     }
 
-    // Content-activity tap: if the damaged surface is a managed framed
-    // client, remember when its content last changed.  Works while the
-    // window is shaded/hidden too - the client stays mapped and redirected,
-    // so damage keeps flowing regardless of clipping.  Cheap no-op for
-    // frames, titlebars, buttons and unknown windows.
-    [self.connection noteClientContentDamage:windowId];
+    // Content-activity tap: drives the titlebar spinner.  A dedicated Damage
+    // object on the client window (see -addWindow:) makes this fire for every
+    // client redraw.  Works while the window is shaded/hidden too - the client
+    // stays mapped, so its Damage keeps flowing even though the frame's own
+    // (clipped) Damage would be silent.  Cheap no-op for frames, titlebars,
+    // buttons and unknown windows.
+    [self.connection noteClientContentDamage:windowId area:area];
 
     URSCompositeWindow *cw = [self findCWindow:windowId];
 
@@ -2091,9 +2126,28 @@
                             originalCW.damage, XCB_NONE, XCB_NONE);
     }
 
-    if (!cw || !cw.damage) {
-        // Unknown window damaged; force full screen repaint to avoid artifacts
+    // The client-level activity Damage object exists only for activity
+    // detection, never for compositing.  Subtract it on EVERY notify so the X
+    // server does not accumulate an ever-growing damage region (it would
+    // otherwise keep reporting the window's entire draw history).
+    if (cw && cw.clientDamage != XCB_NONE) {
+        xcb_damage_subtract([[self connection] connection],
+                            cw.clientDamage, XCB_NONE, XCB_NONE);
+    }
+
+    if (!cw) {
+        // Truly unknown window damaged; force full screen repaint to avoid artifacts
         [self damageScreen];
+        URS_PROFILE_END(damageNotify);
+        return;
+    }
+    if (!cw.damage) {
+        // Window is unredirected (e.g. a _NET_WM_BYPASS_COMPOSITOR terminal):
+        // it paints directly to the screen, so the compositor must neither
+        // repair it nor force a full-screen repaint.  The activity tap above
+        // already ran, so the titlebar spinner still tracks its content.  This
+        // is what makes the spinner work for gershwin-terminal, which bypasses
+        // the compositor for performance but still keeps drawing to its window.
         URS_PROFILE_END(damageNotify);
         return;
     }
@@ -2123,6 +2177,11 @@
 
     [self updateAbsolutePositionForWindow:cw];
     [self repairWindow:cw];
+
+    // repairWindow only accumulates damage - without scheduling a composite
+    // pass the new content would sit unscreened until some other damage
+    // happens to trigger one.
+    [self scheduleComposite];
 }
 
 - (void)handleExposeEvent:(xcb_window_t)windowId {

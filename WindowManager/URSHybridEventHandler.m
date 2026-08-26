@@ -1129,6 +1129,12 @@ static CGFloat WMLastScaleFactor = 1.0;
             [self.workareaManager handleStrutPropertyChange:propEvent];
             [self handleWindowTitlePropertyChange:propEvent];
             [connection handlePropertyNotify:propEvent];
+            // App-signal content activity (gershwin-terminal sets this).  Fires
+            // regardless of visibility, so it covers WindowShaded windows whose
+            // client is clipped and thus emits no X Damage.
+            if (propEvent->atom == [self gershwinContentActivityAtom]) {
+                [self noteContentActivityFromProperty:propEvent->window];
+            }
             break;
         }
         case XCB_KEY_PRESS: {
@@ -1353,7 +1359,8 @@ static CGFloat WMLastScaleFactor = 1.0;
     // DAMAGE notify events are at base_event + XCB_DAMAGE_NOTIFY (0)
     if (responseType == damageEventBase + XCB_DAMAGE_NOTIFY) {
         xcb_damage_notify_event_t *damageEvent = (xcb_damage_notify_event_t *)event;
-        [self.compositingManager handleDamageNotify:damageEvent->drawable];
+        [self.compositingManager handleDamageNotify:damageEvent->drawable
+                                               area:damageEvent->area];
         return;
     }
 }
@@ -1385,17 +1392,11 @@ static CGFloat WMLastScaleFactor = 1.0;
 
 - (void)handleFocusChange:(xcb_window_t)windowId isActive:(BOOL)isActive {
     @try {
-        // When any window gains focus, IMMEDIATELY mark the previously-focused
-        // window's titlebar as inactive — before we try to resolve the incoming
-        // window.  If the incoming FocusIn targets a window the WM doesn't track
-        // (e.g. an undecorated popup), the resolution below fails and we'd return
-        // early, leaving the old window stuck with active decorations forever.
-        if (isActive) {
-            xcb_window_t prevFocusedId = self.focusManager.lastFocusedWindowId;
-            if (prevFocusedId != XCB_NONE && prevFocusedId != windowId) {
-                [self handleFocusChange:prevFocusedId isActive:NO];
-            }
-        }
+        // Exactly one window may show active decorations.  When a window gains
+        // focus we re-render EVERY other titlebar inactive instead of trusting a
+        // single lastFocusedWindowId: focus can pass through undecorated/popup
+        // windows that reset focus tracking to XCB_NONE, which would otherwise
+        // leave the previously-focused window stuck on active chrome.
 
         // Find the window that received focus change
         XCBWindow *window = [connection windowForXCBId:windowId];
@@ -1491,7 +1492,34 @@ static CGFloat WMLastScaleFactor = 1.0;
             }
         }
 
-        // Re-render titlebar with GSTheme using the correct active/inactive state
+        // Force every other window to the inactive state so only the focused
+        // window shows active decorations.  This runs for the activate case only.
+        if (isActive) {
+            NSDictionary *allWindows = [connection windowsMap];
+            for (NSString *wid in allWindows) {
+                XCBWindow *other = [allWindows objectForKey:wid];
+                if (![other isKindOfClass:[XCBFrame class]] || other == frame) {
+                    continue;
+                }
+                XCBFrame *otherFrame = (XCBFrame *)other;
+                XCBTitleBar *otherTB = (XCBTitleBar *)[otherFrame childWindowForKey:TitleBar];
+                if (!otherTB) {
+                    continue;
+                }
+                [otherFrame setIsAbove:NO];
+                [otherTB setIsAbove:NO];
+                [URSThemeIntegration renderGSThemeToWindow:otherFrame
+                                                     frame:otherFrame
+                                                     title:[otherTB windowTitle]
+                                                    active:NO];
+                [otherTB putWindowBackgroundWithPixmap:[otherTB pixmap]];
+                [otherTB drawArea:[otherTB windowRect]];
+            }
+        }
+
+        // Re-render this titlebar with GSTheme using the correct active/inactive state
+        [frame setIsAbove:isActive];
+        [titlebar setIsAbove:isActive];
         [URSThemeIntegration renderGSThemeToWindow:frame
                                              frame:frame
                                              title:[titlebar windowTitle]
@@ -2678,6 +2706,48 @@ static CGFloat WMLastScaleFactor = 1.0;
     }
 
     return title;
+}
+
+// The _GERSHWIN_CONTENT_ACTIVITY property is set by apps (gershwin-terminal)
+// to report that their window content changed.  Unlike X Damage it fires
+// regardless of visibility - crucial for WindowShaded windows, whose client is
+// clipped by the shrunk frame and therefore emits no Damage.  The activity
+// flag itself lives in XCBFrame (-noteContentChanged).
+- (xcb_atom_t)gershwinContentActivityAtom
+{
+    static xcb_atom_t atom = XCB_NONE;
+    static BOOL lookedUp = NO;
+    if (!lookedUp) {
+        lookedUp = YES;
+        xcb_connection_t *conn = [connection connection];
+        if (conn) {
+            xcb_intern_atom_cookie_t c =
+                xcb_intern_atom(conn, 0,
+                                strlen("_GERSHWIN_CONTENT_ACTIVITY"),
+                                "_GERSHWIN_CONTENT_ACTIVITY");
+            xcb_intern_atom_reply_t *r = xcb_intern_atom_reply(conn, c, NULL);
+            if (r) { atom = r->atom; free(r); }
+        }
+    }
+    return atom;
+}
+
+- (void)noteContentActivityFromProperty:(xcb_window_t)windowId
+{
+    // Resolve the owning managed frame by walking the tracked window
+    // hierarchy (cheap, in-process).  The property is set on the client
+    // window, whose parent is the frame.
+    XCBWindow *cur = [connection windowForXCBId:windowId];
+    XCBFrame *frame = nil;
+    for (int i = 0; i < 16 && cur; i++) {
+        if ([cur isKindOfClass:[XCBFrame class]]) {
+            frame = (XCBFrame *)cur;
+            break;
+        }
+        cur = [cur parentWindow];
+    }
+    if (frame)
+        [frame noteContentChanged];
 }
 
 - (void)handleWindowTitlePropertyChange:(xcb_property_notify_event_t*)event

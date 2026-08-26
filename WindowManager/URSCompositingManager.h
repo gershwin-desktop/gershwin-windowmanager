@@ -113,7 +113,8 @@
 - (void)damageScreen;
 
 // Handle damage events
-- (void)handleDamageNotify:(xcb_window_t)window;
+- (void)handleDamageNotify:(xcb_window_t)window
+                                     area:(xcb_rectangle_t)area;
 
 // Handle RANDR screen-change events
 - (void)handleScreenChange:(xcb_randr_screen_change_notify_event_t *)event;

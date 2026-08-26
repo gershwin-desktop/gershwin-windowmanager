@@ -1251,13 +1251,15 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             int frameIdx = [(XCBTitleBar *)titlebar spinnerRenderFrame];
             if (spinnerFrames.count > 0) {
                 NSImage *spin = spinnerFrames[frameIdx % (int)spinnerFrames.count];
-                CGFloat side = titlebarSize.height;
+                CGFloat side = titlebarSize.height - 8.0;
+                if (side < 8.0) side = 8.0;
                 CGFloat sx = [(XCBTitleBar *)titlebar spinnerTargetX];
-                NSRect spinRect = NSMakeRect(sx, 0, side, side);
+                NSRect spinRect = NSMakeRect(sx, (titlebarSize.height - side) / 2.0, side, side);
+                CGFloat alpha = [(XCBTitleBar *)titlebar spinnerAlpha];
                 [spin drawInRect:spinRect
                         fromRect:NSZeroRect
                       operation:NSCompositeSourceOver
-                       fraction:1.0];
+                       fraction:alpha];
             }
         }
 

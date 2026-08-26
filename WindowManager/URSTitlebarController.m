@@ -58,10 +58,16 @@
 
         BOOL active = frame.lastContentChange > 0 &&
                       (now - frame.lastContentChange) < 2.0;
-        if (active) {
+        if (active)
             anyActive = YES;
-            [titlebar updateSpinnerForActivity:active];
-        }
+
+        // Drive the spinner both ways (active AND inactive) so it can fade
+        // out after the 2s activity window closes.
+        [titlebar updateSpinnerForActivity:active];
+
+        // Keep the engine alive while any spinner is still fading out.
+        if (!anyActive && ([titlebar spinnerAlpha] > 0.001 || [titlebar spinnerFading]))
+            anyActive = YES;
     }
 
     if (!anyActive)

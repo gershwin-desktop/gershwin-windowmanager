@@ -188,6 +188,9 @@ static void killOtherInstances(void) {
     closedir(procDir);
 }
 
+@interface XCBConnection ()
+@end
+
 @implementation XCBConnection
 
 @synthesize dragState;
@@ -521,17 +524,47 @@ static XCBConnection *sharedInstance;
     ewmhService = nil;
 }
 
-// Called from the compositor damage path.  Records content activity for
-// framed clients (drives the titlebar spinner); no-op for everything else.
+// Called from the compositor damage path.  A dedicated Damage object is
+// created on each managed client window (see URSCompositingManager
+// -addWindow:), so a DamageNotify whose drawable IS that client window is an
+// unambiguous, reliable signal that the application redrew its content.  The
+// X server only emits damage when the client actually draws, so no pixel
+// comparison is needed - the old snapshot-diff heuristic was fragile and
+// missed redraws (e.g. Terminal.app output).
+//
+// This fires regardless of visibility: while WindowShaded the client window is
+// deliberately left mapped and untouched, so it keeps drawing and its Damage
+// object keeps reporting - the frame's own (clipped) Damage would be silent,
+// which is exactly why the client-level object is what makes shaded-activity
+// detection work.
 - (void)noteClientContentDamage:(xcb_window_t)windowId
+                           area:(xcb_rectangle_t)area
 {
-    XCBWindow *w = [self windowForXCBId:windowId];
-    if (!w || ![w decorated])
+    // Resolve the owning managed frame by walking the tracked window
+    // hierarchy (cheap, in-process - no X round-trips).  The drawable is
+    // either the frame itself or, for the client-level Damage object, the
+    // client child.
+    XCBWindow *cur = [self windowForXCBId:windowId];
+    XCBFrame *frame = nil;
+    for (int i = 0; i < 16 && cur; i++) {
+        if ([cur isKindOfClass:[XCBFrame class]]) {
+            frame = (XCBFrame *)cur;
+            break;
+        }
+        cur = [cur parentWindow];
+    }
+    if (!frame)
         return;
-    if (![[w parentWindow] isKindOfClass:[XCBFrame class]])
+
+    // Only the client window's own drawable counts as content activity.
+    // Titlebar/chrome redraws arrive on their own windows and are ignored.
+    XCBWindow *client = [frame childWindowForKey:ClientWindow];
+    if (!client || [client window] != windowId)
         return;
-    [(XCBFrame *)[w parentWindow] noteContentChanged];
+
+    [frame noteContentChanged];
 }
+
 
 // X window id of the LOWEST root-level child that belongs to another
 // managed, decorated, ordinary window (frame).  Desktops, docks, menus and
@@ -2575,6 +2608,14 @@ static XCBConnection *sharedInstance;
     if ([window isKindOfClass:[XCBFrame class]] && !dragState)
     {
         frame = (XCBFrame *)window;
+        if ([frame shaded])
+        {
+            // Vertical resize is disabled while shaded, so never show a
+            // resize cursor - the normal pointer is correct.
+            [frame showLeftPointerCursor];
+        }
+        else
+        {
         MousePosition  position = [frame mouseIsOnWindowBorderForEvent:anEvent];
 
         switch (position)
@@ -2635,6 +2676,7 @@ static XCBConnection *sharedInstance;
                 break;
         }
 
+        }
     }
     else if (!dragState)
     {
@@ -3769,9 +3811,12 @@ static XCBConnection *sharedInstance;
         [[window parentWindow] isKindOfClass:[XCBFrame class]])
     {
         [window grabButton];
-        
+
         // Check if this is the resize handle - change cursor to resize cursor
         XCBFrame *frameWindow = (XCBFrame *)[window parentWindow];
+        // Resize is disabled while shaded, so never advertise a resize cursor.
+        if (![frameWindow shaded])
+        {
         XCBWindow *resizeHandle = [frameWindow childWindowForKey:ResizeHandle];
         if (resizeHandle && [resizeHandle window] == anEvent->event) {
             // Mouse entered the resize handle - show resize cursor
@@ -3807,9 +3852,9 @@ static XCBConnection *sharedInstance;
             [frameWindow showResizeCursorForPosition:BottomLeftCorner];
         else if (zoneGrowBox && [zoneGrowBox window] == anEvent->event)
             [frameWindow showResizeCursorForPosition:BottomRightCorner];
+        }
 
         frameWindow = nil;
-        resizeHandle = nil;
     }
 
     if ([window isKindOfClass:[XCBFrame class]])
@@ -4202,13 +4247,12 @@ static XCBConnection *sharedInstance;
 - (void)drawAllTitleBarsExcept:(XCBTitleBar *)aTitileBar
 {
     // When GSTheme is active, titlebars are rendered exclusively through
-    // focus events (handleFocusChange:) — stacking order must NOT determine
-    // which titlebar appears active.  Short-circuit here so that isAbove
-    // (set to NO on all non-clicked windows below) never overrides the
-    // focus-driven GSTheme pixmap content.
-    if ([aTitileBar isGSThemeActive]) {
-        return;
-    }
+    // focus events (handleFocusChange:), so stacking order must NOT repaint
+    // them here.  We still must reset isAbove on every other titlebar so the
+    // active-decoration and spinner state stays consistent with focus, but we
+    // skip drawTitleBarComponents: that would overwrite the GSTheme pixmaps
+    // with the non-GSTheme look.
+    BOOL gsTheme = [aTitileBar isGSThemeActive];
 
     NSArray *windows = [windowsMap allValues];
     NSUInteger size = [windows count];
@@ -4239,7 +4283,9 @@ static XCBConnection *sharedInstance;
 
                 [titleBar setIsAbove:NO];
                 [titleBar setButtonsAbove:NO];
-                [titleBar drawTitleBarComponents];
+                if (!gsTheme) {
+                    [titleBar drawTitleBarComponents];
+                }
                 [frame setIsAbove:NO];
                 frame = nil;
             }

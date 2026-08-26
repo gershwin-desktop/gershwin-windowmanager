@@ -90,6 +90,14 @@ typedef NS_ENUM(NSInteger, WindowState)
 @property (nonatomic, assign) BOOL maximizedVertically;
 @property (nonatomic, assign) BOOL maximizedHorizontally;
 @property (nonatomic, assign) BOOL shaded;
+
+// Pixel snapshot of the client's bitmap for real-change detection: damage
+// events report REDRAWS, not differences - this snapshot is what tells an
+// identical repaint apart from an actual pixel change.
+@property (nonatomic, assign) void *contentSnapshot;
+@property (nonatomic, assign) NSUInteger contentSnapshotSize;
+@property (nonatomic, assign) uint16_t contentSnapshotW;
+@property (nonatomic, assign) uint16_t contentSnapshotH;
 @property (nonatomic, assign) BOOL isMaximized;
 @property (nonatomic, assign) BOOL isMinimized;
 @property (nonatomic, assign) BOOL fullScreen;

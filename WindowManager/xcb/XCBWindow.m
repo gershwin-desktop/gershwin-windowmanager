@@ -1471,6 +1471,12 @@
 
     if (graphicContextId != 0)
         xcb_free_gc([connection connection], graphicContextId);
+
+    if (_contentSnapshot)
+    {
+        free(_contentSnapshot);
+        _contentSnapshot = NULL;
+    }
 }
 
 @end
