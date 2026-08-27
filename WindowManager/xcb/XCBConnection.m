@@ -1179,7 +1179,7 @@ static XCBConnection *sharedInstance;
                         startRect.size.height = data[WINDOW_BIRTH_IDX_SRC_H];
                         // Expanding from a source rect is a more deliberate
                         // effect than the default 90% grow.
-                        duration = 0.4;
+                        duration = 0.2;
                     }
                 }
                 // Delete the property so it doesn't persist past birth.
@@ -1236,7 +1236,7 @@ static XCBConnection *sharedInstance;
             XCBMakePoint((int16_t)(cx - startW * 0.5),
                          (int16_t)(cy - startH * 0.5)),
             XCBMakeSize((uint16_t)startW, (uint16_t)startH));
-        duration = 0.22;
+        duration = 0.11;
     }
 
 
@@ -2329,11 +2329,11 @@ static XCBConnection *sharedInstance;
         // Shrink+fade toward the folder icon's current position.
         if ([compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:completion:)]) {
             [compositor animateWindowTransition:[target window]
-                                       fromRect:startRect
-                                         toRect:targetRect
-                                       duration:0.40
-                                           fade:YES
-                                     completion:hideWindows];
+                                        fromRect:startRect
+                                          toRect:targetRect
+                                        duration:0.20
+                                            fade:YES
+                                      completion:hideWindows];
             return;
         }
     } else {
@@ -2345,11 +2345,11 @@ static XCBConnection *sharedInstance;
         centerRect.size.height /= 2;
         if ([compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:completion:)]) {
             [compositor animateWindowTransition:[target window]
-                                       fromRect:startRect
-                                         toRect:centerRect
-                                       duration:0.40
-                                           fade:YES
-                                     completion:hideWindows];
+                                        fromRect:startRect
+                                          toRect:centerRect
+                                        duration:0.20
+                                            fade:YES
+                                      completion:hideWindows];
             return;
         }
     }

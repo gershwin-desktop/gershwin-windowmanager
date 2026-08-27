@@ -130,13 +130,13 @@ close animation is torn down immediately on unmap, as before.
 - Birth action:
   - Reads `_WINDOW_BIRTH_ANIMATION` from the client window.
   - Deletes the property after reading.
-  - If the property has a valid source rect, animates from it (0.40s);
-    otherwise grows from 90% of the final size (0.22s).
+  - If the property has a valid source rect, animates from it (0.20s);
+    otherwise grows from 90% of the final size (0.11s).
   - Honours `animationType == 1` (NoAnimation) by skipping the animation.
   - Skips desktop windows and windows adopted at startup.
 - Close action: the animation runs on the **frame** composite window (the
   compositor only paints top-level windows), shrinking from `natural = start`
-  to the icon rect with a fade-out, over 0.40s (matching birth).  The frozen
+  to the icon rect with a fade-out, over 0.20s (matching birth).  The frozen
   snapshot is protected from the compositor's four picture-recreation paths
   (damage notify, expose, focus-change invalidation, and lazy picture
   creation) so the animation never repaints an empty live drawable.
