@@ -2643,10 +2643,15 @@ static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
     URS_PROFILE_END(performRepair);
 }
 
-- (void)performRepairNow {
-    if (!self.compositingActive) {
-        return;
-    }
+ - (BOOL)windowIsAnimating:(xcb_window_t)windowId {
+     URSCompositeWindow *cw = [self findCWindow:windowId];
+     return cw != nil && cw.animating;
+ }
+
+ - (void)performRepairNow {
+     if (!self.compositingActive) {
+         return;
+     }
 
     if ([self.connection dragState] || [self.connection resizeState]) {
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];

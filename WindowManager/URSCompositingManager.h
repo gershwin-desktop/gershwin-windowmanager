@@ -89,6 +89,11 @@
 // Force immediate repair without deferring to next runloop (use during interactive drag)
 - (void)performRepairNow;
 
+// True while a window (birth/close/minimize/restore/shrink) animation is in
+// flight for the given frame.  Used by the spinner to ignore the WM's own
+// repaints during an animation.
+- (BOOL)windowIsAnimating:(xcb_window_t)windowId;
+
 // Render the composite screen
 - (void)compositeScreen;
 

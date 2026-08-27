@@ -20,6 +20,7 @@
 - (void)invalidateWindowPixmap:(xcb_window_t)windowId;
 - (void)performRepairNow;
 - (void)setWindowOpacity:(CGFloat)opacity forWindow:(xcb_window_t)windowId;
+- (BOOL)windowIsAnimating:(xcb_window_t)windowId;
 @end
 
 
@@ -1968,6 +1969,22 @@ static const NSTimeInterval URSWindowTitleActivityWindow = 2.0;
      // roll-up is in flight so the spinner state is unchanged across the peek.
      if (self.peeking || self.restoreOpacityAfterShade)
          return;
+
+     // Pixel changes produced by a window animation (birth, close, minimize,
+     // restore, shrink) are the WM's own transform repaints, not genuine
+     // client activity, so they must not trigger or refresh the spinner.
+     Class compositorClass = NSClassFromString(@"URSCompositingManager");
+     if (compositorClass)
+     {
+         id<URSCompositorShadeAPI> compositor =
+             [compositorClass performSelector:@selector(sharedManager)];
+         if (compositor &&
+             [compositor respondsToSelector:@selector(windowIsAnimating:)])
+         {
+             if ([compositor windowIsAnimating:[self window]])
+                 return;
+         }
+     }
 
      NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (_lastContentChange > 0 && (now - _lastContentChange) < 0.1)
