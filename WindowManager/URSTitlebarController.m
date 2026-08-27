@@ -60,11 +60,18 @@
         // visible window already displays its own content changing, so a
         // titlebar spinner would be redundant noise.  While shaded the client
         // is clipped out and the spinner is the only visible sign of activity.
+        // A hover-peek keeps the window rolled-up-equivalent (shown faintly at
+        // reduced opacity), so an already-spinning spinner keeps running - but
+        // a peek must never start the spinner from cold.
         BOOL active = NO;
-        if ([frame shaded])
+        if ([frame shaded] || [frame peeking])
           {
-            active = frame.lastContentChange > 0 &&
-                     (now - frame.lastContentChange) < 2.0;
+            BOOL spinning = frame.lastContentChange > 0 &&
+                            (now - frame.lastContentChange) < 2.0;
+            if ([frame peeking])
+                active = spinning && frame.peekSpinnerWasActive;
+            else
+                active = spinning;
             if (active)
                 anyActive = YES;
           }

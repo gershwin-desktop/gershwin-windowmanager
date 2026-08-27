@@ -19,6 +19,7 @@
 @protocol URSCompositorShadeAPI <NSObject>
 - (void)invalidateWindowPixmap:(xcb_window_t)windowId;
 - (void)performRepairNow;
+- (void)setWindowOpacity:(CGFloat)opacity forWindow:(xcb_window_t)windowId;
 @end
 
 
@@ -129,6 +130,9 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     self = [super initWithXCBWindow: xcbWindow andConnection:aConnection];
     [self setWindowRect:aRect];
     [self setOriginalRect:aRect];
+    // Hover-peek is armed from creation; it is temporarily disarmed while a
+    // peek collapses so the window doesn't immediately re-peek.
+    self.hoverPeekArmed = YES;
     /*** checks normal hints for client window **/
     [connection setIsWindowsMapUpdated:NO];
     
@@ -1619,11 +1623,19 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 
 // Expensive tail work done once when a shade animation finishes: resize
 // zones back in place and tell the compositor to re-acquire the pixmap.
-- (void)finishShadeGeometryChange
-{
-    [self updateAllResizeZonePositions];
+ - (void)finishShadeGeometryChange
+ {
+     [self updateAllResizeZonePositions];
 
-    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+     // A peek roll-up just finished: the window is now fully collapsed, so
+     // restore it to opaque.  (Kept translucent during the animation above.)
+     if (self.restoreOpacityAfterShade)
+     {
+         [self setCompositeOpacity:1.0];
+         self.restoreOpacityAfterShade = NO;
+     }
+
+     Class compositorClass = NSClassFromString(@"URSCompositingManager");
     if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
     {
         id<URSCompositorShadeAPI> compositor = [compositorClass performSelector:@selector(sharedManager)];
@@ -1640,53 +1652,64 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 // clipping does the visual work, no scaling involved - and the exact same
 // motion plays in reverse for unshade.  Driven by an NSTimer on the main
 // runloop (the same loop that already runs the scale-factor timer).
-- (void)animateFrameHeightFrom:(uint16_t)fromHeight toHeight:(uint16_t)toHeight
-{
-    self.shadeAnimationInProgress = YES;
+ - (void)animateFrameHeightFrom:(uint16_t)fromHeight toHeight:(uint16_t)toHeight
+ {
+     self.shadeAnimationInProgress = YES;
 
-    if (fromHeight == toHeight)
-    {
-        self.shadeAnimationInProgress = NO;
-        return;
-    }
+     // Interrupt any animation already in flight: a hover-peek can fire while
+     // a roll-up/roll-down is still running, and we must seamlessly reverse it
+     // instead of being dropped by a "busy" guard.
+     if (self.shadeAnimTimer)
+     {
+         [self.shadeAnimTimer invalidate];
+         self.shadeAnimTimer = nil;
+     }
 
-    __weak XCBFrame *weakSelf = self;
-    NSTimeInterval duration = 0.22;
-    NSDate *startDate = [NSDate date];
+     if (fromHeight == toHeight)
+     {
+         self.shadeAnimationInProgress = NO;
+         return;
+     }
 
-    NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60.0
-                                            repeats:YES
-                                              block:^(NSTimer *stepTimer) {
-        XCBFrame *strongSelf = weakSelf;
-        if (!strongSelf)
-        {
-            [stepTimer invalidate];
-            return;
-        }
+     __weak XCBFrame *weakSelf = self;
+     NSTimeInterval duration = 0.22;
+     NSDate *startDate = [NSDate date];
 
-        NSTimeInterval elapsed = -1.0 * [startDate timeIntervalSinceNow];
-        CGFloat progress = elapsed / duration;
-        if (progress < 0.0)
-            progress = 0.0;
-        BOOL done = progress >= 1.0;
-        if (!done)
-            progress = 1.0 - (1.0 - progress) * (1.0 - progress);   // ease-out
+     NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+                                             repeats:YES
+                                               block:^(NSTimer *stepTimer) {
+         XCBFrame *strongSelf = weakSelf;
+         if (!strongSelf)
+         {
+             [stepTimer invalidate];
+             return;
+         }
 
-        int delta = (int)toHeight - (int)fromHeight;
-        uint16_t h = (uint16_t)((int)fromHeight + (int)(delta * progress));
-        [strongSelf applyFrameHeight:h];
+         NSTimeInterval elapsed = -1.0 * [startDate timeIntervalSinceNow];
+         CGFloat progress = elapsed / duration;
+         if (progress < 0.0)
+             progress = 0.0;
+         BOOL done = progress >= 1.0;
+         if (!done)
+             progress = 1.0 - (1.0 - progress) * (1.0 - progress);   // ease-out
 
-        if (done)
-        {
-            [stepTimer invalidate];
-            [strongSelf applyFrameHeight:toHeight];
-            [strongSelf finishShadeGeometryChange];
-            strongSelf.shadeAnimationInProgress = NO;
-        }
-    }];
+         int delta = (int)toHeight - (int)fromHeight;
+         uint16_t h = (uint16_t)((int)fromHeight + (int)(delta * progress));
+         [strongSelf applyFrameHeight:h];
 
-    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSDefaultRunLoopMode];
-}
+         if (done)
+         {
+             [stepTimer invalidate];
+             strongSelf.shadeAnimTimer = nil;
+             [strongSelf applyFrameHeight:toHeight];
+             [strongSelf finishShadeGeometryChange];
+             strongSelf.shadeAnimationInProgress = NO;
+         }
+     }];
+
+     self.shadeAnimTimer = timer;
+     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSDefaultRunLoopMode];
+ }
 
 // Publish the shaded flag through _NET_WM_STATE on the client window.
 - (void)setShadeFlags:(BOOL)flag
@@ -1704,46 +1727,83 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     ewmhService = nil;
 }
 
-- (void)shade
-{
-    // Shade happens ONLY on an explicit double-click or a _NET_WM_STATE_SHADED
-    // request; single clicks take the normal focus/drag path and never reach
-    // this method.
-    if ([self shaded] || self.shadeAnimationInProgress || [self isMinimized])
-        return;
+ - (void)shade
+ {
+     // Shade happens ONLY on an explicit double-click or a _NET_WM_STATE_SHADED
+     // request; single clicks take the normal focus/drag path and never reach
+     // this method.
+     // Allowed even mid-animation so a hover-peek can reverse a roll-up that is
+     // still in flight; the in-progress animation is cancelled by
+     // animateFrameHeightFrom:.  Already-shaded-and-idle is the only no-op.
+     if (([self shaded] && !self.shadeAnimationInProgress) || [self isMinimized])
+         return;
 
-    XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
-    if (!clientWindow)
-        return;
+     XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
+     if (!clientWindow)
+         return;
 
     XCBRect startRect = [self windowRect];
     uint16_t targetHeight = [self shadedFrameHeight];
     if (startRect.size.height <= targetHeight)
-        return;
+    {
+        // The window is already at (or below) the shaded height.  When a
+        // hover-peek ends before the unshade roll-down has grown the window,
+        // shade is called while the unshade animation is still in flight.  We
+        // must NOT early-return here or that in-flight unshade keeps running and
+        // the window ends up permanently unshaded.  Fall through (guarded by
+        // the animation being in progress) so animateFrameHeightFrom: cancels
+        // the unshade and the opacity is restored by the shade-completion path.
+        if (!self.shadeAnimationInProgress)
+        {
+            if (self.restoreOpacityAfterShade)
+            {
+                [self setCompositeOpacity:1.0];
+                self.restoreOpacityAfterShade = NO;
+            }
+            return;
+        }
+    }
 
-    // Restore source for unshade.  Shading a maximized window saving the
-    // maximized rect is exactly right: unshade brings the maximized size back.
-    [self setOldRect:startRect];
+     // Restore source for unshade.  Shading a maximized window saving the
+     // maximized rect is exactly right: unshade brings the maximized size back.
+     // Preserve an existing saved rect when we are interrupting an unshade
+     // animation, otherwise the window would only roll back to the mid-animation
+     // height instead of its full size.
+     if (!self.shadeAnimationInProgress)
+         [self setOldRect:startRect];
 
-    // Flag first, so a second double-click during the animation is answered
-    // by unshade instead of queueing up a second shade.
-    [self setShadeFlags:YES];
+     // Flag first, so a second double-click during the animation is answered
+     // by unshade instead of queueing up a second shade.
+     [self setShadeFlags:YES];
 
-    // Disabled vertical resize also means no resize cursor while shaded.
-    [self updateResizeCursorForShadedState];
+     // Disabled vertical resize also means no resize cursor while shaded.
+     [self updateResizeCursorForShadedState];
 
-    uint16_t fromHeight = startRect.size.height;
-    [self animateFrameHeightFrom:fromHeight toHeight:targetHeight];
-}
+     uint16_t fromHeight = startRect.size.height;
+     [self animateFrameHeightFrom:fromHeight toHeight:targetHeight];
 
-- (void)unshade
-{
-    if (![self shaded] || self.shadeAnimationInProgress)
-        return;
+     // If the roll-up completed with no animation (already at shaded height),
+     // restore opacity here; otherwise the animation completion does it.
+     if (!self.shadeAnimationInProgress && self.restoreOpacityAfterShade)
+     {
+         [self setCompositeOpacity:1.0];
+         self.restoreOpacityAfterShade = NO;
+     }
+ }
 
-    XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
-    if (!clientWindow)
-        return;
+ - (void)unshade
+ {
+     if ([self isMinimized])
+         return;
+     // Allowed mid-animation (interrupting a roll-up) so a hover-peek can roll
+     // back down even while the window is still collapsing.  Only an already
+     // unshaded-and-idle window is a no-op.
+     if (![self shaded] && !self.shadeAnimationInProgress)
+         return;
+
+     XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
+     if (!clientWindow)
+         return;
 
     uint16_t targetHeight = [self shadedFrameHeight];
     XCBRect fullRect = [self oldRect];
@@ -1799,10 +1859,92 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 
 - (void)toggleShade
 {
+    // A hover-peek leaves the window unshaded but flagged peeking; a
+    // double-click should keep it open at full opacity rather than collapse.
+    if (self.peeking) {
+        self.peeking = NO;
+        [self setCompositeOpacity:1.0];
+        return;
+    }
     if ([self shaded])
         [self unshade];
     else
         [self shade];
+}
+
+#pragma mark - Hover-peek (shaded window preview)
+
+// Roll a shaded window down at reduced opacity while the pointer is on its
+// titlebar.  Suppressed until the pointer re-enters the window after a
+// peek ended by moving into the content (avoids collapse/expand flicker).
+ - (void)beginHoverPeek
+ {
+     if (![self shaded] || self.peeking ||
+         [self isMinimized] || !self.hoverPeekArmed)
+         return;
+
+     // Swallow any enter that arrives within the roll-up window after a peek
+     // ended (or a synthetic EnterNotify our own collapse generates): otherwise
+     // the window re-opens and stays put.  A genuine re-hover after the window
+     // has settled will arrive later and is allowed.
+     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+     if (self.peekEndTime > 0 && (now - self.peekEndTime) < 0.30)
+         return;
+
+     // Capture whether the activity spinner was already spinning before this
+     // peek.  A temporary rolldown must never start the spinner from cold - it
+     // only keeps a spinner that was already running (as if still rolled up).
+     self.peekSpinnerWasActive = self.lastContentChange > 0 &&
+                                 (now - self.lastContentChange) < 2.0;
+
+     // A new peek cancels any pending opacity restore from a previous roll-up.
+     self.restoreOpacityAfterShade = NO;
+
+     self.peeking = YES;
+     [self setCompositeOpacity:0.66];
+     [self unshade];
+ }
+
+ - (void)endHoverPeek
+ {
+      if (!self.peeking)
+          return;
+
+      // Arm the opacity-restore flag first so the roll-up animation is covered
+      // by the noteContentChanged suppression below (keeps the spinner frozen).
+      self.restoreOpacityAfterShade = YES;
+
+      self.peeking = NO;
+
+     // Remember when the peek ended so a synthetic/duplicate EnterNotify that
+     // arrives within the roll-up window (or any too-rapid re-hover) is ignored,
+     // preventing the window from getting stuck open.
+     self.peekEndTime = [NSDate timeIntervalSinceReferenceDate];
+
+     // If the pointer slid from the titlebar into the now-revealed content the
+     // window would immediately re-peek (and flicker).  Disarm until the pointer
+     // actually leaves the window; handleLeaveNotify re-arms via hoverPeekArmed.
+     self.hoverPeekArmed = NO;
+     [self shade];
+ }
+
+- (void)setCompositeOpacity:(CGFloat)opacity
+{
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (!compositorClass || ![compositorClass respondsToSelector:@selector(sharedManager)])
+        return;
+
+    id<URSCompositorShadeAPI> compositor = [compositorClass performSelector:@selector(sharedManager)];
+    if (!compositor || ![compositor respondsToSelector:@selector(setWindowOpacity:forWindow:)])
+        return;
+
+    // The frame (WM decoration / titlebar) and the client (window content)
+    // are separate composited windows; both must be made translucent so the
+    // whole rolldown reads as one semi-transparent surface.
+    [compositor setWindowOpacity:opacity forWindow:[self window]];
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    if (client)
+        [compositor setWindowOpacity:opacity forWindow:[client window]];
 }
 
 #pragma mark - Content Activity (spinner driver)
@@ -1816,9 +1958,18 @@ static const NSTimeInterval URSWindowTitleActivityWindow = 2.0;
 // on the idle-to-active transition.  Activity is sampled at most every 100ms -
 // the spinner ticks at 100ms, so finer resolution is wasted work and a busy
 // terminal can emit hundreds of damage events per second.
-- (void)noteContentChanged
-{
-    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+ - (void)noteContentChanged
+ {
+     // A hover-peek (and its roll-up) must never start the titlebar spinner
+     // from cold.  The peek's own reveal repaint and the unshade/roll-up
+     // animations generate client damage that would otherwise bump the
+     // activity timestamp and make the spinner spin after the peek, even
+     // though it was idle before.  Freeze the timestamp while a peek or its
+     // roll-up is in flight so the spinner state is unchanged across the peek.
+     if (self.peeking || self.restoreOpacityAfterShade)
+         return;
+
+     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (_lastContentChange > 0 && (now - _lastContentChange) < 0.1)
         return;
 

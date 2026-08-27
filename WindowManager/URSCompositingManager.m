@@ -96,6 +96,10 @@
 @property (assign, nonatomic) BOOL animatingMinimize;
 @property (assign, nonatomic) BOOL animatingShrink;
 @property (assign, nonatomic) BOOL animatingFade;
+// Persistent window opacity (1.0 = opaque).  Used by the hover-peek feature
+// to show a rolled-down shaded window at reduced opacity; applied as an
+// alpha mask in paintWindow.
+@property (assign, nonatomic) CGFloat opacity;
 /* Set while a window is closing: the picture must survive unmap/re-map so the
  * shrink+fade animation renders from the captured frame. */
 @property (assign, nonatomic) BOOL closeAnimating;
@@ -141,6 +145,7 @@
         _animatingMinimize = NO;
         _animatingShrink = NO;
         _animatingFade = NO;
+        _opacity = 1.0;
         _animationStart = 0;
         _animationDuration = 0;
         _animationStartRect = XCBInvalidRect;
@@ -1891,9 +1896,23 @@
     // Ensure updated content is repainted
     [self damageWindowArea:cw];
     [self scheduleRepair];
-}
+ }
 
-- (void)resizeWindow:(xcb_window_t)windowId x:(int16_t)x y:(int16_t)y 
+ - (void)setWindowOpacity:(CGFloat)opacity forWindow:(xcb_window_t)windowId
+ {
+     if (!self.compositingActive)
+         return;
+
+     URSCompositeWindow *cw = [self findCWindow:windowId];
+     if (!cw)
+         return;
+
+     cw.opacity = opacity;
+     [self damageWindowArea:cw];
+     [self scheduleRepair];
+ }
+
+ - (void)resizeWindow:(xcb_window_t)windowId x:(int16_t)x y:(int16_t)y 
                width:(uint16_t)width height:(uint16_t)height {
     if (!self.compositingActive) {
         return;
@@ -4030,8 +4049,17 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             xcb_render_set_picture_transform(conn, cw.picture, transform);
 
             if (cw.animatingFade && alpha < 0.999 && self.argbFormat != XCB_NONE) {
-                alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha];
+                alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha * cw.opacity];
             }
+        }
+
+        // Persistent opacity (hover-peek): keep the window translucent even
+        // when no animation is running.  Skipped for close-animation snapshots
+        // (they are frozen and never peeked).
+        if (alphaMask == XCB_NONE && cw.opacity < 0.999 && !cw.closeAnimating &&
+            self.argbFormat != XCB_NONE)
+        {
+            alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:cw.opacity];
         }
 
         // Paint the window - IncludeInferiors captures all child content

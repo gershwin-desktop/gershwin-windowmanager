@@ -190,6 +190,11 @@ static void killOtherInstances(void) {
 }
 
 @interface XCBConnection ()
+{
+    // Last titlebar ButtonPress, for double-click (WindowShade toggle) detection.
+    xcb_timestamp_t _lastTitlebarClickTime;
+    xcb_window_t _lastTitlebarClickWindow;
+}
 @end
 
 @implementation XCBConnection
@@ -3868,6 +3873,19 @@ static XCBConnection *sharedInstance;
             [frameWindow showResizeCursorForPosition:BottomRightCorner];
         }
 
+        // Hover-peek: rolling a shaded window down at reduced opacity while
+        // the pointer rests on its titlebar (or a titlebar subwindow).
+        XCBTitleBar *titlebar = (XCBTitleBar *)[frameWindow childWindowForKey:TitleBar];
+        BOOL isTitlebar = titlebar &&
+            (anEvent->event == [titlebar window] ||
+             [[window parentWindow] isKindOfClass:[XCBTitleBar class]]);
+        // Ignore moves between the titlebar and its own subwindows (buttons):
+        // detail INFERIOR means the pointer went to a child, still on the
+        // titlebar decoration, so the peek must not start/stop.
+        if (isTitlebar && [frameWindow shaded] &&
+            anEvent->detail != XCB_NOTIFY_DETAIL_INFERIOR)
+            [frameWindow beginHoverPeek];
+
         frameWindow = nil;
     }
 
@@ -3922,13 +3940,27 @@ static XCBConnection *sharedInstance;
     window = nil;
 }
 
-- (void)handleLeaveNotify:(xcb_leave_notify_event_t *)anEvent
-{
-    XCBWindow *window = [self windowForXCBId:anEvent->event];
+ - (void)handleLeaveNotify:(xcb_leave_notify_event_t *)anEvent
+ {
+     XCBWindow *window = [self windowForXCBId:anEvent->event];
 
-    if ([window isKindOfClass:[XCBWindow class]] &&
-        [[window parentWindow] isKindOfClass:[XCBFrame class]])
-    {
+     // Pointer left the whole window.  If a peek is still active (its titlebar
+     // LeaveNotify can be coalesced/lost during a frantic in-out), end it here
+     // so the window always rolls back up.  Otherwise re-arm hover-peek so a
+     // later hover (after a peek collapsed) can fire again.
+     if ([window isKindOfClass:[XCBFrame class]]) {
+         XCBFrame *frameWindow = (XCBFrame *)window;
+         if (frameWindow.peeking)
+             [frameWindow endHoverPeek];
+         else
+             frameWindow.hoverPeekArmed = YES;
+         window = nil;
+         return;
+     }
+
+     if ([window isKindOfClass:[XCBWindow class]] &&
+         [[window parentWindow] isKindOfClass:[XCBFrame class]])
+     {
         // Check if this is the resize handle - change cursor back to normal pointer
         XCBFrame *frameWindow = (XCBFrame *)[window parentWindow];
         XCBWindow *resizeHandle = [frameWindow childWindowForKey:ResizeHandle];
@@ -3960,6 +3992,18 @@ static XCBConnection *sharedInstance;
         {
             [frameWindow showLeftPointerCursor];
         }
+
+        // Hover-peek ends when the pointer leaves the titlebar decoration.
+        XCBTitleBar *titlebar = (XCBTitleBar *)[frameWindow childWindowForKey:TitleBar];
+        BOOL isTitlebar = titlebar &&
+            (anEvent->event == [titlebar window] ||
+             [[window parentWindow] isKindOfClass:[XCBTitleBar class]]);
+        // Only roll up when the pointer truly leaves the titlebar decoration
+        // (to the window body or off-window), not when it moves onto a
+        // titlebar button (detail INFERIOR = went to a child subwindow).
+        if (isTitlebar && frameWindow.peeking &&
+            anEvent->detail != XCB_NOTIFY_DETAIL_INFERIOR)
+            [frameWindow endHoverPeek];
 
         frameWindow = nil;
         resizeHandle = nil;

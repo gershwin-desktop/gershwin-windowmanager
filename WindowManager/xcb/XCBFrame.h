@@ -98,6 +98,29 @@ extern NSString *URSWindowTitleContentChangedNotification;
 - (void) unshade;
 - (void) toggleShade;
 @property (nonatomic, assign) BOOL shadeAnimationInProgress;
+// The single in-flight shade/unshade animation timer, so a new shade request
+// can cancel an ongoing one (interruptible hover-peek on rapid input).
+@property (nonatomic, strong) NSTimer *shadeAnimTimer;
+// Whether the activity spinner was already running when a hover-peek began.
+// A peek must never start the spinner from cold - it only keeps a spinner
+// that was already spinning (as if the window stayed rolled up).
+@property (nonatomic, assign) BOOL peekSpinnerWasActive;
+
+// Hover-peek: while the pointer rests on a shaded window's titlebar the
+// window rolls down at reduced opacity and rolls back up on leave.
+@property (nonatomic, assign) BOOL peeking;
+@property (nonatomic, assign) BOOL hoverPeekArmed;
+// Timestamp of the last peek end; a too-rapid re-enter (or the synthetic
+// EnterNotify from our own collapse) inside this window is ignored so a peek
+// can't re-fire and leave the window stuck open.
+@property (nonatomic, assign) NSTimeInterval peekEndTime;
+// Set when a peek ends and the roll-up animation is running; the window stays
+// at peek opacity (0.66) during the roll-up and is restored to opaque only
+// once the animation completes (see shade / finishShadeGeometryChange).
+@property (nonatomic, assign) BOOL restoreOpacityAfterShade;
+- (void) beginHoverPeek;
+- (void) endHoverPeek;
+- (void) setCompositeOpacity:(CGFloat)opacity;
 
 // Timestamp of the most recent damage on this frame's CLIENT content.
 // The client stays mapped and rendering while shaded, so this keeps
