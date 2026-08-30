@@ -970,10 +970,58 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     return YES;
 }
 
+// Snapshot the current frame of a real NSProgressIndicator (spinning) into the
+// caller's current graphics context.  Using the actual control - rather than
+// replaying common_ProgressSpinning_N by hand - makes the titlebar activity
+// spinner pixel-identical to every other Eau spinner: drawRect: goes through
+// GSTheme, which resolves the *themed* spinner art (Eau's override), whereas
+// a direct [NSImage imageNamed:] lookup returns the default GNUstep image.
+// Same frame sequence and animation rate as anywhere else.  The indicator is
+// created and started once on the main runloop; each call captures its frame.
++ (void)drawContentActivitySpinnerInRect:(NSRect)rect
+                                     alpha:(CGFloat)alpha {
+    static NSProgressIndicator *spinner = nil;
+    static NSImage *cache = nil;
+    static NSSize cacheSize = {0.0, 0.0};
+    static BOOL started = NO;
+
+    if (spinner == nil) {
+        spinner = [[NSProgressIndicator alloc]
+            initWithFrame:NSMakeRect(0.0, 0.0, 32.0, 32.0)];
+        [spinner setStyle:NSProgressIndicatorSpinningStyle];
+        [spinner setIndeterminate:YES];
+        [spinner setUsesThreadedAnimation:NO];
+    }
+    if (!started) {
+        [spinner startAnimation:nil];
+        started = YES;
+    }
+
+    NSSize s = rect.size;
+    if (cache == nil || !NSEqualSizes(cacheSize, s)) {
+        cache = [[NSImage alloc] initWithSize:s];
+        cacheSize = s;
+    }
+
+    // Snapshot the live spinner frame at full alpha into a cache image, then
+    // composite it into the titlebar with the requested fade alpha.
+    [cache lockFocus];
+    [[NSColor clearColor] set];
+    NSRectFill(NSMakeRect(0.0, 0.0, s.width, s.height));
+    [spinner setFrame:NSMakeRect(0.0, 0.0, s.width, s.height)];
+    [spinner drawRect:NSMakeRect(0.0, 0.0, s.width, s.height)];
+    [cache unlockFocus];
+
+    [cache drawInRect:rect
+             fromRect:NSZeroRect
+            operation:NSCompositeSourceOver
+             fraction:alpha];
+}
+
 + (BOOL)renderGSThemeToWindow:(XCBWindow*)window
-                        frame:(XCBFrame*)frame
-                        title:(NSString*)title
-                       active:(BOOL)isActive {
+                         frame:(XCBFrame*)frame
+                         title:(NSString*)title
+                        active:(BOOL)isActive {
     URS_PROFILE_BEGIN(themeRender);
 
     if (![[URSThemeIntegration sharedInstance] enabled] || !window || !frame) {
@@ -1231,36 +1279,19 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         [gctx restoreGraphicsState];
 
         // *** CONTENT-ACTIVITY SPINNER OVERLAY ***
-        // When the window manager flagged this titlebar as showing content
-        // activity, draw the system theme spinner frame (the same
-        // common_ProgressSpinning_N art every NSProgressIndicator uses)
-        // right after the title text, at full titlebar height and square.
+        // Draw a real NSProgressIndicator (spinning) so the titlebar spinner is
+        // pixel-identical to every other Eau spinner: same GSTheme art, same
+        // frame sequence, same animation rate.  The control is animated once on
+        // the main runloop; here we snapshot its current frame.
         if ([titlebar respondsToSelector:@selector(spinnerRenderFrame)] &&
             [(XCBTitleBar *)titlebar spinnerRenderFrame] >= 0) {
-            static NSMutableArray<NSImage *> *spinnerFrames = nil;
-            if (!spinnerFrames) {
-                spinnerFrames = [[NSMutableArray alloc] init];
-                for (int i = 1; i <= 16; i++) {
-                    NSImage *img = [NSImage imageNamed:
-                        [NSString stringWithFormat:@"common_ProgressSpinning_%d", i]];
-                    if (!img) break;
-                    [spinnerFrames addObject:img];
-                }
-            }
-
-            int frameIdx = [(XCBTitleBar *)titlebar spinnerRenderFrame];
-            if (spinnerFrames.count > 0) {
-                NSImage *spin = spinnerFrames[frameIdx % (int)spinnerFrames.count];
-                CGFloat side = titlebarSize.height - 8.0;
-                if (side < 8.0) side = 8.0;
-                CGFloat sx = [(XCBTitleBar *)titlebar spinnerTargetX];
-                NSRect spinRect = NSMakeRect(sx, (titlebarSize.height - side) / 2.0, side, side);
-                CGFloat alpha = [(XCBTitleBar *)titlebar spinnerAlpha];
-                [spin drawInRect:spinRect
-                        fromRect:NSZeroRect
-                      operation:NSCompositeSourceOver
-                       fraction:alpha];
-            }
+            CGFloat side = titlebarSize.height - 6.0;
+            if (side < 8.0) side = 8.0;
+            CGFloat sx = [(XCBTitleBar *)titlebar spinnerTargetX];
+            NSRect spinRect = NSMakeRect(sx, (titlebarSize.height - side) / 2.0, side, side);
+            CGFloat alpha = [(XCBTitleBar *)titlebar spinnerAlpha];
+            [URSThemeIntegration drawContentActivitySpinnerInRect:spinRect
+                                                            alpha:alpha];
         }
 
         // *** BUTTON DRAWING ***
