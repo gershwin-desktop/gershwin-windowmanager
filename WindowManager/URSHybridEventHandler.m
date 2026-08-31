@@ -1884,7 +1884,6 @@ static CGFloat WMLastScaleFactor = 1.0;
             queryWindow = nil;
             // Use workarea as placement/clamping bounds so windows dodge struts
             // (menu bar at top, dock at bottom/side, etc.).
-            uint16_t waX = (uint16_t)workarea.origin.x;
             uint16_t waY = (uint16_t)workarea.origin.y;
             uint16_t waW = (uint16_t)workarea.size.width;
             uint16_t waH = (uint16_t)workarea.size.height;
@@ -1899,37 +1898,41 @@ static CGFloat WMLastScaleFactor = 1.0;
                 uint16_t clampedWidth = (uint16_t)(waW * 0.8);
                 uint16_t clampedHeight = (uint16_t)(waH * 0.8);
 
-                // Place at workarea top-left with a small inset, or golden ratio for dialogs.
-                uint16_t defaultX = isDialogWindow ? goldenPosX : (waX + 22);
-                uint16_t defaultY = isDialogWindow ? goldenPosY : (waY + 22);
-                uint32_t sizeValues[] = {defaultX, defaultY, clampedWidth, clampedHeight};
-                xcb_configure_window([connection connection],
-                                     clientWindowId,
-                             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
-                             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-                                     sizeValues);
+                // Only resize; handleMapRequest will handle placement via cascade.
+                if (isDialogWindow) {
+                    uint32_t sizeValues[] = {goldenPosX, goldenPosY, clampedWidth, clampedHeight};
+                    xcb_configure_window([connection connection],
+                                         clientWindowId,
+                                 XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+                                 XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                         sizeValues);
+                } else {
+                    uint32_t sizeValues[] = {clampedWidth, clampedHeight};
+                    xcb_configure_window([connection connection],
+                                         clientWindowId,
+                                 XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                         sizeValues);
+                }
                 [connection flush];
             }
 
-            // Only apply WM default placement if:
-            // 1. Window is positioned at (0,0) - indicates no app positioning
-            // 2. AND window is not a desktop window
-            // 3. AND window is not explicitly requesting fullscreen
+            // Only apply WM default placement for dialogs; normal windows are
+            // placed by handleMapRequest using Classic HIG cascading.
             BOOL isAtOrigin = (geom_reply->x == 0 && geom_reply->y == 0);
             BOOL isFullScreenSize = (geom_reply->width >= screenWidth && geom_reply->height >= screenHeight);
 
             if (isAtOrigin && (geom_reply->width < screenWidth) && !isDesktopWindow && !isFullscreenState) {
-                // Window starts at (0,0) but is NOT full-width. This is usually a fallback position
-                // for apps that don't specify geometry. Move it below the workarea top edge.
-                uint16_t defaultX = isDialogWindow ? goldenPosX : (waX + 22);
-                uint16_t defaultY = isDialogWindow ? goldenPosY : (waY + 22);
-
-                uint32_t configValues[] = {defaultX, defaultY};
-                xcb_configure_window([connection connection],
-                                     clientWindowId,
-                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y,
-                                     configValues);
-                [connection flush];
+                if (isDialogWindow) {
+                    uint16_t defaultX = goldenPosX;
+                    uint16_t defaultY = goldenPosY;
+                    uint32_t configValues[] = {defaultX, defaultY};
+                    xcb_configure_window([connection connection],
+                                         clientWindowId,
+                                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y,
+                                         configValues);
+                    [connection flush];
+                }
+                // Non-dialog: leave at (0,0) - handleMapRequest cascade will position it.
             } else if (isDesktopWindow || isFullscreenState) {
                 // Desktop/fullscreen windows: leave at their requested position.
             } else if (isAtOrigin && isFullScreenSize) {

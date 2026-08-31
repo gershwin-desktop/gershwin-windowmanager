@@ -82,6 +82,10 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 @property (nonatomic, assign) BOOL snapPreviewShown;
 @property (nonatomic, assign) BOOL adoptingExistingWindows;
 
+// Classic HIG cascading placement
+@property (nonatomic, assign) int32_t cascadeOriginX;
+@property (nonatomic, assign) int32_t cascadeOriginY;
+
 + (XCBConnection *) sharedConnectionAsWindowManager:(BOOL)asWindowManager;
 - (xcb_connection_t *) connection;
 /**

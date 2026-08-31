@@ -289,6 +289,10 @@ static XCBConnection *sharedInstance;
     _expectedFocusWindow = 0;
     _expectedFocusTimestamp = 0;
 
+    // Classic HIG cascading placement: -1 means "not yet initialized"
+    _cascadeOriginX = -1;
+    _cascadeOriginY = -1;
+
     [self flush];
     return self;
 }
@@ -1445,11 +1449,8 @@ static XCBConnection *sharedInstance;
         else
         {
             //NSLog(@"[MapRequest] Window has no frame parent, mapping directly");
-            // No frame, consider applying golden ratio if it would otherwise be
-            // placed at the bottom-left (GNUstep default origin).
+            // No frame, reposition unless USPosition is set.
             XCBRect winRect = [window windowRect];
-            int16_t reqX = winRect.position.x;
-            int16_t reqY = winRect.position.y;
             uint16_t reqW = winRect.size.width;
             uint16_t reqH = winRect.size.height;
 
@@ -1463,60 +1464,41 @@ static XCBConnection *sharedInstance;
             if (screen) {
                 int16_t screenHeight = [screenObj height];
                 int16_t screenWidth = [screenObj width];
+                BOOL isFullWidth = (reqW >= screenWidth);
 
-                // Candidate for bottom-left default: near left edge and near bottom
-                if (reqX < 64 && abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100 && reqW < screenWidth) {
-                    xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
-                    if (hints) {
-                        // Respect user specified position (USPosition). If not present, apply placement.
-                        if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
-                            BOOL isDialog = NO;
-                            if ([window windowType] != nil && ewmhService != nil) {
-                                isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
-                            }
-
-                            int16_t xPos, yPos;
-                            if (isDialog) {
-                                // Dialogs: centered horizontally, golden ratio vertically
-                                xPos = (screenWidth - reqW) / 2;
-                                yPos = (screenHeight - reqH) * 0.381966;
-                                //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
-                            } else {
-                                // Other windows: 22 px from left, 44 px from top
-                                xPos = 22;
-                                yPos = 44;
-                                //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
-                            }
-                            XCBRect newRect = winRect;
-                            newRect.position.x = xPos;
-                            newRect.position.y = yPos;
-                            [window setWindowRect:newRect];
-                        }
-                        free(hints);
-                    } else {
-                        // No hints: assume default -> apply placement
-                        BOOL isDialog = NO;
-                        if ([window windowType] != nil && ewmhService != nil) {
-                            isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
-                        }
-
-                        int16_t xPos, yPos;
-                        if (isDialog) {
-                            // Dialogs: centered horizontally, golden ratio vertically
-                            xPos = (screenWidth - reqW) / 2;
-                            yPos = (screenHeight - reqH) * 0.381966;
-                            //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
-                        } else {
-                            // Other windows: 22 px from left, 44 px from top
-                            xPos = 22;
-                            yPos = 44;
-                            //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
-                        }
-                        XCBRect newRect = winRect;
-                        newRect.position.x = xPos;
-                        newRect.position.y = yPos;
-                        [window setWindowRect:newRect];
+                if (!isFullWidth) {
+                    BOOL isDialog = NO;
+                    if ([window windowType] != nil && ewmhService != nil) {
+                        isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
                     }
+
+                    int16_t xPos, yPos;
+                    if (isDialog) {
+                        xPos = (screenWidth - reqW) / 2;
+                        yPos = (screenHeight - reqH) * 0.381966;
+                    } else {
+                        int32_t waX = self.workareaValid ? _cachedWorkareaX : 0;
+                        int32_t waY = self.workareaValid ? _cachedWorkareaY : 0;
+                        uint32_t waW = self.workareaValid ? _cachedWorkareaWidth : screenWidth;
+                        uint32_t waH = self.workareaValid ? _cachedWorkareaHeight : screenHeight;
+                        if (_cascadeOriginX < 0) {
+                            _cascadeOriginX = waX;
+                            _cascadeOriginY = waY;
+                        }
+                        xPos = _cascadeOriginX;
+                        yPos = _cascadeOriginY;
+                        _cascadeOriginX += 24;
+                        _cascadeOriginY += 24;
+                        if (_cascadeOriginX + (int32_t)reqW > waX + (int32_t)waW ||
+                            _cascadeOriginY + (int32_t)reqH > waY + (int32_t)waH) {
+                            _cascadeOriginX = waX;
+                            _cascadeOriginY = waY;
+                        }
+                    }
+                    XCBRect newRect = winRect;
+                    newRect.position.x = xPos;
+                    newRect.position.y = yPos;
+                    [window setWindowRect:newRect];
                 }
             }
 
@@ -1977,57 +1959,15 @@ static XCBConnection *sharedInstance;
     BOOL isDialog = NO;
 
     if (!self.adoptingExistingWindows) {
-        // Check _GNUSTEP_WM_ATTR: GNUstep apps set this on all their windows.
-        // If present, the app manages its own positioning (including centering
-        // of alert/modal panels) and the WM must not override it.
-        BOOL isGNUstepApp = NO;
-        if (ewmhService != nil) {
-            xcb_get_property_cookie_t gsCookie =
-                xcb_get_property([self connection], 0, [window window],
-                                 [[ewmhService atomService]
-                                    atomFromCachedAtomsWithKey: [ewmhService GNUStepWmAttr]],
-                                 XCB_GET_PROPERTY_TYPE_ANY, 0, sizeof(uint32_t) * 4);
-            xcb_generic_error_t *gsErr = NULL;
-            xcb_get_property_reply_t *gsReply =
-                xcb_get_property_reply([self connection], gsCookie, &gsErr);
-            if (gsReply != NULL) {
-                isGNUstepApp = (xcb_get_property_value_length(gsReply) > 0);
-                free(gsReply);
-            }
-            if (gsErr) free(gsErr);
+        // The WM is the authority on window placement.  Cascade all
+        // newly mapped non-dialog, non-desktop, non-fullscreen windows.
+        BOOL isFullWidth = NO;
+        if (screen && reqW >= [screen width]) {
+            isFullWidth = YES;
         }
 
-        if (!isGNUstepApp) {
-            BOOL isAtDefaultPos = NO;
-            if (screen) {
-                int16_t screenHeight = [screen height];
-                if (reqY < 64) {
-                    isAtDefaultPos = YES;
-                } else if (abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100) {
-                    isAtDefaultPos = YES;
-                }
-            }
-
-            if (isAtDefaultPos) {
-                BOOL isFullWidth = NO;
-                if (screen && reqW >= [screen width]) {
-                    isFullWidth = YES;
-                }
-
-                if (!isFullWidth) {
-                    xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
-                    if (hints) {
-                        if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
-                            shouldReposition = YES;
-                        }
-                        free(hints);
-                    } else {
-                        shouldReposition = YES;
-                    }
-                }
-            }
-        } else {
-            //NSLog(@"[MapRequest] GNUstep window %u — skipping WM placement override", [window window]);
+        if (!isFullWidth) {
+            shouldReposition = YES;
         }
     } else {
         //NSLog(@"[MapRequest] Skipping WM placement override for adopted window %u", [window window]);
@@ -2068,9 +2008,21 @@ static XCBConnection *sharedInstance;
             xPos = waX + (waW - winWidth) / 2;
             yPos = waY + (waH - winHeight) * 0.381966;
         } else {
-            // Other windows: small inset from workarea top-left
-            xPos = waX + 22;
-            yPos = waY + 22;
+            // Classic HIG: cascade from top-left, 24px diagonal offset
+            if (_cascadeOriginX < 0) {
+                _cascadeOriginX = waX;
+                _cascadeOriginY = waY;
+            }
+            xPos = _cascadeOriginX;
+            yPos = _cascadeOriginY;
+            _cascadeOriginX += 24;
+            _cascadeOriginY += 24;
+            // Reset when cascade would exceed workarea bounds
+            if (_cascadeOriginX + (int32_t)winWidth > waX + (int32_t)waW ||
+                _cascadeOriginY + (int32_t)winHeight > waY + (int32_t)waH) {
+                _cascadeOriginX = waX;
+                _cascadeOriginY = waY;
+            }
         }
 
         // Keep the client rect in root coordinates while frame uses xPos/yPos.
