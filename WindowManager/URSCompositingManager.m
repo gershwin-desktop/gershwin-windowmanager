@@ -200,6 +200,7 @@
 @property (assign, nonatomic) BOOL repairScheduled;
 @property (assign, nonatomic) NSTimeInterval lastRepairTime;
 @property (assign, nonatomic) NSUInteger repairFrameCounter; // Frame counter for throttling during drag
+@property (assign, nonatomic) BOOL stackingDamageScheduled; // Debounce markStackingOrderDirty
 
 // Cached screen info
 @property (assign, nonatomic) uint16_t screenWidth;
@@ -308,6 +309,7 @@
         _repairScheduled = NO;
         _lastRepairTime = 0;
         _repairFrameCounter = 0;
+        _stackingDamageScheduled = NO;
         _cwindows = [[NSMutableDictionary alloc] init];
         
         // OPTIMIZATION: Initialize format caches
@@ -3058,15 +3060,36 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     self.stackingOrderDirty = NO;
 }
 
+// Debounce stacking order damage: multiple rapid changes coalesce into one pass
+- (void)scheduleStackingDamage {
+    if (self.stackingDamageScheduled) {
+        return; // Already scheduled, coalesce
+    }
+    self.stackingDamageScheduled = YES;
+    [self performSelector:@selector(performStackingDamage)
+               withObject:nil
+               afterDelay:0.016]; // 16ms debounce (matches animation timer)
+}
+
+- (void)performStackingDamage {
+    if (!self.stackingDamageScheduled) {
+        return;
+    }
+    self.stackingDamageScheduled = NO;
+    if (self.compositingActive) {
+        // Damage full screen to ensure stacking change is visible.
+        // Multiple rapid stacking changes are coalesced into this one pass.
+        [self damageScreen];
+    }
+}
+
 // OPTIMIZATION: Notify that stacking order changed (e.g., window raised/lowered)
 - (void)markStackingOrderDirty {
     self.stackingOrderDirty = YES;
     if (self.compositingActive) {
-        // ALWAYS damage the screen on stacking order change.
-        // If we don't, and some other damage was already pending,
-        // we might only repaint a small part of the screen while the
-        // stacking change requires a full redraw of the affected windows.
-        [self damageScreen];
+        // Debounce: coalesce multiple rapid stacking changes into one damage pass.
+        // This avoids creating redundant full-screen XFixes regions for each event.
+        [self scheduleStackingDamage];
     }
 }
 
