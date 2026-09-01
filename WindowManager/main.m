@@ -81,6 +81,12 @@ int main(int argc, const char * argv[])
             }
         }
         
+        // Prevent GNUstep from loading user-defined AppKit bundles (DriveUI, OnDemand)
+        // into the WM process - they spin on idle sockets and waste CPU.
+        // Must be set before +sharedApplication triggers bundle loading.
+        [[NSUserDefaults standardUserDefaults] setObject:@[]
+                                                  forKey:@"GSAppKitUserBundles"];
+
         // Store compositing preference directly on the event handler
         UROSWMApplication *app = [UROSWMApplication sharedApplication];
         URSHybridEventHandler *hybridHandler = [[URSHybridEventHandler alloc] init];

@@ -8,7 +8,6 @@
 
 #include <unistd.h>
 #include <signal.h>
-#import <dispatch/dispatch.h>
 
 #import "XCBWindow.h"
 #import "XCBConnection.h"

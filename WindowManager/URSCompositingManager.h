@@ -12,6 +12,8 @@
 #import "XCBTypes.h"
 #import <xcb/randr.h>
 
+// Replaces <dispatch/dispatch.h> dispatch_block_t without linking libdispatch
+typedef void (^dispatch_block_t)(void);
 
 @interface URSCompositingManager : NSObject
 
@@ -54,7 +56,7 @@
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                                          fromRect:(XCBRect)startRect
                                              toRect:(XCBRect)endRect
-                                         completion:(dispatch_block_t)completion;
+                                         completion:(void (^)(void))completion;
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
@@ -68,7 +70,7 @@
                                                     toRect:(XCBRect)endRect
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade
-                                                 completion:(dispatch_block_t)completion;
+                                                 completion:(void (^)(void))completion;
 - (void)animateWindowShrink:(xcb_window_t)windowId
                    fromRect:(XCBRect)startRect
                      toRect:(XCBRect)endRect
@@ -77,7 +79,7 @@
                    fromRect:(XCBRect)startRect
                      toRect:(XCBRect)endRect
                    duration:(NSTimeInterval)duration
-                 completion:(dispatch_block_t)completion;
+                 completion:(void (^)(void))completion;
 
 // Non-compositing zoom rect animation (outline-based, fast)
 + (void)animateZoomRectsFromRect:(XCBRect)startRect

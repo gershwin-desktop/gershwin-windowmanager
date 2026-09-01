@@ -18,7 +18,6 @@
 #import <enums/EIcccm.h>
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
-#import <dispatch/dispatch.h>
 #import <GNUstepGUI/GSTheme.h>
 #import <AppKit/NSColor.h>
 #import <AppKit/NSGraphics.h>
@@ -39,7 +38,7 @@
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                                          fromRect:(XCBRect)startRect
                                              toRect:(XCBRect)endRect
-                                         completion:(dispatch_block_t)completion;
+                                         completion:(void (^)(void))completion;
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
@@ -53,7 +52,7 @@
                                                     toRect:(XCBRect)endRect
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade
-                                                 completion:(dispatch_block_t)completion;
+                                                 completion:(void (^)(void))completion;
 - (void)animateWindowShrink:(xcb_window_t)windowId
                    fromRect:(XCBRect)startRect
                      toRect:(XCBRect)endRect
@@ -62,7 +61,7 @@
                    fromRect:(XCBRect)startRect
                      toRect:(XCBRect)endRect
                    duration:(NSTimeInterval)duration
-                 completion:(dispatch_block_t)completion;
+                 completion:(void (^)(void))completion;
 + (void)animateZoomRectsFromRect:(XCBRect)startRect
                           toRect:(XCBRect)endRect
                       connection:(XCBConnection *)connection
@@ -1619,9 +1618,7 @@ static XCBConnection *sharedInstance;
         }
 
         /** check allowed actions **/
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-          [window checkNetWMAllowedActions];
-        });
+        [window checkNetWMAllowedActions];
 
 
         //NSLog(@"Window Type %@ and window: %u", [ewmhService EWMHWMWindowType], [window window]);
@@ -2291,7 +2288,7 @@ static XCBConnection *sharedInstance;
         [compositor setCloseAnimating:YES forWindow:[target window]];
     }
 
-    dispatch_block_t hideWindows = ^{
+    void (^hideWindows)(void) = ^{
         /* Full close teardown, mirroring handleUnMapNotify: - reparent the
          * already-unmapped client to the root, undecorate, unregister, and
          * destroy the frame. */
@@ -2896,22 +2893,25 @@ static XCBConnection *sharedInstance;
                                          toRect:targetRect
                                        duration:0.22
                                            fade:NO];
-            dispatch_block_t finishMaximize = ^{
-                [frame programmaticResizeToRect:targetRect];
-                [frame setFullScreen:YES];
-                [frame setIsMaximized:YES];
-                [titleBar setFullScreen:YES];
-                [clientWindow setFullScreen:YES];
-                [titleBar drawTitleBarComponents];
-                [frame updateAllResizeZonePositions];
-                [frame applyRoundedCornersShapeMask];
-                if (compositor && [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
-                    [compositor invalidateWindowPixmap:[frame window]];
-                }
-            };
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                         (int64_t)(0.22 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), finishMaximize);
+            // Delay the maximize finish to let the compositor capture the old rect.
+            // Store captured state in a dictionary for the timer callback.
+            NSMutableDictionary *maximizeInfo = [NSMutableDictionary dictionaryWithDictionary:@{
+                @"frame": frame,
+                @"posX": @(targetRect.position.x),
+                @"posY": @(targetRect.position.y),
+                @"width": @(targetRect.size.width),
+                @"height": @(targetRect.size.height),
+                @"titleBar": titleBar,
+                @"clientWindow": clientWindow,
+            }];
+            if (compositor) {
+                maximizeInfo[@"compositor"] = compositor;
+            }
+            [NSTimer scheduledTimerWithTimeInterval:0.22
+                                             target:self
+                                           selector:@selector(_performDelayedMaximize:)
+                                           userInfo:maximizeInfo
+                                            repeats:NO];
         } else {
             [frame programmaticResizeToRect:targetRect];
             [frame setFullScreen:YES];
@@ -3710,7 +3710,7 @@ static XCBConnection *sharedInstance;
                 // Defer unmap until the compositor finishes the minimize
                 // animation, so the window stays in the X server tree and
                 // the compositor's stacking order cache can find it.
-                dispatch_block_t hideWindows = ^{
+    void (^hideWindows)(void) = ^{
                     if (frame != nil) {
                         [frame setIconicState];
                         [frame setIsMinimized:YES];
@@ -5064,6 +5064,36 @@ static XCBConnection *sharedInstance;
     [frame applyRoundedCornersShapeMask];
 
     [self flush];
+}
+
+#pragma mark - Timer callbacks (replaces libdispatch usage)
+
+- (void)_performDelayedMaximize:(NSTimer *)timer
+{
+    NSDictionary *info = timer.userInfo;
+    XCBFrame *frame = info[@"frame"];
+    XCBTitleBar *titleBar = info[@"titleBar"];
+    XCBWindow *clientWindow = info[@"clientWindow"];
+    id<URSCompositingManaging> compositor = info[@"compositor"];
+    double px = [info[@"posX"] doubleValue];
+    double py = [info[@"posY"] doubleValue];
+    double w  = [info[@"width"] doubleValue];
+    double h  = [info[@"height"] doubleValue];
+    XCBPoint pt = {px, py};
+    XCBSize sz = {(uint16_t)w, (uint16_t)h};
+    XCBRect targetRect = XCBMakeRect(pt, sz);
+
+    [frame programmaticResizeToRect:targetRect];
+    [frame setFullScreen:YES];
+    [frame setIsMaximized:YES];
+    [titleBar setFullScreen:YES];
+    [clientWindow setFullScreen:YES];
+    [titleBar drawTitleBarComponents];
+    [frame updateAllResizeZonePositions];
+    [frame applyRoundedCornersShapeMask];
+    if (compositor && [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+        [compositor invalidateWindowPixmap:[frame window]];
+    }
 }
 
 @end
