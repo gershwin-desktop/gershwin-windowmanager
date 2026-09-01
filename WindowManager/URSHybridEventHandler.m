@@ -227,13 +227,6 @@ static CGFloat WMLastScaleFactor = 1.0;
     // Wire selectionManagerWindow into the focus manager now that it exists
     self.focusManager.selectionManagerWindow = self.selectionManagerWindow;
 
-    // Hide the WM's own windows from the Dock/Taskbar.
-    // Scan all top-level children of root for windows owned by our PID
-    // and set _NET_WM_STATE SKIP_TASKBAR + SKIP_PAGER on any that lack it.
-    [self hideWMWindowsFromDock];
-    // Retry after a short delay to catch windows created lazily during launch.
-    [self performSelector:@selector(hideWMWindowsFromDock) withObject:nil afterDelay:0.5];
-    
     // Initialize compositing if requested
     if (self.compositingRequested) {
         [self initializeCompositing];
@@ -268,87 +261,6 @@ static CGFloat WMLastScaleFactor = 1.0;
 {
     // Keep running even if no windows are visible (window manager behavior)
     return NO;
-}
-
-- (void)hideWMWindowsFromDock
-{
-    xcb_connection_t *conn = [connection connection];
-    xcb_window_t root = [[connection rootWindowForScreenNumber:0] window];
-
-    EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
-    xcb_atom_t skipAtoms[2];
-    skipAtoms[0] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipTaskbar]];
-    skipAtoms[1] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipPager]];
-    xcb_atom_t wmStateAtom = [[ewmh atomService] cacheAtom:[ewmh EWMHWMState]];
-    xcb_atom_t wmPidAtom = [[ewmh atomService] cacheAtom:[ewmh EWMHWMPid]];
-    xcb_atom_t wmCommandAtom = XCB_ATOM_WM_COMMAND;
-
-    xcb_query_tree_reply_t *tree = xcb_query_tree_reply(conn,
-        xcb_query_tree(conn, root), NULL);
-    if (!tree) return;
-
-    xcb_window_t *children = xcb_query_tree_children(tree);
-    int count = xcb_query_tree_children_length(tree);
-    pid_t myPid = getpid();
-    BOOL changed = NO;
-
-    for (int i = 0; i < count; i++) {
-        xcb_window_t w = children[i];
-
-        // Check if SKIP_TASKBAR already set
-        xcb_get_property_reply_t *stateReply = xcb_get_property_reply(conn,
-            xcb_get_property(conn, 0, w, wmStateAtom,
-                XCB_ATOM_ATOM, 0, 32), NULL);
-        if (stateReply) {
-            xcb_atom_t *atoms = (xcb_atom_t *)xcb_get_property_value(stateReply);
-            int n = xcb_get_property_value_length(stateReply) / (int)sizeof(xcb_atom_t);
-            BOOL hasSkip = NO;
-            for (int j = 0; j < n; j++) {
-                if (atoms[j] == skipAtoms[0]) { hasSkip = YES; break; }
-            }
-            free(stateReply);
-            if (hasSkip) continue;
-        }
-
-        // Check ownership: _NET_WM_PID match, or WM_COMMAND contains our name
-        BOOL owned = NO;
-
-        xcb_get_property_reply_t *pidReply = xcb_get_property_reply(conn,
-            xcb_get_property(conn, 0, w, wmPidAtom,
-                XCB_ATOM_CARDINAL, 0, 1), NULL);
-        if (pidReply) {
-            if (xcb_get_property_value_length(pidReply) >= (int)sizeof(pid_t)) {
-                pid_t *pid = (pid_t *)xcb_get_property_value(pidReply);
-                owned = (*pid == myPid);
-            }
-            free(pidReply);
-        }
-
-        // GNUstep's icon window lacks _NET_WM_PID; match by WM_COMMAND
-        if (!owned) {
-            xcb_get_property_reply_t *cmdReply = xcb_get_property_reply(conn,
-                xcb_get_property(conn, 0, w, wmCommandAtom,
-                    XCB_ATOM_STRING, 0, 256), NULL);
-            if (cmdReply) {
-                char *cmd = (char *)xcb_get_property_value(cmdReply);
-                int len = xcb_get_property_value_length(cmdReply);
-                if (len > 0 && strstr(cmd, "WindowManager") != NULL) {
-                    owned = YES;
-                }
-                free(cmdReply);
-            }
-        }
-
-        if (!owned) continue;
-
-        // Set _NET_WM_STATE with SKIP_TASKBAR + SKIP_PAGER
-        xcb_change_property(conn, XCB_PROP_MODE_REPLACE, w,
-                           wmStateAtom, XCB_ATOM_ATOM, 32, 2, skipAtoms);
-        changed = YES;
-    }
-
-    if (changed) xcb_flush(conn);
-    free(tree);
 }
 
 #pragma mark - Compositing Management
