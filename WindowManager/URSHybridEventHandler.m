@@ -281,6 +281,7 @@ static CGFloat WMLastScaleFactor = 1.0;
     skipAtoms[1] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipPager]];
     xcb_atom_t wmStateAtom = [[ewmh atomService] cacheAtom:[ewmh EWMHWMState]];
     xcb_atom_t wmPidAtom = [[ewmh atomService] cacheAtom:[ewmh EWMHWMPid]];
+    xcb_atom_t wmCommandAtom = XCB_ATOM_WM_COMMAND;
 
     xcb_query_tree_reply_t *tree = xcb_query_tree_reply(conn,
         xcb_query_tree(conn, root), NULL);
@@ -293,19 +294,6 @@ static CGFloat WMLastScaleFactor = 1.0;
 
     for (int i = 0; i < count; i++) {
         xcb_window_t w = children[i];
-
-        // Read _NET_WM_PID to identify windows owned by this process
-        xcb_get_property_reply_t *pidReply = xcb_get_property_reply(conn,
-            xcb_get_property(conn, 0, w, wmPidAtom,
-                XCB_ATOM_CARDINAL, 0, 1), NULL);
-        if (!pidReply) continue;
-        BOOL owned = NO;
-        if (xcb_get_property_value_length(pidReply) >= (int)sizeof(pid_t)) {
-            pid_t *pid = (pid_t *)xcb_get_property_value(pidReply);
-            owned = (*pid == myPid);
-        }
-        free(pidReply);
-        if (!owned) continue;
 
         // Check if SKIP_TASKBAR already set
         xcb_get_property_reply_t *stateReply = xcb_get_property_reply(conn,
@@ -321,6 +309,37 @@ static CGFloat WMLastScaleFactor = 1.0;
             free(stateReply);
             if (hasSkip) continue;
         }
+
+        // Check ownership: _NET_WM_PID match, or WM_COMMAND contains our name
+        BOOL owned = NO;
+
+        xcb_get_property_reply_t *pidReply = xcb_get_property_reply(conn,
+            xcb_get_property(conn, 0, w, wmPidAtom,
+                XCB_ATOM_CARDINAL, 0, 1), NULL);
+        if (pidReply) {
+            if (xcb_get_property_value_length(pidReply) >= (int)sizeof(pid_t)) {
+                pid_t *pid = (pid_t *)xcb_get_property_value(pidReply);
+                owned = (*pid == myPid);
+            }
+            free(pidReply);
+        }
+
+        // GNUstep's icon window lacks _NET_WM_PID; match by WM_COMMAND
+        if (!owned) {
+            xcb_get_property_reply_t *cmdReply = xcb_get_property_reply(conn,
+                xcb_get_property(conn, 0, w, wmCommandAtom,
+                    XCB_ATOM_STRING, 0, 256), NULL);
+            if (cmdReply) {
+                char *cmd = (char *)xcb_get_property_value(cmdReply);
+                int len = xcb_get_property_value_length(cmdReply);
+                if (len > 0 && strstr(cmd, "WindowManager") != NULL) {
+                    owned = YES;
+                }
+                free(cmdReply);
+            }
+        }
+
+        if (!owned) continue;
 
         // Set _NET_WM_STATE with SKIP_TASKBAR + SKIP_PAGER
         xcb_change_property(conn, XCB_PROP_MODE_REPLACE, w,
