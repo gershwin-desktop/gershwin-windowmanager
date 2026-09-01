@@ -227,33 +227,12 @@ static CGFloat WMLastScaleFactor = 1.0;
     // Wire selectionManagerWindow into the focus manager now that it exists
     self.focusManager.selectionManagerWindow = self.selectionManagerWindow;
 
-    // Hide the GNUstep application icon window (NSIconWindow) from the Dock.
-    // The WM itself must not appear as an application entry.
-    // Try immediately, and also defer to catch windows created after launch.
-    {
-        NSArray *appWindows = [NSApp windows];
-        for (NSWindow *win in appWindows) {
-            if ([[win className] isEqualToString:@"NSIconWindow"]) {
-                xcb_window_t xid = (xcb_window_t)[win windowNumber];
-                EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
-                xcb_atom_t atoms[2];
-                atoms[0] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipTaskbar]];
-                atoms[1] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipPager]];
-                xcb_change_property([connection connection],
-                                   XCB_PROP_MODE_REPLACE,
-                                   xid,
-                                   [[ewmh atomService] cacheAtom:[ewmh EWMHWMState]],
-                                   XCB_ATOM_ATOM,
-                                   32,
-                                   2,
-                                   atoms);
-                [connection flush];
-                break;
-            }
-        }
-    }
-    // Retry after a short delay in case NSIconWindow is created lazily.
-    [self performSelector:@selector(hideIconWindowFromDock) withObject:nil afterDelay:0.5];
+    // Hide the WM's own windows from the Dock/Taskbar.
+    // Scan all top-level children of root for windows owned by our PID
+    // and set _NET_WM_STATE SKIP_TASKBAR + SKIP_PAGER on any that lack it.
+    [self hideWMWindowsFromDock];
+    // Retry after a short delay to catch windows created lazily during launch.
+    [self performSelector:@selector(hideWMWindowsFromDock) withObject:nil afterDelay:0.5];
     
     // Initialize compositing if requested
     if (self.compositingRequested) {
@@ -291,30 +270,66 @@ static CGFloat WMLastScaleFactor = 1.0;
     return NO;
 }
 
-- (void)hideIconWindowFromDock
+- (void)hideWMWindowsFromDock
 {
-    NSArray *appWindows = [NSApp windows];
-    for (NSWindow *win in appWindows) {
-        if ([[win className] isEqualToString:@"NSIconWindow"]) {
-            xcb_window_t xid = (xcb_window_t)[win windowNumber];
-            if (xid > 0) {
-                EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
-                xcb_atom_t atoms[2];
-                atoms[0] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipTaskbar]];
-                atoms[1] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipPager]];
-                xcb_change_property([connection connection],
-                                   XCB_PROP_MODE_REPLACE,
-                                   xid,
-                                   [[ewmh atomService] cacheAtom:[ewmh EWMHWMState]],
-                                   XCB_ATOM_ATOM,
-                                   32,
-                                   2,
-                                   atoms);
-                [connection flush];
-            }
-            break;
+    xcb_connection_t *conn = [connection connection];
+    xcb_window_t root = [[connection rootWindowForScreenNumber:0] window];
+
+    EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
+    xcb_atom_t skipAtoms[2];
+    skipAtoms[0] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipTaskbar]];
+    skipAtoms[1] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipPager]];
+    xcb_atom_t wmStateAtom = [[ewmh atomService] cacheAtom:[ewmh EWMHWMState]];
+    xcb_atom_t wmPidAtom = [[ewmh atomService] cacheAtom:[ewmh EWMHWMPid]];
+
+    xcb_query_tree_reply_t *tree = xcb_query_tree_reply(conn,
+        xcb_query_tree(conn, root), NULL);
+    if (!tree) return;
+
+    xcb_window_t *children = xcb_query_tree_children(tree);
+    int count = xcb_query_tree_children_length(tree);
+    pid_t myPid = getpid();
+    BOOL changed = NO;
+
+    for (int i = 0; i < count; i++) {
+        xcb_window_t w = children[i];
+
+        // Read _NET_WM_PID to identify windows owned by this process
+        xcb_get_property_reply_t *pidReply = xcb_get_property_reply(conn,
+            xcb_get_property(conn, 0, w, wmPidAtom,
+                XCB_ATOM_CARDINAL, 0, 1), NULL);
+        if (!pidReply) continue;
+        BOOL owned = NO;
+        if (xcb_get_property_value_length(pidReply) >= (int)sizeof(pid_t)) {
+            pid_t *pid = (pid_t *)xcb_get_property_value(pidReply);
+            owned = (*pid == myPid);
         }
+        free(pidReply);
+        if (!owned) continue;
+
+        // Check if SKIP_TASKBAR already set
+        xcb_get_property_reply_t *stateReply = xcb_get_property_reply(conn,
+            xcb_get_property(conn, 0, w, wmStateAtom,
+                XCB_ATOM_ATOM, 0, 32), NULL);
+        if (stateReply) {
+            xcb_atom_t *atoms = (xcb_atom_t *)xcb_get_property_value(stateReply);
+            int n = xcb_get_property_value_length(stateReply) / (int)sizeof(xcb_atom_t);
+            BOOL hasSkip = NO;
+            for (int j = 0; j < n; j++) {
+                if (atoms[j] == skipAtoms[0]) { hasSkip = YES; break; }
+            }
+            free(stateReply);
+            if (hasSkip) continue;
+        }
+
+        // Set _NET_WM_STATE with SKIP_TASKBAR + SKIP_PAGER
+        xcb_change_property(conn, XCB_PROP_MODE_REPLACE, w,
+                           wmStateAtom, XCB_ATOM_ATOM, 32, 2, skipAtoms);
+        changed = YES;
     }
+
+    if (changed) xcb_flush(conn);
+    free(tree);
 }
 
 #pragma mark - Compositing Management
