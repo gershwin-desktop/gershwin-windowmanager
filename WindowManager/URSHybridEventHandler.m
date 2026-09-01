@@ -229,6 +229,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
     // Hide the GNUstep application icon window (NSIconWindow) from the Dock.
     // The WM itself must not appear as an application entry.
+    // Try immediately, and also defer to catch windows created after launch.
     {
         NSArray *appWindows = [NSApp windows];
         for (NSWindow *win in appWindows) {
@@ -251,6 +252,8 @@ static CGFloat WMLastScaleFactor = 1.0;
             }
         }
     }
+    // Retry after a short delay in case NSIconWindow is created lazily.
+    [self performSelector:@selector(hideIconWindowFromDock) withObject:nil afterDelay:0.5];
     
     // Initialize compositing if requested
     if (self.compositingRequested) {
@@ -286,6 +289,32 @@ static CGFloat WMLastScaleFactor = 1.0;
 {
     // Keep running even if no windows are visible (window manager behavior)
     return NO;
+}
+
+- (void)hideIconWindowFromDock
+{
+    NSArray *appWindows = [NSApp windows];
+    for (NSWindow *win in appWindows) {
+        if ([[win className] isEqualToString:@"NSIconWindow"]) {
+            xcb_window_t xid = (xcb_window_t)[win windowNumber];
+            if (xid > 0) {
+                EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
+                xcb_atom_t atoms[2];
+                atoms[0] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipTaskbar]];
+                atoms[1] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipPager]];
+                xcb_change_property([connection connection],
+                                   XCB_PROP_MODE_REPLACE,
+                                   xid,
+                                   [[ewmh atomService] cacheAtom:[ewmh EWMHWMState]],
+                                   XCB_ATOM_ATOM,
+                                   32,
+                                   2,
+                                   atoms);
+                [connection flush];
+            }
+            break;
+        }
+    }
 }
 
 #pragma mark - Compositing Management
