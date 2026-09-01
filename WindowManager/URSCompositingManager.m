@@ -1427,8 +1427,12 @@
         cw.redirected = YES;
         if (cw.damage == XCB_NONE) {
             cw.damage = xcb_generate_id(conn);
+            // NON_EMPTY sends one DamageNotify on empty->non-empty transition.
+            // repairWindow: drains (re-arms) after each repaint, so we get
+            // exactly one event per content change cycle instead of one per
+            // pixel update -- critical for CPU at idle with busy terminals.
             xcb_damage_create(conn, cw.damage, windowId,
-                              XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
+                              XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
         }
         xcb_composite_redirect_window(conn, windowId,
                                       XCB_COMPOSITE_REDIRECT_MANUAL);
@@ -1440,7 +1444,7 @@
         if (cw.redirected && cw.damage == XCB_NONE) {
             cw.damage = xcb_generate_id(conn);
             xcb_damage_create(conn, cw.damage, windowId,
-                              XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
+                              XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
         }
     }
 }
