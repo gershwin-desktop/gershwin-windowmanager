@@ -289,10 +289,6 @@ static XCBConnection *sharedInstance;
     _expectedFocusWindow = 0;
     _expectedFocusTimestamp = 0;
 
-    // Classic HIG cascading placement: -1 means "not yet initialized"
-    _cascadeOriginX = -1;
-    _cascadeOriginY = -1;
-
     [self flush];
     return self;
 }
@@ -933,6 +929,65 @@ static XCBConnection *sharedInstance;
     window = nil;
 }
 
+/* Find the first free cascade position by scanning existing managed windows.
+ * Classic HIG: start at workarea origin + (22, 48), step 24px diagonally.
+ * Returns the first position that doesn't overlap any existing managed
+ * non-dialog/non-desktop frame. */
+- (XCBPoint)nextCascadePositionForSize:(XCBSize)size
+                             screenX:(int32_t)scrX
+                             screenY:(int32_t)scrY
+                        screenWidth:(uint32_t)scrW
+                       screenHeight:(uint32_t)scrH
+{
+    const int step = 22;
+    /* 22 = Eau theme menuBarHeight (Eau+Menu.m:33), 12 = padding.
+       Must match at runtime; Menu.app may not be launched yet. */
+    const int menuBarHeight = 22;
+    const int padY = menuBarHeight + 12;
+    const int padX = 12;
+    EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self];
+    NSString *dialogType = [ewmh EWMHWMWindowTypeDialog];
+    NSString *desktopType = [ewmh EWMHWMWindowTypeDesktop];
+    NSString *dockType = [ewmh EWMHWMWindowTypeDock];
+
+    /* Count managed non-special decorated windows to determine cascade offset. */
+    NSUInteger count = 0;
+    for (XCBWindow *w in [windowsMap allValues])
+    {
+        if (![w isKindOfClass:[XCBFrame class]])
+            continue;
+
+        XCBFrame *frame = (XCBFrame *)w;
+        XCBWindow *client = [frame childWindowForKey:ClientWindow];
+        if (client == nil || ![client decorated])
+            continue;
+
+        NSString *wType = [client windowType];
+        if (wType != nil)
+        {
+            if ([wType isEqualToString:dialogType] ||
+                [wType isEqualToString:desktopType] ||
+                [wType isEqualToString:dockType])
+                continue;
+        }
+
+        count++;
+    }
+
+    /* Classic HIG: step diagonally by count, wrapping when past screen.
+       No overlap avoidance - windows overlap but title bars stay visible. */
+    int16_t x = scrX + padX + (int)(count % 20) * step;
+    int16_t y = scrY + padY + (int)(count % 20) * step;
+
+    /* Wrap within raw screen bounds. */
+    if (x + (int32_t)size.width > scrX + (int32_t)scrW)
+        x = scrX + padX;
+    if (y + (int32_t)size.height > scrY + (int32_t)scrH)
+        y = scrY + padY;
+
+    return XCBMakePoint(x, y);
+}
+
 - (void)handleUnMapNotify:(xcb_unmap_notify_event_t *)anEvent
 {
     // If we were dragging when this window unmapped, cancel the drag.
@@ -1083,7 +1138,14 @@ static XCBConnection *sharedInstance;
 
         [self reparentWindow:window toWindow:[[window queryTree] rootWindow] position:reparentPos];
         [window setDecorated:NO];
+        [self unregisterWindow:frameWindow];
+        XCBTitleBar *titleBar = (XCBTitleBar *) [frameWindow childWindowForKey:TitleBar];
+        if (titleBar != nil) {
+            [self unregisterWindow:titleBar];
+        }
+        [[frameWindow getChildren] removeAllObjects];
         [frameWindow destroy];
+        [self unregisterWindow:window];
     }
 
     window = nil;
@@ -1477,23 +1539,14 @@ static XCBConnection *sharedInstance;
                         xPos = (screenWidth - reqW) / 2;
                         yPos = (screenHeight - reqH) * 0.381966;
                     } else {
-                        int32_t waX = self.workareaValid ? _cachedWorkareaX : 0;
-                        int32_t waY = self.workareaValid ? _cachedWorkareaY : 0;
-                        uint32_t waW = self.workareaValid ? _cachedWorkareaWidth : screenWidth;
-                        uint32_t waH = self.workareaValid ? _cachedWorkareaHeight : screenHeight;
-                        if (_cascadeOriginX < 0) {
-                            _cascadeOriginX = waX;
-                            _cascadeOriginY = waY;
-                        }
-                        xPos = _cascadeOriginX;
-                        yPos = _cascadeOriginY;
-                        _cascadeOriginX += 24;
-                        _cascadeOriginY += 24;
-                        if (_cascadeOriginX + (int32_t)reqW > waX + (int32_t)waW ||
-                            _cascadeOriginY + (int32_t)reqH > waY + (int32_t)waH) {
-                            _cascadeOriginX = waX;
-                            _cascadeOriginY = waY;
-                        }
+                        XCBSize winSize = {reqW, reqH};
+                        XCBPoint pos = [self nextCascadePositionForSize:winSize
+                                                              screenX:0
+                                                              screenY:0
+                                                         screenWidth:screenWidth
+                                                        screenHeight:screenHeight];
+                        xPos = pos.x;
+                        yPos = pos.y;
                     }
                     XCBRect newRect = winRect;
                     newRect.position.x = xPos;
@@ -1997,32 +2050,20 @@ static XCBConnection *sharedInstance;
         uint16_t screenWidth = [screen width];
         uint16_t screenHeight = [screen height];
 
-        // Use cached workarea to dodge struts (menu bar, dock, etc.)
-        int32_t waX = self.workareaValid ? _cachedWorkareaX : 0;
-        int32_t waY = self.workareaValid ? _cachedWorkareaY : 0;
-        uint32_t waW = self.workareaValid ? _cachedWorkareaWidth : screenWidth;
-        uint32_t waH = self.workareaValid ? _cachedWorkareaHeight : screenHeight;
-
         if (isDialog) {
-            // Dialogs: centered horizontally, golden ratio vertically within workarea
-            xPos = waX + (waW - winWidth) / 2;
-            yPos = waY + (waH - winHeight) * 0.381966;
+            // Dialogs: centered horizontally, golden ratio vertically within raw screen
+            xPos = (screenWidth - winWidth) / 2;
+            yPos = (screenHeight - winHeight) * 0.381966;
         } else {
-            // Classic HIG: cascade from top-left, 24px diagonal offset
-            if (_cascadeOriginX < 0) {
-                _cascadeOriginX = waX;
-                _cascadeOriginY = waY;
-            }
-            xPos = _cascadeOriginX;
-            yPos = _cascadeOriginY;
-            _cascadeOriginX += 24;
-            _cascadeOriginY += 24;
-            // Reset when cascade would exceed workarea bounds
-            if (_cascadeOriginX + (int32_t)winWidth > waX + (int32_t)waW ||
-                _cascadeOriginY + (int32_t)winHeight > waY + (int32_t)waH) {
-                _cascadeOriginX = waX;
-                _cascadeOriginY = waY;
-            }
+            // Classic HIG: step diagonally by window count.
+            XCBSize winSize = {winWidth, winHeight};
+            XCBPoint pos = [self nextCascadePositionForSize:winSize
+                                                  screenX:0
+                                                  screenY:0
+                                             screenWidth:screenWidth
+                                            screenHeight:screenHeight];
+            xPos = pos.x;
+            yPos = pos.y;
         }
 
         // Keep the client rect in root coordinates while frame uses xPos/yPos.
