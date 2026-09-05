@@ -1549,7 +1549,23 @@ static XCBConnection *sharedInstance;
                 int16_t screenWidth = [screenObj width];
                 BOOL isFullWidth = (reqW >= screenWidth);
 
-                if (!isFullWidth && ![icccmService windowSpecifiesPosition:window]) {
+                BOOL appPositioned = [icccmService windowSpecifiesPosition:window];
+                if (appPositioned) {
+                    /* A requested position that hugs the screen's bottom-left
+                       corner (its bottom-left corner at (0,0) in the app's
+                       bottom-left-origin coordinate system) is what apps pass
+                       when they have no real position — cascade instead,
+                       unless the window spans the full width or height. */
+                    BOOL fullSpan = (reqW >= (uint16_t)screenWidth) ||
+                                    (reqH >= (uint16_t)screenHeight);
+                    if (winRect.position.x <= 0 &&
+                        ((int32_t)winRect.position.y + (int32_t)winRect.size.height) >= screenHeight &&
+                        !fullSpan) {
+                        appPositioned = NO;
+                    }
+                }
+
+                if (!appPositioned && !isFullWidth) {
                     BOOL isDialog = NO;
                     if ([window windowType] != nil && ewmhService != nil) {
                         isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
@@ -2022,6 +2038,12 @@ static XCBConnection *sharedInstance;
     uint16_t reqW = [window windowRect].size.width;
     uint16_t reqH = [window windowRect].size.height;
 
+    // In compositor mode (drop shadows), the client sits flush inside the frame
+    // with no pixel-wide border strips, so cb=0.  Non-compositor uses cb=1.
+    // Scale cb by GSScaleFactor for HiDPI displays.
+    CGFloat cbScaleFactor = [[TitleBarSettingsService sharedInstance] scaleFactor];
+    int cb = compositorActive ? 0 : (int)cbScaleFactor;
+
     // Determine if we should reposition the window.
     // When adopting pre-existing windows at startup, never reposition them.
     // Otherwise, reposition unless the application set the window's screen
@@ -2040,7 +2062,25 @@ static XCBConnection *sharedInstance;
             isFullWidth = YES;
         }
 
-        if (!isFullWidth && ![icccmService windowSpecifiesPosition:window]) {
+        BOOL appPositioned = [icccmService windowSpecifiesPosition:window];
+        if (appPositioned && screen) {
+            /* A requested position whose window — frame included — would
+               hug the screen's bottom-left corner (its bottom-left corner
+               at (0,0) in the app's bottom-left-origin coordinate system)
+               is what apps pass when they have no real position.  Ignore
+               it and cascade instead, unless the window spans the full
+               width or height (docks, panels). */
+            int32_t screenW = [screen width];
+            int32_t screenH = [screen height];
+            int32_t frameHeight = (int32_t)reqH + titleHeight + cb;
+            int32_t frameBottom = (int32_t)reqY + frameHeight;
+            BOOL fullSpan = ((int32_t)reqW >= screenW) || (frameHeight >= screenH);
+            if (reqX <= 0 && frameBottom >= screenH && !fullSpan) {
+                appPositioned = NO;
+            }
+        }
+
+        if (!appPositioned && !isFullWidth) {
             shouldReposition = YES;
         }
     } else {
@@ -2052,11 +2092,6 @@ static XCBConnection *sharedInstance;
         isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
     }
 
-    // In compositor mode (drop shadows), the client sits flush inside the frame
-    // with no pixel-wide border strips, so cb=0.  Non-compositor uses cb=1.
-    // Scale cb by GSScaleFactor for HiDPI displays.
-    CGFloat cbScaleFactor = [[TitleBarSettingsService sharedInstance] scaleFactor];
-    int cb = compositorActive ? 0 : (int)cbScaleFactor;
     // GNUstep's DPSplacewindow uses _XFrameToXHints which places the CLIENT at the
     // desired FRAME top-left position (not the content area position). So reqX/reqY
     // are already the frame coordinates — do NOT subtract cb or titleHeight.

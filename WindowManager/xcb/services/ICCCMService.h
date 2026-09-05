@@ -31,7 +31,11 @@
 /* YES when the application set the window's screen coordinates itself
    (WM_NORMAL_HINTS USPosition, or PPosition with a non-origin position).
    Such windows must be mapped at their requested location — the window
-   manager must not apply cascade/centering placement on top of them. */
+   manager must not apply cascade/centering placement on top of them.
+   Placement-policy exception handled at the call sites: a position that
+   would put the window's bottom-left corner into the screen's bottom-left
+   corner ((0,0) in the app's bottom-left-origin coordinates) is the
+   "no real position" default and is cascaded instead. */
 - (BOOL)windowSpecifiesPosition:(XCBWindow*)aWindow;
 - (void)updateWMNormalHints:(xcb_size_hints_t*)sizeHints forWindow:(XCBWindow*)aWindow;
 - (NSString*) getWmNameForWindow:(XCBWindow*)aWindow;
