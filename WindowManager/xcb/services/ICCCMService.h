@@ -28,6 +28,11 @@
 - (id) initWithConnection:(XCBConnection*) aConnection;
 - (BOOL)hasProtocol:(NSString*)protocol forWindow:(XCBWindow*)window;
 - (xcb_size_hints_t*) wmNormalHintsForWindow:(XCBWindow*)aWindow;
+/* YES when the application set the window's screen coordinates itself
+   (WM_NORMAL_HINTS USPosition, or PPosition with a non-origin position).
+   Such windows must be mapped at their requested location — the window
+   manager must not apply cascade/centering placement on top of them. */
+- (BOOL)windowSpecifiesPosition:(XCBWindow*)aWindow;
 - (void)updateWMNormalHints:(xcb_size_hints_t*)sizeHints forWindow:(XCBWindow*)aWindow;
 - (NSString*) getWmNameForWindow:(XCBWindow*)aWindow;
 - (xcb_icccm_wm_hints_t) wmHintsFromWindow:(XCBWindow*)aWindow;

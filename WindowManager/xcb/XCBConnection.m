@@ -70,6 +70,7 @@
 - (void)setSkipShadowForWindow:(xcb_window_t)windowId;
 - (void)invalidateWindowPixmap:(xcb_window_t)windowId;
 - (void)markStackingOrderDirty;
+- (void)markStackingOrderDirtyForWindow:(xcb_window_t)windowId;
 @end
 
 // Find 32-bit ARGB visual for alpha transparency support
@@ -438,11 +439,25 @@ static XCBConnection *sharedInstance;
         }
     }
 
+    // Notify the compositor per restacked window: a raise only changes
+    // pixels inside the raised window's extents, so the compositor can
+    // repair just those instead of repainting the whole screen.
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    id<URSCompositingManaging> compositor = nil;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        compositor = [compositorClass performSelector:@selector(sharedManager)];
+    }
+
     for (XCBWindow *aWindow in [windowsMap allValues])
     {
         if ([[aWindow windowType] isEqualToString:dockType])
         {
             [aWindow stackAbove];
+            if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+            {
+                [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+            }
         }
     }
 
@@ -462,6 +477,10 @@ static XCBConnection *sharedInstance;
                 [wtype isEqualToString:dropdownMenuType])
             {
                 [aWindow stackAbove];
+                if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+                {
+                    [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+                }
             }
         }
     }
@@ -473,6 +492,10 @@ static XCBConnection *sharedInstance;
         {
             XCBFrame *fsFrame = (XCBFrame *)[aWindow parentWindow];
             [fsFrame stackAbove];
+            if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+            {
+                [compositor markStackingOrderDirtyForWindow:[fsFrame window]];
+            }
         }
     }
 
@@ -485,6 +508,10 @@ static XCBConnection *sharedInstance;
             if ([aWindow isKindOfClass:[XCBFrame class]]) continue;
             if (![aWindow decorated]) {
                 [aWindow stackAbove];
+                if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+                {
+                    [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+                }
             }
         }
     }
@@ -510,21 +537,13 @@ static XCBConnection *sharedInstance;
             if ([aWindow parentWindow] &&
                 [[aWindow parentWindow] isKindOfClass:[XCBFrame class]]) continue;
             [aWindow stackAbove];
+            if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+            {
+                [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+            }
         }
         [self flush];
     }
-
-    // Notify compositor that stacking order has changed
-    Class compositorClass = NSClassFromString(@"URSCompositingManager");
-    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
-    {
-        id compositor = [compositorClass performSelector:@selector(sharedManager)];
-        if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirty)])
-        {
-            [compositor performSelector:@selector(markStackingOrderDirty)];
-        }
-    }
-
 
     ewmhService = nil;
 }
@@ -1510,7 +1529,10 @@ static XCBConnection *sharedInstance;
         else
         {
             //NSLog(@"[MapRequest] Window has no frame parent, mapping directly");
-            // No frame, reposition unless USPosition is set.
+            // No frame, reposition unless the application set the window's
+            // screen coordinates itself (WM_NORMAL_HINTS USPosition /
+            // PPosition) — those are mapped directly at the requested
+            // location.
             XCBRect winRect = [window windowRect];
             uint16_t reqW = winRect.size.width;
             uint16_t reqH = winRect.size.height;
@@ -1527,7 +1549,7 @@ static XCBConnection *sharedInstance;
                 int16_t screenWidth = [screenObj width];
                 BOOL isFullWidth = (reqW >= screenWidth);
 
-                if (!isFullWidth) {
+                if (!isFullWidth && ![icccmService windowSpecifiesPosition:window]) {
                     BOOL isDialog = NO;
                     if ([window windowType] != nil && ewmhService != nil) {
                         isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
@@ -2002,21 +2024,23 @@ static XCBConnection *sharedInstance;
 
     // Determine if we should reposition the window.
     // When adopting pre-existing windows at startup, never reposition them.
-    // Otherwise, reposition if the app hasn't explicitly specified a position.
-    // Dialogs get centered (golden ratio) placement; other windows get a
-    // top-left offset (22 px from left, 44 px from top).
+    // Otherwise, reposition unless the application set the window's screen
+    // coordinates itself (WM_NORMAL_HINTS USPosition / PPosition) — those
+    // are mapped directly at the requested location.  Dialogs get centered
+    // (golden ratio) placement; other windows get cascading.
     BOOL shouldReposition = NO;
     BOOL isDialog = NO;
 
     if (!self.adoptingExistingWindows) {
         // The WM is the authority on window placement.  Cascade all
-        // newly mapped non-dialog, non-desktop, non-fullscreen windows.
+        // newly mapped non-dialog, non-desktop, non-fullscreen windows
+        // whose position the application did not set itself.
         BOOL isFullWidth = NO;
         if (screen && reqW >= [screen width]) {
             isFullWidth = YES;
         }
 
-        if (!isFullWidth) {
+        if (!isFullWidth && ![icccmService windowSpecifiesPosition:window]) {
             shouldReposition = YES;
         }
     } else {

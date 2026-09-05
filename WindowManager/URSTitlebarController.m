@@ -539,9 +539,10 @@
     [titlebar drawArea:rect];
     [self.connection flush];
 
-    // Invalidate ALL frames in the compositor so every window's decorations
-    // are re-snapshotted — any titlebar change (hover, active state, etc.)
-    // affects the visual relationship between all windows.
+    // Repaint every frame's extents — any titlebar change (hover, active
+    // state, etc.) affects that titlebar's appearance.  Window pictures are
+    // live views of their drawables, so no snapshot invalidation is needed;
+    // invalidateWindowPixmap just schedules each frame for repaint.
     if (self.compositingManager && [self.compositingManager compositingActive]) {
         NSDictionary *allWindows = [self.connection windowsMap];
         for (NSString *wid in allWindows) {
@@ -550,7 +551,6 @@
                 [self.compositingManager invalidateWindowPixmap:[win window]];
             }
         }
-        [self.compositingManager markStackingOrderDirty];
         [self.compositingManager performRepairNow];
     }
 }
@@ -589,9 +589,10 @@
         [titlebar drawArea:[titlebar windowRect]];
         [self.connection flush];
 
-        // Invalidate ALL frames in the compositor so every window's
-        // decorations are re-snapshotted — active state changes affect
-        // every titlebar's appearance.
+        // Repaint every frame's extents — active state changes affect each
+        // titlebar's appearance.  Window pictures are live views, so no
+        // snapshot invalidation is needed; invalidateWindowPixmap just
+        // schedules each frame for repaint.
         if (self.compositingManager && [self.compositingManager compositingActive]) {
             NSDictionary *allWindows = [self.connection windowsMap];
             for (NSString *wid in allWindows) {
@@ -600,7 +601,6 @@
                     [self.compositingManager invalidateWindowPixmap:[win window]];
                 }
             }
-            [self.compositingManager markStackingOrderDirty];
             [self.compositingManager performRepairNow];
         }
 

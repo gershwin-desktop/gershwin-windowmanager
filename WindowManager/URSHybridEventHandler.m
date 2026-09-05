@@ -772,20 +772,17 @@ static CGFloat WMLastScaleFactor = 1.0;
             // Re-apply GSTheme if this is a titlebar expose event
             [self handleTitlebarExpose:exposeEvent];
 
-            // Trigger compositor update for the exposed window
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                // Handle expose event to force NameWindowPixmap recreation.
-                // This fixes corruption with fixed-size windows (like About dialogs)
-                // that don't redraw themselves when exposed after being obscured.
+            // Compositor handling runs once per expose batch (count == 0 on
+            // the last event): handleExposeEvent/updateWindow damage the
+            // window's FULL extents, so running them per rect of a
+            // multi-rect exposure only multiplies identical region work.
+            if (self.compositingManager && [self.compositingManager compositingActive] &&
+                exposeEvent->count == 0) {
                 [self.compositingManager handleExposeEvent:exposeEvent->window];
-
                 // Update the specific window that was exposed for efficient redraw
                 [self.compositingManager updateWindow:exposeEvent->window];
                 // Force immediate repair for expose events (e.g., cursor blinking)
-                // Only on the final expose event in a sequence (count == 0)
-                if (exposeEvent->count == 0) {
-                    [self.compositingManager performRepairNow];
-                }
+                [self.compositingManager performRepairNow];
             }
             break;
         }
@@ -806,7 +803,9 @@ static CGFloat WMLastScaleFactor = 1.0;
             [connection handleFocusIn:focusInEvent];
             [self handleFocusChange:focusInEvent->event isActive:YES];
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager markStackingOrderDirty];
+                // A raise/lower only changes pixels inside the affected
+                // window's extents — damage those instead of the screen.
+                [self.compositingManager markStackingOrderDirtyForWindow:focusInEvent->event];
             }
             break;
         }
@@ -859,9 +858,11 @@ static CGFloat WMLastScaleFactor = 1.0;
                 }
             }
             
-            // Button press typically raises the window (changes stacking order)
+            // Button press typically raises the window (changes stacking
+            // order); the raise only changes pixels inside the pressed
+            // window's extents.
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager markStackingOrderDirty];
+                [self.compositingManager markStackingOrderDirtyForWindow:pressEvent->event];
             }
             break;
         }
@@ -1081,8 +1082,10 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                     y:configureNotify->y
                                                 width:configureNotify->width
                                                height:configureNotify->height];
-                // Stacking can also change via ConfigureNotify (stack mode), ensure repaint
-                [self.compositingManager markStackingOrderDirty];
+                // Stacking can also change via ConfigureNotify (stack mode);
+                // damage just the configured window — move/resize damage was
+                // already issued by resizeWindow: above.
+                [self.compositingManager markStackingOrderDirtyForWindow:configureNotify->window];
             }
             break;
         }
@@ -1510,10 +1513,11 @@ static CGFloat WMLastScaleFactor = 1.0;
         // paint cycle reads fresh backing-pixmap content rather than stale
         // cached pixels.
         if (self.compositingManager && [self.compositingManager compositingActive]) {
-            // Invalidate ALL frames in the compositor so every window's
-            // decorations are re-snapshotted.  When the active window
-            // changes, one titlebar becomes active and another inactive;
-            // the compositor must re-read every frame to reflect this.
+            // Repaint every frame's extents: when the active window changes,
+            // one titlebar becomes active and another inactive.  Window
+            // pictures are live views of their drawables, so no snapshot
+            // invalidation is needed — invalidateWindowPixmap just schedules
+            // each frame for repaint (no full-screen damage required).
             NSDictionary *allWindows = [connection windowsMap];
             for (NSString *wid in allWindows) {
                 XCBWindow *win = [allWindows objectForKey:wid];
@@ -1521,7 +1525,6 @@ static CGFloat WMLastScaleFactor = 1.0;
                     [self.compositingManager invalidateWindowPixmap:[win window]];
                 }
             }
-            [self.compositingManager markStackingOrderDirty];
             [self.compositingManager performRepairNow];
         }
 
@@ -1793,6 +1796,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         if (geom_reply) {
             // Respect ICCCM WM_NORMAL_HINTS: if the client is fixed-size, do not apply WM defaults
             xcb_size_hints_t sizeHints;
+            BOOL appSpecifiedPosition = NO;
             if (xcb_icccm_get_wm_normal_hints_reply([connection connection],
                                                     xcb_icccm_get_wm_normal_hints([connection connection], clientWindowId),
                                                     &sizeHints,
@@ -1804,6 +1808,16 @@ static CGFloat WMLastScaleFactor = 1.0;
                     //NSLog(@"resizeWindowTo70Percent: client %u is fixed-size; skipping WM defaults", clientWindowId);
                     free(geom_reply);
                     return;
+                }
+                // Same rule as ICCCMService -windowSpecifiesPosition: an
+                // app-set screen position (USPosition, or PPosition away
+                // from the origin) is honored verbatim — no WM default
+                // placement and no strut nudging on top of it.
+                if (sizeHints.flags & XCB_ICCCM_SIZE_HINT_US_POSITION) {
+                    appSpecifiedPosition = YES;
+                } else if ((sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_POSITION) &&
+                           !(sizeHints.x == 0 && sizeHints.y == 0)) {
+                    appSpecifiedPosition = YES;
                 }
             }
 
@@ -1873,8 +1887,9 @@ static CGFloat WMLastScaleFactor = 1.0;
                 uint16_t clampedWidth = (uint16_t)(waW * 0.8);
                 uint16_t clampedHeight = (uint16_t)(waH * 0.8);
 
-                // Only resize; handleMapRequest will handle placement via cascade.
-                if (isDialogWindow) {
+                // Only resize; handleMapRequest will handle placement via cascade
+                // (app-positioned dialogs keep their requested position).
+                if (isDialogWindow && !appSpecifiedPosition) {
                     uint32_t sizeValues[] = {goldenPosX, goldenPosY, clampedWidth, clampedHeight};
                     xcb_configure_window([connection connection],
                                          clientWindowId,
@@ -1896,7 +1911,8 @@ static CGFloat WMLastScaleFactor = 1.0;
             BOOL isAtOrigin = (geom_reply->x == 0 && geom_reply->y == 0);
             BOOL isFullScreenSize = (geom_reply->width >= screenWidth && geom_reply->height >= screenHeight);
 
-            if (isAtOrigin && (geom_reply->width < screenWidth) && !isDesktopWindow && !isFullscreenState) {
+            if (isAtOrigin && !appSpecifiedPosition &&
+                (geom_reply->width < screenWidth) && !isDesktopWindow && !isFullscreenState) {
                 if (isDialogWindow) {
                     uint16_t defaultX = goldenPosX;
                     uint16_t defaultY = goldenPosY;
@@ -1912,10 +1928,11 @@ static CGFloat WMLastScaleFactor = 1.0;
                 // Desktop/fullscreen windows: leave at their requested position.
             } else if (isAtOrigin && isFullScreenSize) {
                 // Exactly full screen at origin: leave alone.
-            } else if (!isDesktopWindow && !isFullscreenState &&
+            } else if (!isDesktopWindow && !isFullscreenState && !appSpecifiedPosition &&
                        geom_reply->y < waY) {
-                // App-positioned window overlaps top strut (e.g. menu bar).
-                // Push it down so the title bar is accessible.
+                // WM-placed window overlaps top strut (e.g. menu bar).
+                // Push it down so the title bar is accessible.  App-positioned
+                // windows are left exactly where the application put them.
                 uint32_t configValues[] = {(uint32_t)geom_reply->x, waY};
                 xcb_configure_window([connection connection],
                                      clientWindowId,

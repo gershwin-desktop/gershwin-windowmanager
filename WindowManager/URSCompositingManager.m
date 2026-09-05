@@ -30,6 +30,12 @@
 #import <sys/ipc.h>
 #import <math.h>
 
+// Minimum interval between two paint passes (~60 Hz).  Damage arriving
+// faster is coalesced into the next frame instead of triggering an uncapped
+// series of paints.  This applies everywhere; interactive drags previously
+// had this throttle while event-driven paints ran uncapped.
+static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
+
 // Shadow configuration
 #define SHADOW_RADIUS 12
 #define SHADOW_OFFSET_X -18
@@ -237,6 +243,12 @@
 @property (assign, nonatomic) xcb_render_picture_t presentPicture1;
 @property (assign, nonatomic) int currentPresentIndex;
 @property (assign, nonatomic) BOOL presentInFlight;
+// Damage each flip pixmap is still missing (everything drawn since its last
+// presentation).  Because the two flip pixmaps persist, the final composite
+// into a buffer only needs to cover its own pending region, not the whole
+// screen.
+@property (assign, nonatomic) xcb_xfixes_region_t presentPendingDamage0;
+@property (assign, nonatomic) xcb_xfixes_region_t presentPendingDamage1;
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, id> *parentFrameCache;
 
 // OPTIMIZATION: MIT-SHM shared memory support for zero-copy transfers
@@ -343,6 +355,8 @@
         _presentPicture1 = XCB_NONE;
         _currentPresentIndex = 0;
         _presentInFlight = NO;
+        _presentPendingDamage0 = XCB_NONE;
+        _presentPendingDamage1 = XCB_NONE;
         _shmSeg = XCB_NONE;
         _shmId = -1;
         _shmAddr = NULL;
@@ -1104,6 +1118,10 @@
             xcb_render_create_picture(conn, self.presentPicture1,
                                      self.presentPixmap1, self.rootFormat, 0, NULL);
             self.currentPresentIndex = 0;
+            // Fresh flip pixmaps have undefined content, so each buffer must
+            // be fully refreshed on its first presentation.
+            self.presentPendingDamage0 = [self getScreenRegion];
+            self.presentPendingDamage1 = [self getScreenRegion];
             //NSLog(@"[CompositingManager] Present flip chain created (2 pixmaps)");
         }
 
@@ -1875,21 +1893,17 @@
 
     xcb_connection_t *conn = [self.connection connection];
 
-    // Never invalidate the frozen snapshot of a close-animating window: the
-    // client is already unmapped, so recreating the picture from the live
-    // drawable would produce an empty frame (invisible animation).  The
-    // snapshot captured at prepare time is the only valid content left.
+    // Never disturb the frozen snapshot of a close-animating window: the
+    // client is already unmapped and the animation paints from it.
     if (cw.closeAnimating) {
         return;
     }
 
-    if (cw.picture != XCB_NONE) {
-        xcb_render_free_picture(conn, cw.picture);
-        cw.picture = XCB_NONE;
-    }
-    cw.pictureValid = NO;
-    cw.needsPictureCreation = YES;
-
+    // The picture is a live view of the window drawable (see
+    // getWindowPicture:), so there is no cached snapshot to drop — callers
+    // only need the pending damage drained and the window's area scheduled
+    // for repaint.
+    //
     // Drain any accumulated X damage so the damage object is empty.
     // With REPORT_LEVEL_NON_EMPTY the X server only sends DamageNotify on the
     // empty→non-empty transition; if prior damage was never subtracted (e.g. a
@@ -2224,7 +2238,10 @@
         return;
     }
 
-    [self updateAbsolutePositionForWindow:cw];
+    // cw.x/y are kept current by moveWindow:/resizeWindow: (fed by
+    // ConfigureNotify and the drag path), so no per-event server round trip
+    // is needed here — a blocking xcb_translate_coordinates on every
+    // DamageNotify stalls the event loop under busy clients.
     [self repairWindow:cw];
     URS_PROFILE_END(damageNotify);
 }
@@ -2247,7 +2264,6 @@
         return;
     }
 
-    [self updateAbsolutePositionForWindow:cw];
     [self repairWindow:cw];
 
     // repairWindow only accumulates damage - without scheduling a composite
@@ -2287,25 +2303,19 @@
         return;
     }
 
-    // When a window is exposed (becomes visible after being obscured),
-    // the X server may return a stale backing pixmap because fixed-size windows
-    // expect their contents to be preserved.  With compositing, we force
-    // recreation of the picture to get fresh content.
-    xcb_connection_t *conn = [self.connection connection];
-
-    // Never invalidate the frozen snapshot of a close-animating window (see
-    // invalidateWindowPixmap:): the client is already unmapped, so a fresh
-    // picture from the live drawable would be empty.
+    // Never disturb a close-animating window: the client is already
+    // unmapped and the animation paints from the frozen snapshot.
     if (cw.closeAnimating) {
         return;
     }
 
-    if (cw.picture != XCB_NONE) {
-        xcb_render_free_picture(conn, cw.picture);
-        cw.picture = XCB_NONE;
-    }
-    cw.pictureValid = NO;
-    cw.needsPictureCreation = YES;
+    // The picture is a live view of the window drawable, so exposure does
+    // not invalidate it and no recreation is needed.  Marking the window
+    // damaged also lifts the first-paint gate in paintWindow: for remapped
+    // windows whose content comes from server-side backing store — such
+    // windows redraw on Expose without generating X Damage and would
+    // otherwise stay blank until the 3 s timeout.
+    cw.damaged = YES;
 
     // Damage the exposed area to trigger repaint
     [self damageWindowArea:cw];
@@ -2393,16 +2403,21 @@
     // Drain all accumulated damage so the X damage object starts fresh.
     xcb_damage_subtract(conn, cw.damage, XCB_NONE, XCB_NONE);
 
-    // Invalidate the picture so paintWindow: creates a fresh
-    // XRender picture from the window drawable on the next paint cycle.
-    // The new picture always reads the latest backing-pixmap content
-    // at composite time, avoiding stale snapshots from the NameWindowPixmap.
-    if (cw.picture != XCB_NONE) {
-        xcb_render_free_picture(conn, cw.picture);
-        cw.picture = XCB_NONE;
+    // The window picture is a live view of the window drawable (see
+    // getWindowPicture:), so it always reads current content at composite
+    // time and must NOT be recreated per damage event.  The only
+    // bookkeeping needed: client damage during a live resize means the
+    // client has redrawn at the new size, so the capture size that drives
+    // the scale transform in paintWindow: is committed here — this mirrors
+    // the picture recreation the old per-damage invalidation performed.
+    if ([self.connection resizeState]) {
+        uint16_t currentW = cw.width + 2 * cw.borderWidth;
+        uint16_t currentH = cw.height + 2 * cw.borderWidth;
+        if (cw.pictureWidth != currentW || cw.pictureHeight != currentH) {
+            cw.pictureWidth = currentW;
+            cw.pictureHeight = currentH;
+        }
     }
-    cw.pictureValid = NO;
-    cw.needsPictureCreation = YES;
 
     if (parts != XCB_NONE) {
         [self addDamage:parts];
@@ -2625,26 +2640,37 @@ static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
         URS_PROFILE_END(performRepair);
         return;
     }
-    
+
     // Check if there's damage to paint
     if (self.allDamage == XCB_NONE) {
         self.repairScheduled = NO;
         URS_PROFILE_END(performRepair);
         return;
     }
-    
-    // Update lastRepairTime here so that the drag/resize throttle works
-    // correctly after a deferred performRepair fires. Without this, the next
-    // performRepairNow call would see a stale lastRepairTime and might skip the
-    // throttle, causing a burst of paints.
-    self.lastRepairTime = [NSDate timeIntervalSinceReferenceDate];
-    
+
+    // Frame cap: while the previous paint is younger than one frame
+    // interval, reschedule this pass for the remaining time.  The damage
+    // stays in allDamage so nothing is lost; more damage may accumulate
+    // meanwhile and is painted in the same pass.
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval elapsed = now - self.lastRepairTime;
+    if (self.lastRepairTime > 0 && elapsed < URSMinPaintInterval) {
+        self.repairScheduled = YES;
+        [self performSelector:@selector(performRepair)
+                   withObject:nil
+                   afterDelay:(URSMinPaintInterval - elapsed)];
+        URS_PROFILE_END(performRepair);
+        return;
+    }
+
+    self.lastRepairTime = now;
+
     xcb_xfixes_region_t damage = self.allDamage;
     self.allDamage = XCB_NONE;
     self.repairScheduled = NO;
-    
+
     [self paintAll:damage];
-    
+
     xcb_xfixes_destroy_region([self.connection connection], damage);
     URS_PROFILE_END(performRepair);
 }
@@ -2659,22 +2685,10 @@ static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
          return;
      }
 
-    if ([self.connection dragState] || [self.connection resizeState]) {
-        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-        NSTimeInterval elapsed = now - self.lastRepairTime;
-
-        if (elapsed < 0.016 && self.lastRepairTime > 0) {
-            if (!self.repairScheduled) {
-                self.repairScheduled = YES;
-                [self performSelector:@selector(performRepair)
-                           withObject:nil
-                           afterDelay:0.016 - elapsed];
-            }
-            return;
-        }
-        self.lastRepairTime = now;
-    }
-
+    // Drop any deferred pass queued by scheduleRepair first — its delay-0
+    // fire would bypass the frame cap — then run one pass right now.
+    // performRepair itself defers when the previous paint is younger than
+    // one frame interval, so this paints immediately only when allowed.
     if (self.repairScheduled) {
         [NSObject cancelPreviousPerformRequestsWithTarget:self
                                                  selector:@selector(performRepair)
@@ -2682,16 +2696,7 @@ static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
         self.repairScheduled = NO;
     }
 
-    if (self.allDamage == XCB_NONE) {
-        return;
-    }
-
-    xcb_xfixes_region_t damage = self.allDamage;
-    self.allDamage = XCB_NONE;
-
-    [self paintAll:damage];
-
-    xcb_xfixes_destroy_region([self.connection connection], damage);
+    [self performRepair];
 }
 
 - (void)scheduleComposite {
@@ -3093,6 +3098,34 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
 }
 
+// Per-window stacking notification: a raise/lower in place only changes
+// pixels inside the restacked window's own extents — whatever it newly
+// covers or reveals lies within them — so damaging just those extents is
+// sufficient.  paintAll repaints everything overlapping them in correct
+// z-order via its paintedBBox expansion.  Falls back to the debounced
+// full-screen pass when the window is unknown, not viewable or unredirected.
+- (void)markStackingOrderDirtyForWindow:(xcb_window_t)windowId {
+    self.stackingOrderDirty = YES;
+    if (!self.compositingActive) {
+        return;
+    }
+
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw) {
+        xcb_window_t parentFrame = [self findParentFrameWindow:windowId];
+        if (parentFrame != XCB_NONE) {
+            cw = [self findCWindow:parentFrame];
+        }
+    }
+
+    if (cw && cw.viewable && cw.redirected) {
+        [self damageWindowArea:cw];
+        return;
+    }
+
+    [self scheduleStackingDamage];
+}
+
 // Composite shadow in 4 non-overlapping strips (top, bottom, left, right)
 // around the window rectangle. This never paints behind the window.
 - (void)compositeShadowStrips:(URSCompositeWindow *)cw
@@ -3429,16 +3462,54 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
 
     if (self.presentAvailable) {
-        // Vblank-synced presentation via X Present extension.
-        // Use a flip chain with 2 pixmaps, alternating each frame.
-        // This guarantees we never overwrite a buffer that the X server
-        // may still be scanning out — by the time we cycle back to a
-        // buffer (2 frames later, ~33ms at 60Hz), the server is done.
+        // Vblank-synced presentation via X Present extension, using a flip
+        // chain of 2 persistent pixmaps.  Every paint pass presents exactly
+        // once — gating on CompleteNotify instead made updates skip frames
+        // (paint cadence ≈ vblank period) and could orphan the last burst
+        // of damage until an unrelated later event.  The flip-chain race is
+        // prevented by the frame cap in performRepair: paints are at most
+        // one per frame interval, so the same buffer is always rewritten at
+        // least two intervals after its previous flip completed, while a
+        // flip is scanned out for at most one interval.
         int idx = self.currentPresentIndex;
         xcb_pixmap_t pixmap = (idx == 0) ? self.presentPixmap0 : self.presentPixmap1;
         xcb_render_picture_t picture = (idx == 0) ? self.presentPicture0 : self.presentPicture1;
+        xcb_xfixes_region_t pending = (idx == 0) ? self.presentPendingDamage0
+                                                 : self.presentPendingDamage1;
+        xcb_xfixes_region_t otherPending = (idx == 0) ? self.presentPendingDamage1
+                                                      : self.presentPendingDamage0;
         self.currentPresentIndex = 1 - idx;
 
+        // Copy only what the target buffer is missing: the damage
+        // accumulated since its last presentation plus this frame's
+        // damage.  Pixels outside that region keep their content from
+        // the buffer's previous presentation, which is still correct —
+        // every content change damages the affected window's full
+        // extents, so undamaged pixels never change.
+        xcb_xfixes_region_t copyRegion;
+        if (pending != XCB_NONE) {
+            copyRegion = xcb_generate_id(conn);
+            xcb_xfixes_create_region(conn, copyRegion, 0, NULL);
+            xcb_xfixes_union_region(conn, copyRegion, pending, copyRegion);
+            if (region != XCB_NONE) {
+                xcb_xfixes_union_region(conn, copyRegion, region, copyRegion);
+            }
+            xcb_xfixes_destroy_region(conn, pending);
+            if (idx == 0) {
+                self.presentPendingDamage0 = XCB_NONE;
+            } else {
+                self.presentPendingDamage1 = XCB_NONE;
+            }
+        } else {
+            // Defensive: without a pending accumulator this buffer's
+            // content state is unknown — refresh it fully.
+            copyRegion = [self getScreenRegion];
+        }
+        if (otherPending != XCB_NONE && region != XCB_NONE) {
+            xcb_xfixes_union_region(conn, otherPending, region, otherPending);
+        }
+
+        xcb_xfixes_set_picture_clip_region(conn, picture, copyRegion, 0, 0);
         xcb_flush(conn);
         xcb_render_composite(conn,
                             XCB_RENDER_PICT_OP_SRC,
@@ -3447,6 +3518,8 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                             picture,
                             0, 0, 0, 0, 0, 0,
                             self.screenWidth, self.screenHeight);
+        xcb_xfixes_set_picture_clip_region(conn, picture, XCB_NONE, 0, 0);
+        xcb_xfixes_destroy_region(conn, copyRegion);
 
         xcb_present_pixmap(conn,
                           self.outputWindow,
@@ -3467,9 +3540,14 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self.connection flush];
     } else {
         // Non-vblank-synced path: direct copy to screen (fallback).
-        // Compose the full rootBuffer — never clip to the damage region since
-        // the damage-region clip was already applied during rendering and is
-        // no longer valid once window positions may have shifted.
+        // Copy only the damaged area: rootBuffer is persistent and its
+        // content outside the damage is unchanged since the last copy
+        // (every content change damages the affected window's full
+        // extents), so the screen stays in sync without a full-screen
+        // blit on every paint.
+        if (region != XCB_NONE) {
+            xcb_xfixes_set_picture_clip_region(conn, self.rootPicture, region, 0, 0);
+        }
         xcb_flush(conn);
         xcb_render_composite(conn,
                             XCB_RENDER_PICT_OP_SRC,
@@ -4417,6 +4495,14 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     xcb_connection_t *conn = [self.connection connection];
     if (!conn) return;
 
+    // addDamage: intersects every region against screenRegion, so a stale
+    // region would silently drop all damage outside the old screen bounds.
+    // Reset it; it is recreated lazily at the new size.
+    if (self.screenRegion != XCB_NONE) {
+        xcb_xfixes_destroy_region(conn, self.screenRegion);
+        self.screenRegion = XCB_NONE;
+    }
+
     // Recreate the backing pixmap and root buffer at the new size
     if (self.rootPixmap != XCB_NONE) {
         xcb_free_pixmap(conn, self.rootPixmap);
@@ -4468,6 +4554,14 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         self.presentPicture1 = xcb_generate_id(conn);
         xcb_render_create_picture(conn, self.presentPicture1,
                                   self.presentPixmap1, self.rootFormat, 0, NULL);
+        // Recreated flip pixmaps have undefined content: both buffers must
+        // be fully refreshed on their next presentations.
+        if (self.presentPendingDamage0 != XCB_NONE)
+            xcb_xfixes_destroy_region(conn, self.presentPendingDamage0);
+        if (self.presentPendingDamage1 != XCB_NONE)
+            xcb_xfixes_destroy_region(conn, self.presentPendingDamage1);
+        self.presentPendingDamage0 = [self getScreenRegion];
+        self.presentPendingDamage1 = [self getScreenRegion];
     }
 
     [self.connection flush];
@@ -4594,6 +4688,15 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
         
                 // Free present extension resources (flip chain)
+        if (self.presentPendingDamage0 != XCB_NONE) {
+            xcb_xfixes_destroy_region(conn, self.presentPendingDamage0);
+            self.presentPendingDamage0 = XCB_NONE;
+        }
+        if (self.presentPendingDamage1 != XCB_NONE) {
+            xcb_xfixes_destroy_region(conn, self.presentPendingDamage1);
+            self.presentPendingDamage1 = XCB_NONE;
+        }
+        self.presentInFlight = NO;
         if (self.presentPicture0 != XCB_NONE) {
             xcb_render_free_picture(conn, self.presentPicture0);
             self.presentPicture0 = XCB_NONE;
