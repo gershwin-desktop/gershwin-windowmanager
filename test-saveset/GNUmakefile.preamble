@@ -1,0 +1,5 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+# This test needs the X client library (xcb) in addition to the standard
+# GNUstep test libraries.
+ADDITIONAL_LDFLAGS += -lxcb
+

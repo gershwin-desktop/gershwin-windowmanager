@@ -11,6 +11,13 @@
 
 #import "URSHybridEventHandler.h"
 #import "URSProfiler.h"
+#import "xcb/services/TitleBarSettingsService.h"
+#import <GNUstepGUI/GSTheme.h>
+
+/* Eau theme's live scale-factor cache reset (implemented by the theme). */
+@interface GSTheme (EauScaleFactor)
+- (void)invalidateScaleFactorCache;
+@end
 
 /* Class extension for private ivars */
 @interface URSHybridEventHandler () {
@@ -38,6 +45,90 @@
 #import "URSWindowSwitcher.h"
 
 @implementation URSHybridEventHandler
+
+/* Last seen GSScaleFactor, used to detect changes while polling. */
+static CGFloat WMLastScaleFactor = 1.0;
+
+- (void)startScaleFactorMonitoring
+{
+  /* Seed with the current factor so the first poll doesn't trigger a spurious
+   * re-frame of freshly-decorated windows at startup. */
+  [[NSUserDefaults standardUserDefaults] synchronize];
+  WMLastScaleFactor = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
+  if (WMLastScaleFactor == 0.0)
+    WMLastScaleFactor = 1.0;
+
+  [NSTimer scheduledTimerWithTimeInterval: 1.0
+                                   target: self
+                                 selector: @selector(checkScaleFactor:)
+                                 userInfo: nil
+                                  repeats: YES];
+}
+
+- (void)checkScaleFactor:(NSTimer *)timer
+{
+  [[NSUserDefaults standardUserDefaults] synchronize];
+
+  CGFloat factor = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
+  if (factor == 0.0)
+    factor = 1.0;
+}
+
+- (void)reassertRootWindowProperties
+{
+  XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
+  EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:[self connection]];
+  [ewmhService putPropertiesForRootWindow:rootWin andWmWindow:[self selectionManagerWindow]];
+  /* Keep _GNUSTEP_FRAME_OFFSETS in sync too: it is published before the
+   * compositor activates (when clientBorder is still the scale factor), so
+   * without re-publishing it here the GNUstep backend would keep applying
+   * the 1px border offsets while the WM frames clients flush, drifting
+   * every window by a pixel per open/close cycle. */
+  [ewmhService updateGNUStepFrameOffsetsForRootWindow:rootWin];
+}
+
+- (void)startPropertyReassertion
+{
+  [NSTimer scheduledTimerWithTimeInterval: 5.0
+                                   target: self
+                                 selector: @selector(reassertRootWindowProperties)
+                                 userInfo: nil
+                                  repeats: YES];
+}
+
+- (void)applyScaleFactor:(CGFloat)factor
+{
+  TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+  [settings setScaleFactor:factor];
+  [settings setHeight:(uint16_t)(22 * factor)];
+
+  /* Keep the root _GNUSTEP_FRAME_OFFSETS in sync with the new titlebar
+   * height so the GNUstep backend positions content flush below it. */
+  XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
+  EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+  [ewmh updateGNUStepFrameOffsetsForRootWindow:rootWin];
+
+  /* Titlebar drawing constants cache the scale factor; invalidate so the
+   * next render uses the new value. */
+  [URSThemeIntegration invalidateScaleFactorCache];
+
+  /* The Eau theme's own decoration metrics (buttons, corners) cache the
+   * factor too; reset them so the re-render below uses the new scale. */
+  if ([[GSTheme theme] respondsToSelector: @selector(invalidateScaleFactorCache)])
+    [[GSTheme theme] invalidateScaleFactorCache];
+
+  /* Re-frame every managed window so its titlebar height follows the factor.
+   * reframeForScaleChange self-guards (only acts on frame-parented windows). */
+  NSDictionary *windows = [self.connection windowsMap];
+  for (XCBWindow *win in [windows allValues])
+    {
+      [win reframeForScaleChange];
+    }
+
+  /* Re-render all titlebars with the new scale. */
+  xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
+  [URSThemeIntegration refreshAllTitlebarsWithFocusedWindow:focusedId];
+}
 
 @synthesize connection;
 @synthesize selectionManagerWindow;
@@ -116,6 +207,9 @@
     // Mark NSRunLoop as active
     self.nsRunLoopActive = YES;
 
+    // React live to GSScaleFactor changes like Menu.app does.
+    [self startScaleFactorMonitoring];
+
     // Register as window manager
     BOOL registered = [self registerAsWindowManager];
     if (!registered) {
@@ -124,34 +218,15 @@
         return;
     }
 
+    // Periodically re-publish root _NET_SUPPORTING_WM_CHECK and _GNUSTEP_FRAME_OFFSETS
+    // so they persist even if clobbered by other components (e.g. Menu's Global Menu
+    // window overwriting root's check property).  This prevents GNUstep's single-shot
+    // _checkWindowManager from failing at startup due to a stale/overwritten property.
+    [self startPropertyReassertion];
+
     // Wire selectionManagerWindow into the focus manager now that it exists
     self.focusManager.selectionManagerWindow = self.selectionManagerWindow;
 
-    // Hide the GNUstep application icon window (NSIconWindow) from the Dock.
-    // The WM itself must not appear as an application entry.
-    {
-        NSArray *appWindows = [NSApp windows];
-        for (NSWindow *win in appWindows) {
-            if ([[win className] isEqualToString:@"NSIconWindow"]) {
-                xcb_window_t xid = (xcb_window_t)[win windowNumber];
-                EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:connection];
-                xcb_atom_t atoms[2];
-                atoms[0] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipTaskbar]];
-                atoms[1] = [[ewmh atomService] cacheAtom:[ewmh EWMHWMStateSkipPager]];
-                xcb_change_property([connection connection],
-                                   XCB_PROP_MODE_REPLACE,
-                                   xid,
-                                   [[ewmh atomService] cacheAtom:[ewmh EWMHWMState]],
-                                   XCB_ATOM_ATOM,
-                                   32,
-                                   2,
-                                   atoms);
-                [connection flush];
-                break;
-            }
-        }
-    }
-    
     // Initialize compositing if requested
     if (self.compositingRequested) {
         [self initializeCompositing];
@@ -225,6 +300,18 @@
         //NSLog(@"[WindowManager] ✓ Compositing successfully activated!");
         //NSLog(@"[WindowManager] ✓ Windows will use XRender for transparency effects");
         //NSLog(@"[WindowManager] ================================================");
+
+        /* The root _GNUSTEP_FRAME_OFFSETS were published with the
+         * non-compositing clientBorder (1px) when the WM registered, before
+         * the compositor was active.  Now that clients are framed flush
+         * (clientBorder 0), re-publish so the GNUstep backend does not keep
+         * applying 1px side/bottom offsets that drift window geometry by a
+         * pixel per open/close cycle. */
+        {
+          XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
+          EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:[self connection]];
+          [ewmh updateGNUStepFrameOffsetsForRootWindow:rootWin];
+        }
         
     } @catch (NSException *exception) {
         NSLog(@"[WindowManager] ❌ EXCEPTION initializing compositing: %@", exception.reason);
@@ -279,13 +366,17 @@
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
     [ewmhService updateNetWmState:selectionManagerWindow];
     [ewmhService putPropertiesForRootWindow:[screen rootWindow] andWmWindow:selectionManagerWindow];
+
+    /* Tell the GNUstep backend the real frame offsets (titlebar height etc.)
+     * so it positions window content flush below the decoration. */
+    [ewmhService updateGNUStepFrameOffsetsForRootWindow:[screen rootWindow]];
     
     // Set initial workarea to full screen (no struts yet)
-    [ewmhService updateWorkareaForRootWindow:[screen rootWindow] 
-                                           x:0 
-                                           y:0 
-                                       width:[screen screen]->width_in_pixels 
-                                      height:[screen screen]->height_in_pixels];
+    [ewmhService updateWorkareaForRootWindow:[screen rootWindow]
+                                           x:0
+                                           y:0
+                                       width:[screen width]
+                                      height:[screen height]];
     
     [connection flush];
 
@@ -440,6 +531,52 @@
                afterDelay:0.1];
 }
 
+- (void)teardownXCBEventIntegration
+{
+    if (!self.xcbEventsIntegrated || !connection) {
+        return;
+    }
+
+    int xcbFD = xcb_get_file_descriptor([connection connection]);
+    if (xcbFD >= 0) {
+        NSRunLoop *currentRunLoop = [NSRunLoop currentRunLoop];
+        NSArray *modes = @[NSDefaultRunLoopMode,
+                           NSRunLoopCommonModes,
+                           NSEventTrackingRunLoopMode,
+                           NSModalPanelRunLoopMode];
+        for (NSString *mode in modes) {
+            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
+                                   type:ET_RDESC
+                                forMode:mode
+                                   all:YES];
+        }
+    }
+
+    self.xcbEventsIntegrated = NO;
+}
+
+- (void)handleFatalConnectionError:(int)errorCode
+{
+    if (self.xcbConnectionLost) {
+        return;
+    }
+    self.xcbConnectionLost = YES;
+
+    // XCB_CONN_CLOSED_REQ_LEN_EXCEED (4) is the one to watch for: libxcb
+    // refuses to send a request longer than the server's maximum request
+    // length and closes the connection itself, so nothing is logged server
+    // side. See URSPutImageBanded() for the uploads that must stay bounded.
+    NSLog(@"[WindowManager] FATAL: XCB connection unusable "
+          @"(xcb_connection_has_error() = %d). Detaching from the run loop "
+          @"and terminating rather than spinning.", errorCode);
+
+    // Detach first: leaving the dead fd registered is what turns this into a
+    // 100%% CPU busy loop.
+    [self teardownXCBEventIntegration];
+
+    [NSApp terminate:nil];
+}
+
 #pragma mark - RunLoopEvents Protocol Implementation
 
 - (void)receivedEvent:(void*)data
@@ -455,6 +592,18 @@
 
 - (void)processAvailableXCBEvents
 {
+    // A broken XCB connection is unrecoverable and, worse, invisible without
+    // this check: the closed socket sits at EOF so poll() reports it readable
+    // forever, while xcb_poll_for_event() returns NULL immediately without
+    // touching the fd. The run loop would then never block again and would
+    // spin a core at 100% while silently servicing no events at all --
+    // MapRequest included, which leaves every managed window unmapped.
+    int connectionError = xcb_connection_has_error([connection connection]);
+    if (connectionError != 0) {
+        [self handleFatalConnectionError:connectionError];
+        return;
+    }
+
     URS_PROFILE_BEGIN(eventLoop);
     xcb_generic_event_t *e;
     xcb_motion_notify_event_t *lastMotionEvent = NULL;
@@ -623,20 +772,17 @@
             // Re-apply GSTheme if this is a titlebar expose event
             [self handleTitlebarExpose:exposeEvent];
 
-            // Trigger compositor update for the exposed window
-            if (self.compositingManager && [self.compositingManager compositingActive]) {
-                // Handle expose event to force NameWindowPixmap recreation.
-                // This fixes corruption with fixed-size windows (like About dialogs)
-                // that don't redraw themselves when exposed after being obscured.
+            // Compositor handling runs once per expose batch (count == 0 on
+            // the last event): handleExposeEvent/updateWindow damage the
+            // window's FULL extents, so running them per rect of a
+            // multi-rect exposure only multiplies identical region work.
+            if (self.compositingManager && [self.compositingManager compositingActive] &&
+                exposeEvent->count == 0) {
                 [self.compositingManager handleExposeEvent:exposeEvent->window];
-
                 // Update the specific window that was exposed for efficient redraw
                 [self.compositingManager updateWindow:exposeEvent->window];
                 // Force immediate repair for expose events (e.g., cursor blinking)
-                // Only on the final expose event in a sequence (count == 0)
-                if (exposeEvent->count == 0) {
-                    [self.compositingManager performRepairNow];
-                }
+                [self.compositingManager performRepairNow];
             }
             break;
         }
@@ -657,7 +803,9 @@
             [connection handleFocusIn:focusInEvent];
             [self handleFocusChange:focusInEvent->event isActive:YES];
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager markStackingOrderDirty];
+                // A raise/lower only changes pixels inside the affected
+                // window's extents — damage those instead of the screen.
+                [self.compositingManager markStackingOrderDirtyForWindow:focusInEvent->event];
             }
             break;
         }
@@ -710,9 +858,11 @@
                 }
             }
             
-            // Button press typically raises the window (changes stacking order)
+            // Button press typically raises the window (changes stacking
+            // order); the raise only changes pixels inside the pressed
+            // window's extents.
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager markStackingOrderDirty];
+                [self.compositingManager markStackingOrderDirtyForWindow:pressEvent->event];
             }
             break;
         }
@@ -932,8 +1082,10 @@
                                                     y:configureNotify->y
                                                 width:configureNotify->width
                                                height:configureNotify->height];
-                // Stacking can also change via ConfigureNotify (stack mode), ensure repaint
-                [self.compositingManager markStackingOrderDirty];
+                // Stacking can also change via ConfigureNotify (stack mode);
+                // damage just the configured window — move/resize damage was
+                // already issued by resizeWindow: above.
+                [self.compositingManager markStackingOrderDirtyForWindow:configureNotify->window];
             }
             break;
         }
@@ -955,6 +1107,12 @@
             [self.workareaManager handleStrutPropertyChange:propEvent];
             [self handleWindowTitlePropertyChange:propEvent];
             [connection handlePropertyNotify:propEvent];
+            // App-signal content activity (gershwin-terminal sets this).  Fires
+            // regardless of visibility, so it covers WindowShaded windows whose
+            // client is clipped and thus emits no X Damage.
+            if (propEvent->atom == [self gershwinContentActivityAtom]) {
+                [self noteContentActivityFromProperty:propEvent->window];
+            }
             break;
         }
         case XCB_KEY_PRESS: {
@@ -1179,7 +1337,8 @@
     // DAMAGE notify events are at base_event + XCB_DAMAGE_NOTIFY (0)
     if (responseType == damageEventBase + XCB_DAMAGE_NOTIFY) {
         xcb_damage_notify_event_t *damageEvent = (xcb_damage_notify_event_t *)event;
-        [self.compositingManager handleDamageNotify:damageEvent->drawable];
+        [self.compositingManager handleDamageNotify:damageEvent->drawable
+                                               area:damageEvent->area];
         return;
     }
 }
@@ -1211,17 +1370,11 @@
 
 - (void)handleFocusChange:(xcb_window_t)windowId isActive:(BOOL)isActive {
     @try {
-        // When any window gains focus, IMMEDIATELY mark the previously-focused
-        // window's titlebar as inactive — before we try to resolve the incoming
-        // window.  If the incoming FocusIn targets a window the WM doesn't track
-        // (e.g. an undecorated popup), the resolution below fails and we'd return
-        // early, leaving the old window stuck with active decorations forever.
-        if (isActive) {
-            xcb_window_t prevFocusedId = self.focusManager.lastFocusedWindowId;
-            if (prevFocusedId != XCB_NONE && prevFocusedId != windowId) {
-                [self handleFocusChange:prevFocusedId isActive:NO];
-            }
-        }
+        // Exactly one window may show active decorations.  When a window gains
+        // focus we re-render EVERY other titlebar inactive instead of trusting a
+        // single lastFocusedWindowId: focus can pass through undecorated/popup
+        // windows that reset focus tracking to XCB_NONE, which would otherwise
+        // leave the previously-focused window stuck on active chrome.
 
         // Find the window that received focus change
         XCBWindow *window = [connection windowForXCBId:windowId];
@@ -1317,7 +1470,34 @@
             }
         }
 
-        // Re-render titlebar with GSTheme using the correct active/inactive state
+        // Force every other window to the inactive state so only the focused
+        // window shows active decorations.  This runs for the activate case only.
+        if (isActive) {
+            NSDictionary *allWindows = [connection windowsMap];
+            for (NSString *wid in allWindows) {
+                XCBWindow *other = [allWindows objectForKey:wid];
+                if (![other isKindOfClass:[XCBFrame class]] || other == frame) {
+                    continue;
+                }
+                XCBFrame *otherFrame = (XCBFrame *)other;
+                XCBTitleBar *otherTB = (XCBTitleBar *)[otherFrame childWindowForKey:TitleBar];
+                if (!otherTB) {
+                    continue;
+                }
+                [otherFrame setIsAbove:NO];
+                [otherTB setIsAbove:NO];
+                [URSThemeIntegration renderGSThemeToWindow:otherFrame
+                                                     frame:otherFrame
+                                                     title:[otherTB windowTitle]
+                                                    active:NO];
+                [otherTB putWindowBackgroundWithPixmap:[otherTB pixmap]];
+                [otherTB drawArea:[otherTB windowRect]];
+            }
+        }
+
+        // Re-render this titlebar with GSTheme using the correct active/inactive state
+        [frame setIsAbove:isActive];
+        [titlebar setIsAbove:isActive];
         [URSThemeIntegration renderGSThemeToWindow:frame
                                              frame:frame
                                              title:[titlebar windowTitle]
@@ -1333,10 +1513,11 @@
         // paint cycle reads fresh backing-pixmap content rather than stale
         // cached pixels.
         if (self.compositingManager && [self.compositingManager compositingActive]) {
-            // Invalidate ALL frames in the compositor so every window's
-            // decorations are re-snapshotted.  When the active window
-            // changes, one titlebar becomes active and another inactive;
-            // the compositor must re-read every frame to reflect this.
+            // Repaint every frame's extents: when the active window changes,
+            // one titlebar becomes active and another inactive.  Window
+            // pictures are live views of their drawables, so no snapshot
+            // invalidation is needed — invalidateWindowPixmap just schedules
+            // each frame for repaint (no full-screen damage required).
             NSDictionary *allWindows = [connection windowsMap];
             for (NSString *wid in allWindows) {
                 XCBWindow *win = [allWindows objectForKey:wid];
@@ -1344,7 +1525,6 @@
                     [self.compositingManager invalidateWindowPixmap:[win window]];
                 }
             }
-            [self.compositingManager markStackingOrderDirty];
             [self.compositingManager performRepairNow];
         }
 
@@ -1437,6 +1617,19 @@
         XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
         if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
             XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
+
+            // Tell the client (via EWMH _NET_FRAME_EXTENTS) how much frame
+            // decoration surrounds it, so GNUstep backends position their
+            // content flush below the titlebar instead of guessing and
+            // leaving a gap.  Mirrors the legacy XCBKit decoration path.
+            {
+                XCBWindow *client = [frame childWindowForKey:ClientWindow];
+                if (client)
+                {
+                    EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+                    [ewmh updateNetFrameExtentsForWindow:client];
+                }
+            }
 
             // Apply ONLY GSTheme rendering (no legacy/XCBKit drawing).
             // Newly mapped windows almost always get focus, so default active.
@@ -1603,6 +1796,7 @@
         if (geom_reply) {
             // Respect ICCCM WM_NORMAL_HINTS: if the client is fixed-size, do not apply WM defaults
             xcb_size_hints_t sizeHints;
+            BOOL appSpecifiedPosition = NO;
             if (xcb_icccm_get_wm_normal_hints_reply([connection connection],
                                                     xcb_icccm_get_wm_normal_hints([connection connection], clientWindowId),
                                                     &sizeHints,
@@ -1614,6 +1808,16 @@
                     //NSLog(@"resizeWindowTo70Percent: client %u is fixed-size; skipping WM defaults", clientWindowId);
                     free(geom_reply);
                     return;
+                }
+                // Same rule as ICCCMService -windowSpecifiesPosition: an
+                // app-set screen position (USPosition, or PPosition away
+                // from the origin) is honored verbatim — no WM default
+                // placement and no strut nudging on top of it.
+                if (sizeHints.flags & XCB_ICCCM_SIZE_HINT_US_POSITION) {
+                    appSpecifiedPosition = YES;
+                } else if ((sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_POSITION) &&
+                           !(sizeHints.x == 0 && sizeHints.y == 0)) {
+                    appSpecifiedPosition = YES;
                 }
             }
 
@@ -1667,68 +1871,74 @@
             }
             
             queryWindow = nil;
+            // Use workarea as placement/clamping bounds so windows dodge struts
+            // (menu bar at top, dock at bottom/side, etc.).
+            uint16_t waY = (uint16_t)workarea.origin.y;
+            uint16_t waW = (uint16_t)workarea.size.width;
+            uint16_t waH = (uint16_t)workarea.size.height;
+
             // Clamp overly large windows before mapping.
-            // Rule: if either dimension exceeds 90% of screen, resize both dimensions to 80%
+            // Rule: if either dimension exceeds 90% of screen, resize to 80% of workarea
             BOOL exceedsNinetyPercent =
                 ((uint32_t)geom_reply->width * 100 > (uint32_t)screenWidth * 90) ||
                 ((uint32_t)geom_reply->height * 100 > (uint32_t)screenHeight * 90);
 
             if (!isDesktopWindow && !isFullscreenState && exceedsNinetyPercent) {
-                uint16_t clampedWidth = (uint16_t)(screenWidth * 0.8);
-                uint16_t clampedHeight = (uint16_t)(screenHeight * 0.8);
+                uint16_t clampedWidth = (uint16_t)(waW * 0.8);
+                uint16_t clampedHeight = (uint16_t)(waH * 0.8);
 
-                // Per HIG: place resized windows toward top-left so desktop status affordances
-                // (such as volume icons) remain visible and unobstructed.
-                uint16_t defaultX = isDialogWindow ? goldenPosX : 22;
-                uint16_t defaultY = isDialogWindow ? goldenPosY : 44;
-                uint32_t sizeValues[] = {defaultX, defaultY, clampedWidth, clampedHeight};
-                xcb_configure_window([connection connection],
-                                     clientWindowId,
-                             XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
-                             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
-                                     sizeValues);
+                // Only resize; handleMapRequest will handle placement via cascade
+                // (app-positioned dialogs keep their requested position).
+                if (isDialogWindow && !appSpecifiedPosition) {
+                    uint32_t sizeValues[] = {goldenPosX, goldenPosY, clampedWidth, clampedHeight};
+                    xcb_configure_window([connection connection],
+                                         clientWindowId,
+                                 XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+                                 XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                         sizeValues);
+                } else {
+                    uint32_t sizeValues[] = {clampedWidth, clampedHeight};
+                    xcb_configure_window([connection connection],
+                                         clientWindowId,
+                                 XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                                         sizeValues);
+                }
                 [connection flush];
-                //NSLog(@"Window %u exceeds 90%% of screen (%ux%u). Clamped to 80%% (%ux%u) and placed at (%u,%u) before map.",
-                      //clientWindowId,
-                      //geom_reply->width,
-                      //geom_reply->height,
-                      //clampedWidth,
-                    //clampedHeight,
-                    //defaultX,
-                    //defaultY);
             }
 
-            // Only apply WM default placement if:
-            // 1. Window is positioned at (0,0) - indicates no app positioning
-            // 2. AND window is not a desktop window
-            // 3. AND window is not explicitly requesting fullscreen
+            // Only apply WM default placement for dialogs; normal windows are
+            // placed by handleMapRequest using Classic HIG cascading.
             BOOL isAtOrigin = (geom_reply->x == 0 && geom_reply->y == 0);
             BOOL isFullScreenSize = (geom_reply->width >= screenWidth && geom_reply->height >= screenHeight);
-            
-            if (isAtOrigin && (geom_reply->width < screenWidth) && !isDesktopWindow && !isFullscreenState) {
-                // Window starts at (0,0) but is NOT full-width. This is usually a fallback position
-                // for apps that don't specify geometry. Move it to a suitable default position:
-                // dialogs get centered (golden ratio), other windows get 22,44 offset.
-                uint16_t defaultX = isDialogWindow ? goldenPosX : 22;
-                uint16_t defaultY = isDialogWindow ? goldenPosY : 44;
-                //NSLog(@"Window %u starts at origin (0,0) but is not full-width (%u). Applying default placement (%u,%u) to avoid x=0 default.",
-                      //clientWindowId, geom_reply->width, defaultX, defaultY);
-                
-                uint32_t configValues[] = {defaultX, defaultY};
+
+            if (isAtOrigin && !appSpecifiedPosition &&
+                (geom_reply->width < screenWidth) && !isDesktopWindow && !isFullscreenState) {
+                if (isDialogWindow) {
+                    uint16_t defaultX = goldenPosX;
+                    uint16_t defaultY = goldenPosY;
+                    uint32_t configValues[] = {defaultX, defaultY};
+                    xcb_configure_window([connection connection],
+                                         clientWindowId,
+                                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y,
+                                         configValues);
+                    [connection flush];
+                }
+                // Non-dialog: leave at (0,0) - handleMapRequest cascade will position it.
+            } else if (isDesktopWindow || isFullscreenState) {
+                // Desktop/fullscreen windows: leave at their requested position.
+            } else if (isAtOrigin && isFullScreenSize) {
+                // Exactly full screen at origin: leave alone.
+            } else if (!isDesktopWindow && !isFullscreenState && !appSpecifiedPosition &&
+                       geom_reply->y < waY) {
+                // WM-placed window overlaps top strut (e.g. menu bar).
+                // Push it down so the title bar is accessible.  App-positioned
+                // windows are left exactly where the application put them.
+                uint32_t configValues[] = {(uint32_t)geom_reply->x, waY};
                 xcb_configure_window([connection connection],
                                      clientWindowId,
                                      XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y,
                                      configValues);
                 [connection flush];
-            } else if (isDesktopWindow || isFullscreenState) {
-                //NSLog(@"Window %u is desktop or fullscreen window. Skipping WM defaults (isDesktop=%d, isFullscreen=%d)",
-                      //clientWindowId, isDesktopWindow, isFullscreenState);
-            } else if (isAtOrigin && isFullScreenSize) {
-                //NSLog(@"Window %u is exactly full screen size at origin; skipping >90%% clamp per 100%% exception.",
-                      //clientWindowId);
-            } else {
-                //NSLog(@"Window %u has app-determined geometry (%ux%u at %d,%d). Respecting app preferences",
-                      //clientWindowId, geom_reply->width, geom_reply->height, geom_reply->x, geom_reply->y);
             }
             free(geom_reply);
         }
@@ -2493,6 +2703,48 @@
     return title;
 }
 
+// The _GERSHWIN_CONTENT_ACTIVITY property is set by apps (gershwin-terminal)
+// to report that their window content changed.  Unlike X Damage it fires
+// regardless of visibility - crucial for WindowShaded windows, whose client is
+// clipped by the shrunk frame and therefore emits no Damage.  The activity
+// flag itself lives in XCBFrame (-noteContentChanged).
+- (xcb_atom_t)gershwinContentActivityAtom
+{
+    static xcb_atom_t atom = XCB_NONE;
+    static BOOL lookedUp = NO;
+    if (!lookedUp) {
+        lookedUp = YES;
+        xcb_connection_t *conn = [connection connection];
+        if (conn) {
+            xcb_intern_atom_cookie_t c =
+                xcb_intern_atom(conn, 0,
+                                strlen("_GERSHWIN_CONTENT_ACTIVITY"),
+                                "_GERSHWIN_CONTENT_ACTIVITY");
+            xcb_intern_atom_reply_t *r = xcb_intern_atom_reply(conn, c, NULL);
+            if (r) { atom = r->atom; free(r); }
+        }
+    }
+    return atom;
+}
+
+- (void)noteContentActivityFromProperty:(xcb_window_t)windowId
+{
+    // Resolve the owning managed frame by walking the tracked window
+    // hierarchy (cheap, in-process).  The property is set on the client
+    // window, whose parent is the frame.
+    XCBWindow *cur = [connection windowForXCBId:windowId];
+    XCBFrame *frame = nil;
+    for (int i = 0; i < 16 && cur; i++) {
+        if ([cur isKindOfClass:[XCBFrame class]]) {
+            frame = (XCBFrame *)cur;
+            break;
+        }
+        cur = [cur parentWindow];
+    }
+    if (frame)
+        [frame noteContentChanged];
+}
+
 - (void)handleWindowTitlePropertyChange:(xcb_property_notify_event_t*)event
 {
     if (!event) {
@@ -2598,28 +2850,7 @@
     [self.keyboardManager cleanupKeyboardGrabbing];
 
     // Remove from run loop if integrated - must match all modes added in setupXCBEventIntegration
-    if (self.xcbEventsIntegrated && connection) {
-        int xcbFD = xcb_get_file_descriptor([connection connection]);
-        if (xcbFD >= 0) {
-            NSRunLoop *currentRunLoop = [NSRunLoop currentRunLoop];
-            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
-                                   type:ET_RDESC
-                                forMode:NSDefaultRunLoopMode
-                                   all:YES];
-            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
-                                   type:ET_RDESC
-                                forMode:NSRunLoopCommonModes
-                                   all:YES];
-            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
-                                   type:ET_RDESC
-                                forMode:NSEventTrackingRunLoopMode
-                                   all:YES];
-            [currentRunLoop removeEvent:(void*)(uintptr_t)xcbFD
-                                   type:ET_RDESC
-                                forMode:NSModalPanelRunLoopMode
-                                   all:YES];
-        }
-    }
+    [self teardownXCBEventIntegration];
 
     // Remove notification center observers
     [[NSNotificationCenter defaultCenter] removeObserver:self];

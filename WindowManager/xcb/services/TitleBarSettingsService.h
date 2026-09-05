@@ -12,9 +12,11 @@
 {
     uint16_t height;
     uint16_t defaultHeight;
+    CGFloat _scaleFactor;
 }
 
 @property (nonatomic, assign) BOOL heightDefined;
+@property (nonatomic, assign) CGFloat scaleFactor;
 @property (nonatomic, assign) XCBPoint closePosition;
 @property (nonatomic, assign) XCBPoint minimizePosition;
 @property (nonatomic, assign) XCBPoint maximizePosition;

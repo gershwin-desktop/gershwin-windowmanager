@@ -11,6 +11,7 @@
 
 #define _DEFAULT_SOURCE  // For usleep
 #import "URSCompositingManager.h"
+#import "URSImageUpload.h"
 #import "URSProfiler.h"
 #import "XCBScreen.h"
 #import <xcb/xcb.h>
@@ -21,12 +22,19 @@
 #import <xcb/present.h>
 #import <xcb/shm.h>
 #import <xcb/randr.h>
+#import <AppKit/NSImage.h>
 #import "XCBFrame.h"
 #import "EWMHService.h"
 #import <sys/shm.h>
 #import <unistd.h>  // for usleep
 #import <sys/ipc.h>
 #import <math.h>
+
+// Minimum interval between two paint passes (~60 Hz).  Damage arriving
+// faster is coalesced into the next frame instead of triggering an uncapped
+// series of paints.  This applies everywhere; interactive drags previously
+// had this throttle while event-driven paints ran uncapped.
+static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 
 // Shadow configuration
 #define SHADOW_RADIUS 12
@@ -39,6 +47,12 @@
 @property (assign, nonatomic) xcb_window_t windowId;
 @property (assign, nonatomic) xcb_window_t parentWindowId;
 @property (assign, nonatomic) xcb_damage_damage_t damage;
+// Separate Damage object on the managed CLIENT window (not the frame) used
+// purely for content-activity detection.  Created only for framed clients.
+// Unlike the frame Damage, this reports every client redraw even while the
+// window is WindowShaded, because the client stays mapped and the frame's
+// own (clipped) Damage would be silent.  See -noteClientContentDamage:.
+@property (assign, nonatomic) xcb_damage_damage_t clientDamage;
 
 @property (assign, nonatomic) xcb_render_picture_t picture;
 @property (assign, nonatomic) xcb_xfixes_region_t borderSize;
@@ -47,6 +61,12 @@
 @property (assign, nonatomic) BOOL viewable;
 @property (assign, nonatomic) BOOL redirected;
 @property (assign, nonatomic) BOOL overrideRedirect;
+// Transparent-background detection: windows whose edges are (almost fully)
+// translucent must never get a rectangular drop shadow — it would outline
+// empty space around their irregular content (e.g. GL effect overlays).
+@property (assign, nonatomic) BOOL backgroundTransparentChecked;
+@property (assign, nonatomic) BOOL backgroundTransparent;
+@property (assign, nonatomic) int transparentProbeAttempts;
 // OPTIMIZATION: Lazy picture creation - defer until first paint
 @property (assign, nonatomic) BOOL pictureValid;
 @property (assign, nonatomic) BOOL needsPictureCreation;
@@ -55,6 +75,11 @@
 // the new (larger or smaller) frame instead of leaving a grey gap.
 @property (assign, nonatomic) uint16_t pictureWidth;
 @property (assign, nonatomic) uint16_t pictureHeight;
+// Frozen copy of the window's content taken at close-animation start.  The
+// live drawable picture (IncludeInferiors on the frame) loses the client
+// content the moment the app unmaps its window, so a close animation must
+// paint from this snapshot instead.  Freed with the picture in freeWindowData:.
+@property (assign, nonatomic) xcb_pixmap_t snapshotPixmap;
 // Cached geometry
 @property (assign, nonatomic) int16_t x;
 @property (assign, nonatomic) int16_t y;
@@ -70,10 +95,20 @@
 @property (assign, nonatomic) int16_t shadowOffsetY;
 @property (assign, nonatomic) uint16_t shadowWidth;
 @property (assign, nonatomic) uint16_t shadowHeight;
+// Timestamp set when the window is mapped (NSDate timeIntervalSinceReferenceDate)
+@property (assign, nonatomic) NSTimeInterval mappedAt;
 // Animation state
 @property (assign, nonatomic) BOOL animating;
 @property (assign, nonatomic) BOOL animatingMinimize;
+@property (assign, nonatomic) BOOL animatingShrink;
 @property (assign, nonatomic) BOOL animatingFade;
+// Persistent window opacity (1.0 = opaque).  Used by the hover-peek feature
+// to show a rolled-down shaded window at reduced opacity; applied as an
+// alpha mask in paintWindow.
+@property (assign, nonatomic) CGFloat opacity;
+/* Set while a window is closing: the picture must survive unmap/re-map so the
+ * shrink+fade animation renders from the captured frame. */
+@property (assign, nonatomic) BOOL closeAnimating;
 @property (assign, nonatomic) NSTimeInterval animationStart;
 @property (assign, nonatomic) NSTimeInterval animationDuration;
 @property (assign, nonatomic) XCBRect animationStartRect;
@@ -89,6 +124,7 @@
         _windowId = XCB_NONE;
         _parentWindowId = XCB_NONE;
         _damage = XCB_NONE;
+        _clientDamage = XCB_NONE;
         _picture = XCB_NONE;
         _borderSize = XCB_NONE;
         _extents = XCB_NONE;
@@ -96,6 +132,9 @@
         _viewable = NO;
         _redirected = YES;
         _overrideRedirect = NO;
+        _backgroundTransparentChecked = NO;
+        _backgroundTransparent = NO;
+        _transparentProbeAttempts = 0;
         // OPTIMIZATION: Lazy picture creation
         _pictureValid = NO;
         _needsPictureCreation = YES;
@@ -107,9 +146,12 @@
         _shadowOffsetY = 0;
         _shadowWidth = 0;
         _shadowHeight = 0;
+        _mappedAt = 0;
         _animating = NO;
         _animatingMinimize = NO;
+        _animatingShrink = NO;
         _animatingFade = NO;
+        _opacity = 1.0;
         _animationStart = 0;
         _animationDuration = 0;
         _animationStartRect = XCBInvalidRect;
@@ -156,6 +198,7 @@
 // Cached atoms for window type checks (used in shadow creation)
 @property (assign, nonatomic) xcb_atom_t wmTypeAtom;
 @property (assign, nonatomic) xcb_atom_t wmTypeDockAtom;
+@property (assign, nonatomic) xcb_atom_t wmTypeNotificationAtom; // shadow-free overlays
 @property (assign, nonatomic) xcb_atom_t wmNameAtom;    // _NET_WM_NAME
 @property (assign, nonatomic) xcb_atom_t wmUtf8Atom;    // UTF8_STRING
 
@@ -163,6 +206,7 @@
 @property (assign, nonatomic) BOOL repairScheduled;
 @property (assign, nonatomic) NSTimeInterval lastRepairTime;
 @property (assign, nonatomic) NSUInteger repairFrameCounter; // Frame counter for throttling during drag
+@property (assign, nonatomic) BOOL stackingDamageScheduled; // Debounce markStackingOrderDirty
 
 // Cached screen info
 @property (assign, nonatomic) uint16_t screenWidth;
@@ -171,6 +215,14 @@
 @property (assign, nonatomic) xcb_render_pictformat_t rootFormat;
 @property (assign, nonatomic) xcb_render_pictformat_t argbFormat;
 @property (assign, nonatomic) xcb_atom_t bypassCompositorAtom;
+
+// Desktop background (loaded from org.gnustep.Workspace.plist desktopinfo)
+@property (assign, nonatomic) xcb_pixmap_t desktopBgPixmap;
+@property (assign, nonatomic) xcb_render_picture_t desktopBgPicture;
+@property (assign, nonatomic) BOOL desktopBgLoaded;
+@property (assign, nonatomic) double desktopBgRed;
+@property (assign, nonatomic) double desktopBgGreen;
+@property (assign, nonatomic) double desktopBgBlue;
 
 // OPTIMIZATION: Cached visual-to-format mappings (avoids repeated xcb_render_query_pict_formats)
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSNumber *> *visualFormatCache;
@@ -191,6 +243,12 @@
 @property (assign, nonatomic) xcb_render_picture_t presentPicture1;
 @property (assign, nonatomic) int currentPresentIndex;
 @property (assign, nonatomic) BOOL presentInFlight;
+// Damage each flip pixmap is still missing (everything drawn since its last
+// presentation).  Because the two flip pixmaps persist, the final composite
+// into a buffer only needs to cover its own pending region, not the whole
+// screen.
+@property (assign, nonatomic) xcb_xfixes_region_t presentPendingDamage0;
+@property (assign, nonatomic) xcb_xfixes_region_t presentPendingDamage1;
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, id> *parentFrameCache;
 
 // OPTIMIZATION: MIT-SHM shared memory support for zero-copy transfers
@@ -263,6 +321,7 @@
         _repairScheduled = NO;
         _lastRepairTime = 0;
         _repairFrameCounter = 0;
+        _stackingDamageScheduled = NO;
         _cwindows = [[NSMutableDictionary alloc] init];
         
         // OPTIMIZATION: Initialize format caches
@@ -283,12 +342,21 @@
         _presentAvailable = NO;
         _presentEventBase = 0;
         _randrEventBase = 0;
+        _desktopBgPixmap = XCB_NONE;
+        _desktopBgPicture = XCB_NONE;
+        _desktopBgLoaded = NO;
+        _desktopBgRed = 0.372;
+        _desktopBgGreen = 0.403;
+        _desktopBgBlue = 0.439;
+
         _presentPixmap0 = XCB_NONE;
         _presentPixmap1 = XCB_NONE;
         _presentPicture0 = XCB_NONE;
         _presentPicture1 = XCB_NONE;
         _currentPresentIndex = 0;
         _presentInFlight = NO;
+        _presentPendingDamage0 = XCB_NONE;
+        _presentPendingDamage1 = XCB_NONE;
         _shmSeg = XCB_NONE;
         _shmId = -1;
         _shmAddr = NULL;
@@ -333,8 +401,8 @@
         return NO;
     }
     
-    self.screenWidth = [screen screen]->width_in_pixels;
-    self.screenHeight = [screen screen]->height_in_pixels;
+    self.screenWidth = [screen width];
+    self.screenHeight = [screen height];
     self.rootWindow = [screen screen]->root;
     
     // Find render formats
@@ -376,6 +444,15 @@
       xcb_intern_atom_reply_t *d_r = xcb_intern_atom_reply(conn, d_c, NULL);
       self.wmTypeDockAtom = d_r ? d_r->atom : XCB_NONE;
       free(d_r);
+    }
+    {
+      xcb_connection_t *conn = [self.connection connection];
+      xcb_intern_atom_cookie_t n_c = xcb_intern_atom(conn, 0,
+          strlen("_NET_WM_WINDOW_TYPE_NOTIFICATION"),
+          "_NET_WM_WINDOW_TYPE_NOTIFICATION");
+      xcb_intern_atom_reply_t *n_r = xcb_intern_atom_reply(conn, n_c, NULL);
+      self.wmTypeNotificationAtom = n_r ? n_r->atom : XCB_NONE;
+      free(n_r);
     }
     {
       xcb_connection_t *conn = [self.connection connection];
@@ -715,6 +792,134 @@
 
 #pragma mark - Activation
 
+// Load the desktop background image/color from ~/Library/Preferences/org.gnustep.Workspace.plist
+- (void)loadDesktopBackground
+{
+    xcb_connection_t *conn = [self.connection connection];
+
+    if (self.desktopBgPicture != XCB_NONE) {
+        xcb_render_free_picture(conn, self.desktopBgPicture);
+        self.desktopBgPicture = XCB_NONE;
+    }
+    if (self.desktopBgPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, self.desktopBgPixmap);
+        self.desktopBgPixmap = XCB_NONE;
+    }
+
+    NSString *prefsPath = [@"~/Library/Preferences/org.gnustep.Workspace.plist" stringByExpandingTildeInPath];
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:prefsPath];
+    NSDictionary *dskinfo = [prefs objectForKey:@"desktopinfo"];
+
+    // Default color from GNUstep workspace
+    self.desktopBgRed = 0.372;
+    self.desktopBgGreen = 0.403;
+    self.desktopBgBlue = 0.439;
+
+    if (!dskinfo) {
+        NSLog(@"[Compositor] Desktop background: no desktopinfo in preferences, using default color");
+        self.desktopBgLoaded = YES;
+        return;
+    }
+
+    NSDictionary *backcolor = [dskinfo objectForKey:@"backcolor"];
+    if (backcolor) {
+        self.desktopBgRed = [[backcolor objectForKey:@"red"] doubleValue];
+        self.desktopBgGreen = [[backcolor objectForKey:@"green"] doubleValue];
+        self.desktopBgBlue = [[backcolor objectForKey:@"blue"] doubleValue];
+    }
+
+    if (![[dskinfo objectForKey:@"usebackimage"] boolValue]) {
+        NSLog(@"[Compositor] Desktop background: using solid color");
+        self.desktopBgLoaded = YES;
+        return;
+    }
+
+    NSString *imagePath = [dskinfo objectForKey:@"imagepath"];
+    if (!imagePath) {
+        NSLog(@"[Compositor] Desktop background: no image path configured, using solid color");
+        self.desktopBgLoaded = YES;
+        return;
+    }
+
+    @autoreleasepool {
+        NSImage *image = [[NSImage alloc] initWithContentsOfFile:imagePath];
+        if (!image) {
+            NSLog(@"[Compositor] Desktop background: failed to load image at %@", imagePath);
+            self.desktopBgLoaded = YES;
+            return;
+        }
+
+        NSSize srcSize = [image size];
+        uint16_t outW = self.screenWidth;
+        uint16_t outH = self.screenHeight;
+
+        NSImage *scaled = [[NSImage alloc] initWithSize:NSMakeSize(outW, outH)];
+        [scaled lockFocus];
+        [image drawInRect:NSMakeRect(0, 0, outW, outH)
+                fromRect:NSZeroRect
+               operation:NSCompositeCopy
+                fraction:1.0];
+        [scaled unlockFocus];
+
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithData:[scaled TIFFRepresentation]];
+        if (!bitmap) {
+            NSLog(@"[Compositor] Desktop background: bitmap conversion failed");
+            self.desktopBgLoaded = YES;
+            return;
+        }
+
+        size_t bufSize = (size_t)outW * (size_t)outH * 4;
+        uint8_t *argb = malloc(bufSize);
+        if (!argb) {
+            self.desktopBgLoaded = YES;
+            return;
+        }
+
+        int srcW = (int)[bitmap pixelsWide];
+        int srcH = (int)[bitmap pixelsHigh];
+
+        for (int y = 0; y < outH && y < srcH; y++) {
+            for (int x = 0; x < outW && x < srcW; x++) {
+                NSUInteger pixel[4];
+                [bitmap getPixel:pixel atX:x y:y];
+                uint32_t r = (uint32_t)(pixel[0]);
+                uint32_t g = (uint32_t)(pixel[1]);
+                uint32_t b = (uint32_t)(pixel[2]);
+                uint32_t a = (uint32_t)(pixel[3]);
+                uint32_t argbPixel = (a << 24) | (r << 16) | (g << 8) | b;
+                ((uint32_t *)argb)[y * outW + x] = argbPixel;
+            }
+        }
+
+        xcb_pixmap_t pm = xcb_generate_id(conn);
+        xcb_create_pixmap(conn, 32, pm, self.rootWindow, outW, outH);
+
+        xcb_gcontext_t gc = xcb_generate_id(conn);
+        xcb_create_gc(conn, gc, pm, 0, NULL);
+        // Banded upload: at 3840x2160 this buffer is 33MB, well over the
+        // ~16MB maximum request length, and libxcb would tear down the
+        // connection rather than send it.
+        URSPutImageBanded(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, pm, gc,
+                          outW, outH, 0, 0, 0, 32,
+                          (uint32_t)outW * 4, argb);
+        xcb_free_gc(conn, gc);
+        free(argb);
+
+        xcb_render_picture_t pic = xcb_generate_id(conn);
+        uint32_t repeat = 1;
+        xcb_render_create_picture(conn, pic, pm, self.argbFormat,
+                                  XCB_RENDER_CP_REPEAT, &repeat);
+
+        self.desktopBgPixmap = pm;
+        self.desktopBgPicture = pic;
+
+        NSLog(@"[Compositor] Desktop background: loaded %@ (%dx%d -> %dx%d)",
+              imagePath, (int)srcSize.width, (int)srcSize.height, outW, outH);
+    }
+
+    self.desktopBgLoaded = YES;
+}
+
 - (BOOL)activateCompositing {
     if (!self.compositingEnabled) {
         //NSLog(@"[CompositingManager] Cannot activate - not initialized properly");
@@ -748,6 +953,9 @@
             [self cleanup];
             return NO;
         }
+
+        // Load desktop background (image or solid color from preferences)
+        [self loadDesktopBackground];
         
         // Add all existing windows
         [self addAllWindows];
@@ -910,6 +1118,10 @@
             xcb_render_create_picture(conn, self.presentPicture1,
                                      self.presentPixmap1, self.rootFormat, 0, NULL);
             self.currentPresentIndex = 0;
+            // Fresh flip pixmaps have undefined content, so each buffer must
+            // be fully refreshed on its first presentation.
+            self.presentPendingDamage0 = [self getScreenRegion];
+            self.presentPendingDamage1 = [self getScreenRegion];
             //NSLog(@"[CompositingManager] Present flip chain created (2 pixmaps)");
         }
 
@@ -1013,7 +1225,10 @@
         if (unionRegion == XCB_NONE) {
             unionRegion = extents;
         } else {
-            xcb_xfixes_union_region(conn, unionRegion, unionRegion, extents);
+            // xcb_xfixes_union_region signature is (c, source1, source2,
+            // destination): sources first, destination LAST.  Passing the
+            // destination first silently overwrites the last argument instead.
+            xcb_xfixes_union_region(conn, unionRegion, extents, unionRegion);
             xcb_xfixes_destroy_region(conn, extents);
         }
     }
@@ -1031,6 +1246,15 @@
     for (NSNumber *key in windowKeys) {
         URSCompositeWindow *cw = self.cwindows[key];
         if (!cw) continue;
+
+        // Never tear down an animating window.  A transient child window being
+        // destroyed (e.g. xterm's helper windows) otherwise kills the parent
+        // frame's map animation and leaks activeAnimations, which keeps the
+        // animation timer running forever.  The animation finishes on its own
+        // and finishAnimationForWindow: then releases the resources.
+        if (cw.animating) {
+            continue;
+        }
 
         if (cw.viewable) {
             cw.viewable = NO;
@@ -1114,29 +1338,17 @@
     cw.redirected = YES;
     cw.overrideRedirect = attr->override_redirect;
 
-    // Check _NET_WM_BYPASS_COMPOSITOR: if set to 1, the client requests
-    // the compositor to not redirect (composite) this window.  Opaque
-    // frequently-updating windows like terminals benefit from this.
-    if (self.bypassCompositorAtom != XCB_NONE)
-      {
-        xcb_get_property_cookie_t prop_cookie =
-            xcb_get_property(conn, 0, windowId,
-                             self.bypassCompositorAtom, XCB_ATOM_CARDINAL, 0, 1);
-        xcb_get_property_reply_t *prop_reply =
-            xcb_get_property_reply(conn, prop_cookie, NULL);
-        if (prop_reply && prop_reply->type == XCB_ATOM_CARDINAL
-            && prop_reply->format == 32 && prop_reply->value_len > 0)
-          {
-            uint32_t bypass = *(uint32_t *)xcb_get_property_value(prop_reply);
-            if (bypass == 1)
-              {
-                cw.redirected = NO;
-                xcb_composite_unredirect_window(conn, windowId,
-                                                XCB_COMPOSITE_REDIRECT_MANUAL);
-              }
-          }
-        free(prop_reply);
-      }
+    // Register early so updateBypassCompositorForWindow: can resolve this
+    // window (it is also re-applied later when the property changes).
+    self.cwindows[@(windowId)] = cw;
+
+    // Honor _NET_WM_BYPASS_COMPOSITOR.  This may arrive only AFTER addWindow
+    // (e.g. Terminal.app sets it in -showWindow: once the X window exists), so
+    // it is also re-applied from the PropertyNotify handler — see
+    // handlePropertyNotify: in XCBConnection.  If the window ends up unredirected
+    // it draws directly to the screen, so resize/redraw never depends on the
+    // compositor's per-damage repaint path.
+    [self updateBypassCompositorForWindow:windowId];
 
     // Track parent and compute absolute position in root coordinates
     xcb_query_tree_cookie_t tree_cookie = xcb_query_tree(conn, windowId);
@@ -1151,27 +1363,188 @@
         cw.parentWindowId = XCB_NONE;
     }
     [self updateAbsolutePositionForWindow:cw];
-    
-    if (cw.redirected) {
-      // Create damage object for the window (only for composited windows).
-      // Use DELTA_RECTANGLES instead of NON_EMPTY so we keep receiving
-      // notifications for ongoing client redraws even if one notify is dropped.
-      // NON_EMPTY can stall forever when the empty->non-empty transition event is
-      // missed, which manifests as content only updating when unrelated events
-      // (for example titlebar hover redraws) force a repaint.
-      cw.damage = xcb_generate_id(conn);
-      xcb_damage_create(conn, cw.damage, windowId, XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
+
+    // Content-activity detection: a dedicated Damage object on the managed
+    // CLIENT window (not the frame).  The frame Damage only reports VISIBLE
+    // changes, so while WindowShaded (client clipped out) it goes silent even
+    // though the app keeps drawing.  The client-level object keeps reporting,
+    // which is what makes the titlebar spinner work for shaded, active windows
+    // (e.g. a Terminal.app still receiving output).  Resolved here because the
+    // frame and its client are both known once the window is tracked.
+    {
+      XCBWindow *trackedWin = [self.connection windowForXCBId:windowId];
+      if ([trackedWin isKindOfClass:[XCBFrame class]]) {
+        XCBFrame *frame = (XCBFrame *)trackedWin;
+        XCBWindow *client = [frame childWindowForKey:ClientWindow];
+        if (client && [client window] != XCB_NONE) {
+          cw.clientDamage = xcb_generate_id(conn);
+          xcb_damage_create(conn, cw.clientDamage, [client window],
+                            XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
+        }
+      }
     }
 
     self.cwindows[@(windowId)] = cw;
     
     // OPTIMIZATION: Mark stacking order dirty (will be rebuilt on next paint)
     self.stackingOrderDirty = YES;
-    
+
     free(attr);
     free(geom);
-    
+
     [self.connection flush];
+}
+
+// (Re-)evaluate _NET_WM_BYPASS_COMPOSITOR for a managed window and apply or
+// remove the per-window redirect accordingly.  Called from addWindow: (where
+// the property may already be set) and from the PropertyNotify handler (where
+// the client sets it only after the window is mapped).  Idempotent: does
+// nothing if the desired state already matches.  Keeps cw.damage in sync with
+// cw.redirected so a window that becomes unredirected is no longer tracked by
+// the compositor's damage loop, and one that becomes redirected starts getting
+// damage notifications again.
+- (void)updateBypassCompositorForWindow:(xcb_window_t)windowId
+{
+    xcb_connection_t *conn = [self.connection connection];
+
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw)
+        return;
+
+    BOOL wantBypass = NO;
+    if (self.bypassCompositorAtom != XCB_NONE) {
+        xcb_get_property_cookie_t prop_cookie =
+            xcb_get_property(conn, 0, windowId,
+                             self.bypassCompositorAtom, XCB_ATOM_CARDINAL, 0, 1);
+        xcb_get_property_reply_t *prop_reply =
+            xcb_get_property_reply(conn, prop_cookie, NULL);
+        if (prop_reply && prop_reply->type == XCB_ATOM_CARDINAL
+            && prop_reply->format == 32 && prop_reply->value_len > 0) {
+            uint32_t bypass = *(uint32_t *)xcb_get_property_value(prop_reply);
+            wantBypass = (bypass == 1);
+        }
+        free(prop_reply);
+    }
+
+    BOOL currentlyBypassed = !cw.redirected;
+
+    if (wantBypass && !currentlyBypassed) {
+        // Transition to unredirected: drop the damage object and let the
+        // window draw directly to the screen.
+        cw.redirected = NO;
+        if (cw.damage != XCB_NONE) {
+            xcb_damage_destroy(conn, cw.damage);
+            cw.damage = XCB_NONE;
+        }
+        xcb_composite_unredirect_window(conn, windowId,
+                                        XCB_COMPOSITE_REDIRECT_MANUAL);
+        [self damageScreen];
+    } else if (!wantBypass && currentlyBypassed) {
+        // Transition back to redirected (was bypassed): re-establish the
+        // damage object and re-redirect.  Freshly added windows are already
+        // redirected by the root's REDIRECT_MANUAL, so this path is only for
+        // a runtime property change away from bypass.
+        cw.redirected = YES;
+        if (cw.damage == XCB_NONE) {
+            cw.damage = xcb_generate_id(conn);
+            // NON_EMPTY sends one DamageNotify on empty->non-empty transition.
+            // repairWindow: drains (re-arms) after each repaint, so we get
+            // exactly one event per content change cycle instead of one per
+            // pixel update -- critical for CPU at idle with busy terminals.
+            xcb_damage_create(conn, cw.damage, windowId,
+                              XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
+        }
+        xcb_composite_redirect_window(conn, windowId,
+                                      XCB_COMPOSITE_REDIRECT_MANUAL);
+        [self damageScreen];
+    } else {
+        // No bypass-state change: make sure a redirected window still has its
+        // damage object (this is the common addWindow case where the property
+        // is absent).  Without it the compositor would never repaint content.
+        if (cw.redirected && cw.damage == XCB_NONE) {
+            cw.damage = xcb_generate_id(conn);
+            xcb_damage_create(conn, cw.damage, windowId,
+                              XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
+        }
+    }
+}
+
+#pragma mark - Transparent Background Detection
+
+// Probe the alpha channel along the window's edge strips.  Returns
+//   1  background is (almost fully) transparent
+//   0  background is opaque
+//  -1  undetermined yet (client has not painted / probe failed) - caller
+//      must retry on a later paint pass instead of guessing.
+- (int)detectTransparentBackground:(URSCompositeWindow *)cw {
+    xcb_connection_t *conn = [self.connection connection];
+
+    // Only ARGB windows can have a translucent background.
+    if (cw.depth != 32)
+        return 0;
+    // Without at least one damage notification the backing store contents are
+    // undefined; deciding from them would misclassify freshly mapped windows.
+    if (!cw.damaged)
+        return -1;
+    uint16_t w = cw.width, h = cw.height;
+    if (w < 8 || h < 8)
+        return 0;
+    // Fail-safe: after repeated failed probes treat as opaque so windows
+    // never end up permanently without a shadow due to probing trouble.
+    if (cw.transparentProbeAttempts > 5)
+        return 0;
+    cw.transparentProbeAttempts++;
+
+    const int T = 4;   // strip thickness
+    const int I = 2;   // sample inset within strip == inset from edge
+    int opaque = 0, total = 0;
+
+    struct { int16_t x, y; uint16_t sw, sh; } strips[4] = {
+        { 0,          0,          w, T },   // top
+        { 0, (int16_t)(h - T),    w, T },   // bottom
+        { 0,          0,          T, h },   // left
+        { (int16_t)(w - T), 0,    T, h },   // right
+    };
+
+    for (int s = 0; s < 4; s++) {
+        xcb_get_image_cookie_t cookie =
+            xcb_get_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.windowId,
+                          strips[s].x, strips[s].y, strips[s].sw, strips[s].sh,
+                          (uint32_t)~0);
+        xcb_get_image_reply_t *img = xcb_get_image_reply(conn, cookie, NULL);
+        if (!img || img->depth != 32) {
+            free(img);
+            return -1;
+        }
+        uint32_t *data = (uint32_t *)xcb_get_image_data(img);
+        uint32_t stride = strips[s].sw;
+        uint32_t len = img->length * 4 / 4; /* bytes */
+        (void)len;
+        if (s < 2) {
+            uint32_t row = I;
+            for (uint32_t x = 0; x < strips[s].sw; x += (strips[s].sw > 64 ? strips[s].sw / 64 : 1)) {
+                uint32_t px = data[row * stride + x];
+                total++;
+                if (((px >> 24) & 0xFF) >= 16)
+                    opaque++;
+            }
+        } else {
+            uint32_t col = I;
+            for (uint32_t y = 0; y < strips[s].sh; y += (strips[s].sh > 64 ? strips[s].sh / 64 : 1)) {
+                uint32_t px = data[y * stride + col];
+                total++;
+                if (((px >> 24) & 0xFF) >= 16)
+                    opaque++;
+            }
+        }
+        free(img);
+    }
+
+    if (total == 0)
+        return -1;
+    // Rounded corners etc. leave a few transparent samples on normal windows,
+    // so require an overwhelming translucent majority to skip the shadow.
+    return (opaque * 100 < total * 12) ? 1 : 0;
 }
 
 #pragma mark - No-Shadow Window Registration
@@ -1215,6 +1588,13 @@
     }
     [self cleanupCompositeWindowGroup:group deleteDamage:YES removeRecords:YES];
     [self.parentFrameCache removeAllObjects];
+
+    // Paint immediately so the shadow disappears in this frame, not the
+    // next run loop iteration.  addDamage: above defers via scheduleRepair;
+    // performRepairNow runs the paint cycle right here, clearing the old
+    // shadow pixels from the root buffer via the full-screen background fill.
+    xcb_flush([self.connection connection]);
+    [self performRepairNow];
 }
 
 - (void)removeWindow:(xcb_window_t)windowId {
@@ -1248,6 +1628,9 @@
     
     // OPTIMIZATION: Mark stacking order dirty
     self.stackingOrderDirty = YES;
+
+    xcb_flush([self.connection connection]);
+    [self performRepairNow];
 }
 
 - (void)freeWindowData:(URSCompositeWindow *)cw delete:(BOOL)shouldDelete {
@@ -1280,16 +1663,48 @@
         xcb_free_pixmap(conn, cw.shadowPixmap);
         cw.shadowPixmap = XCB_NONE;
     }
+
+    // Free the frozen close-animation snapshot (its picture is cw.picture,
+    // freed above).
+    if (cw.snapshotPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, cw.snapshotPixmap);
+        cw.snapshotPixmap = XCB_NONE;
+    }
+
+    // Reset dimensions so windowExtents: falls through to the geometric
+    // estimation block.  Without this, unionExtentsForCompositeWindows:
+    // computes a bounding box from stale shadowWidth/Height even after
+    // the shadow has been freed, producing a wrong damage region.
+    cw.shadowWidth = 0;
+    cw.shadowHeight = 0;
+    cw.shadowOffsetX = 0;
+    cw.shadowOffsetY = 0;
     
     if (shouldDelete && cw.damage != XCB_NONE) {
         xcb_damage_destroy(conn, cw.damage);
         cw.damage = XCB_NONE;
     }
+
+    // Destroy the client-level activity Damage object alongside the frame one.
+    if (shouldDelete && cw.clientDamage != XCB_NONE) {
+        xcb_damage_destroy(conn, cw.clientDamage);
+        cw.clientDamage = XCB_NONE;
+    }
     
+    // Flush immediately so the X server frees the resources before the
+    // next paint cycle reads the root buffer.  Without this, the shadow
+    // picture persists on the server despite our client-side tracking
+    // indicating XCB_NONE, and a stale XFixes clip region or a delayed
+    // damage notification can cause the shadow to linger for one frame.
+    xcb_flush(conn);
+
     cw.damaged = NO;
     // OPTIMIZATION: Reset lazy picture flags
     cw.pictureValid = NO;
     cw.needsPictureCreation = YES;
+    // Re-probe background transparency on the next map/paint cycle
+    cw.backgroundTransparentChecked = NO;
+    cw.transparentProbeAttempts = 0;
 }
 
 - (void)updateWindow:(xcb_window_t)window {
@@ -1478,13 +1893,17 @@
 
     xcb_connection_t *conn = [self.connection connection];
 
-    if (cw.picture != XCB_NONE) {
-        xcb_render_free_picture(conn, cw.picture);
-        cw.picture = XCB_NONE;
+    // Never disturb the frozen snapshot of a close-animating window: the
+    // client is already unmapped and the animation paints from it.
+    if (cw.closeAnimating) {
+        return;
     }
-    cw.pictureValid = NO;
-    cw.needsPictureCreation = YES;
 
+    // The picture is a live view of the window drawable (see
+    // getWindowPicture:), so there is no cached snapshot to drop — callers
+    // only need the pending damage drained and the window's area scheduled
+    // for repaint.
+    //
     // Drain any accumulated X damage so the damage object is empty.
     // With REPORT_LEVEL_NON_EMPTY the X server only sends DamageNotify on the
     // empty→non-empty transition; if prior damage was never subtracted (e.g. a
@@ -1497,9 +1916,23 @@
     // Ensure updated content is repainted
     [self damageWindowArea:cw];
     [self scheduleRepair];
-}
+ }
 
-- (void)resizeWindow:(xcb_window_t)windowId x:(int16_t)x y:(int16_t)y 
+ - (void)setWindowOpacity:(CGFloat)opacity forWindow:(xcb_window_t)windowId
+ {
+     if (!self.compositingActive)
+         return;
+
+     URSCompositeWindow *cw = [self findCWindow:windowId];
+     if (!cw)
+         return;
+
+     cw.opacity = opacity;
+     [self damageWindowArea:cw];
+     [self scheduleRepair];
+ }
+
+ - (void)resizeWindow:(xcb_window_t)windowId x:(int16_t)x y:(int16_t)y 
                width:(uint16_t)width height:(uint16_t)height {
     if (!self.compositingActive) {
         return;
@@ -1576,6 +2009,9 @@
             // Reset lazy picture flags so picture is recreated
             cw.pictureValid = NO;
             cw.needsPictureCreation = YES;
+            // Re-probe background transparency (geometry/content changed)
+            cw.backgroundTransparentChecked = NO;
+            cw.transparentProbeAttempts = 0;
         }
     }
     
@@ -1645,6 +2081,7 @@
     if (cw) {
         [self.parentFrameCache removeAllObjects];
         cw.viewable = YES;
+        cw.mappedAt = [NSDate timeIntervalSinceReferenceDate];
 
         // Unredirected windows draw directly to the screen — skip
         // picture/shadow/damage since the compositor doesn't paint them.
@@ -1654,9 +2091,14 @@
         }
 
         cw.damaged = NO;
-        // OPTIMIZATION: Force picture recreation on remap (window may have new content)
-        cw.pictureValid = NO;
-        cw.needsPictureCreation = YES;
+        if (!cw.closeAnimating) {
+            // OPTIMIZATION: Force picture recreation on remap (window may have new content)
+            cw.pictureValid = NO;
+            cw.needsPictureCreation = YES;
+            // Re-probe background transparency on remap
+            cw.backgroundTransparentChecked = NO;
+            cw.transparentProbeAttempts = 0;
+        }
         // Create shadow for newly mapped window
         if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE) {
             [self createShadowForWindow:cw];
@@ -1685,6 +2127,8 @@
         [self damageScreen];
         [self.parentFrameCache removeAllObjects];
         self.stackingOrderDirty = YES;
+        xcb_flush([self.connection connection]);
+        [self performRepairNow];
         return;
     }
 
@@ -1699,19 +2143,25 @@
 
         cw.viewable = NO;
         cw.damaged = NO;
-        cw.pictureValid = NO;
-        cw.needsPictureCreation = YES;
 
         if (cw.animating) {
-            // Keep resources alive until animation completes
+            /* Keep resources AND the cached picture alive so a close/shrink
+             * animation can still render the last captured frame even though
+             * the client already unmapped the window. */
+            cw.pictureValid = YES;
             continue;
         }
 
+        cw.pictureValid = NO;
+        cw.needsPictureCreation = YES;
         [self freeWindowData:cw delete:NO];
     }
 
     [self.parentFrameCache removeAllObjects];
     self.stackingOrderDirty = YES;
+
+    xcb_flush([self.connection connection]);
+    [self performRepairNow];
 }
 
 #pragma mark - Damage Handling
@@ -1721,12 +2171,21 @@
     xcb_composite_redirect_window(conn, windowId, XCB_COMPOSITE_REDIRECT_MANUAL);
 }
 
-- (void)handleDamageNotify:(xcb_window_t)windowId {
+- (void)handleDamageNotify:(xcb_window_t)windowId
+                     area:(xcb_rectangle_t)area {
     URS_PROFILE_BEGIN(damageNotify);
     if (!self.compositingActive) {
         URS_PROFILE_END(damageNotify);
         return;
     }
+
+    // Content-activity tap: drives the titlebar spinner.  A dedicated Damage
+    // object on the client window (see -addWindow:) makes this fire for every
+    // client redraw.  Works while the window is shaded/hidden too - the client
+    // stays mapped, so its Damage keeps flowing even though the frame's own
+    // (clipped) Damage would be silent.  Cheap no-op for frames, titlebars,
+    // buttons and unknown windows.
+    [self.connection noteClientContentDamage:windowId area:area];
 
     URSCompositeWindow *cw = [self findCWindow:windowId];
 
@@ -1753,16 +2212,64 @@
                             originalCW.damage, XCB_NONE, XCB_NONE);
     }
 
-    if (!cw || !cw.damage) {
-        // Unknown window damaged; force full screen repaint to avoid artifacts
+    // The client-level activity Damage object exists only for activity
+    // detection, never for compositing.  Subtract it on EVERY notify so the X
+    // server does not accumulate an ever-growing damage region (it would
+    // otherwise keep reporting the window's entire draw history).
+    if (cw && cw.clientDamage != XCB_NONE) {
+        xcb_damage_subtract([[self connection] connection],
+                            cw.clientDamage, XCB_NONE, XCB_NONE);
+    }
+
+    if (!cw) {
+        // Truly unknown window damaged; force full screen repaint to avoid artifacts
         [self damageScreen];
         URS_PROFILE_END(damageNotify);
         return;
     }
+    if (!cw.damage) {
+        // Window is unredirected (e.g. a _NET_WM_BYPASS_COMPOSITOR terminal):
+        // it paints directly to the screen, so the compositor must neither
+        // repair it nor force a full-screen repaint.  The activity tap above
+        // already ran, so the titlebar spinner still tracks its content.  This
+        // is what makes the spinner work for gershwin-terminal, which bypasses
+        // the compositor for performance but still keeps drawing to its window.
+        URS_PROFILE_END(damageNotify);
+        return;
+    }
 
-    [self updateAbsolutePositionForWindow:cw];
+    // cw.x/y are kept current by moveWindow:/resizeWindow: (fed by
+    // ConfigureNotify and the drag path), so no per-event server round trip
+    // is needed here — a blocking xcb_translate_coordinates on every
+    // DamageNotify stalls the event loop under busy clients.
     [self repairWindow:cw];
     URS_PROFILE_END(damageNotify);
+}
+
+// Re-acquire and repaint one window's content right now.  Used by direct
+// X-drawing animations (titlebar spinner) that bypass the damage pipeline:
+// their drawing never produces Damage events, so without this nudge the
+// compositor would keep showing its stale cached picture.
+- (void)repairRegionForWindow:(xcb_window_t)windowId {
+    if (!self.compositingActive) {
+        return;
+    }
+
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw) {
+        [self addWindow:windowId];
+        cw = [self findCWindow:windowId];
+    }
+    if (!cw) {
+        return;
+    }
+
+    [self repairWindow:cw];
+
+    // repairWindow only accumulates damage - without scheduling a composite
+    // pass the new content would sit unscreened until some other damage
+    // happens to trigger one.
+    [self scheduleComposite];
 }
 
 - (void)handleExposeEvent:(xcb_window_t)windowId {
@@ -1796,18 +2303,19 @@
         return;
     }
 
-    // When a window is exposed (becomes visible after being obscured),
-    // the X server may return a stale backing pixmap because fixed-size windows
-    // expect their contents to be preserved.  With compositing, we force
-    // recreation of the picture to get fresh content.
-    xcb_connection_t *conn = [self.connection connection];
-
-    if (cw.picture != XCB_NONE) {
-        xcb_render_free_picture(conn, cw.picture);
-        cw.picture = XCB_NONE;
+    // Never disturb a close-animating window: the client is already
+    // unmapped and the animation paints from the frozen snapshot.
+    if (cw.closeAnimating) {
+        return;
     }
-    cw.pictureValid = NO;
-    cw.needsPictureCreation = YES;
+
+    // The picture is a live view of the window drawable, so exposure does
+    // not invalidate it and no recreation is needed.  Marking the window
+    // damaged also lifts the first-paint gate in paintWindow: for remapped
+    // windows whose content comes from server-side backing store — such
+    // windows redraw on Expose without generating X Damage and would
+    // otherwise stay blank until the 3 s timeout.
+    cw.damaged = YES;
 
     // Damage the exposed area to trigger repaint
     [self damageWindowArea:cw];
@@ -1876,6 +2384,14 @@
 - (void)repairWindow:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];
 
+    // Never invalidate the frozen snapshot of a close-animating window (see
+    // invalidateWindowPixmap:).  The client is already unmapped, so a fresh
+    // picture from the live drawable would be empty and the animation would
+    // paint nothing.
+    if (cw.closeAnimating) {
+        return;
+    }
+
     // Always use full window extents instead of the delta from
     // xcb_damage_subtract.  The X Damage extension may report a sub-rect
     // that is smaller than the visual area needing update (e.g. just the
@@ -1887,16 +2403,21 @@
     // Drain all accumulated damage so the X damage object starts fresh.
     xcb_damage_subtract(conn, cw.damage, XCB_NONE, XCB_NONE);
 
-    // Invalidate the picture so paintWindow: creates a fresh
-    // XRender picture from the window drawable on the next paint cycle.
-    // The new picture always reads the latest backing-pixmap content
-    // at composite time, avoiding stale snapshots from the NameWindowPixmap.
-    if (cw.picture != XCB_NONE) {
-        xcb_render_free_picture(conn, cw.picture);
-        cw.picture = XCB_NONE;
+    // The window picture is a live view of the window drawable (see
+    // getWindowPicture:), so it always reads current content at composite
+    // time and must NOT be recreated per damage event.  The only
+    // bookkeeping needed: client damage during a live resize means the
+    // client has redrawn at the new size, so the capture size that drives
+    // the scale transform in paintWindow: is committed here — this mirrors
+    // the picture recreation the old per-damage invalidation performed.
+    if ([self.connection resizeState]) {
+        uint16_t currentW = cw.width + 2 * cw.borderWidth;
+        uint16_t currentH = cw.height + 2 * cw.borderWidth;
+        if (cw.pictureWidth != currentW || cw.pictureHeight != currentH) {
+            cw.pictureWidth = currentW;
+            cw.pictureHeight = currentH;
+        }
     }
-    cw.pictureValid = NO;
-    cw.needsPictureCreation = YES;
 
     if (parts != XCB_NONE) {
         [self addDamage:parts];
@@ -1926,15 +2447,17 @@
     
     xcb_connection_t *conn = [self.connection connection];
     
-    // Clip to screen region
+    // Clip to screen region.  xcb_xfixes_intersect_region takes (c, source1,
+    // source2, destination) - sources first, destination last.
     if (self.screenRegion == XCB_NONE) {
         self.screenRegion = [self getScreenRegion];
     }
-    xcb_xfixes_intersect_region(conn, damage, damage, self.screenRegion);
+    xcb_xfixes_intersect_region(conn, damage, self.screenRegion, damage);
     
     if (self.allDamage != XCB_NONE) {
-        // Union with existing damage
-        xcb_xfixes_union_region(conn, self.allDamage, self.allDamage, damage);
+        // Union with existing damage.  Same (source1, source2, destination)
+        // argument order as above.
+        xcb_xfixes_union_region(conn, self.allDamage, damage, self.allDamage);
         xcb_xfixes_destroy_region(conn, damage);
     } else {
         self.allDamage = damage;
@@ -1994,6 +2517,96 @@
     return region;
 }
 
+// CPU-side bounding box of a composite window (window + shadow), mirroring
+// windowExtents: but without allocating a server region.  Used by paintAll:
+// to decide which windows must be repainted and to expand the repaint set,
+// without a per-window X round trip.
+- (xcb_rectangle_t)windowExtentsRect:(URSCompositeWindow *)cw {
+    int16_t wx = cw.x;
+    int16_t wy = cw.y;
+    int16_t ww = cw.width + 2 * cw.borderWidth;
+    int16_t wh = cw.height + 2 * cw.borderWidth;
+
+    // Same shadow estimation as windowExtents: - the shadow may not yet
+    // exist, so estimate from the shadow configuration constants.
+    uint16_t sWidth = cw.shadowWidth;
+    uint16_t sHeight = cw.shadowHeight;
+    int16_t sOffX = cw.shadowOffsetX;
+    int16_t sOffY = cw.shadowOffsetY;
+
+    if (sWidth == 0 && sHeight == 0 && !cw.overrideRedirect
+        && self.argbFormat != XCB_NONE && self.gaussianSize > 0)
+    {
+        sWidth = cw.width + 2 * cw.borderWidth + self.gaussianSize;
+        sHeight = cw.height + 2 * cw.borderWidth + self.gaussianSize;
+        sOffX = SHADOW_OFFSET_X;
+        sOffY = SHADOW_OFFSET_Y;
+    }
+
+    if (cw.shadowPicture != XCB_NONE || (sWidth > 0 && sHeight > 0)) {
+        int16_t sx = wx + sOffX;
+        int16_t sy = wy + sOffY;
+        int16_t sx2 = sx + (int16_t)sWidth;
+        int16_t sy2 = sy + (int16_t)sHeight;
+        int16_t wx2 = wx + ww;
+        int16_t wy2 = wy + wh;
+
+        int16_t bx = (sx < wx) ? sx : wx;
+        int16_t by = (sy < wy) ? sy : wy;
+        int16_t bx2 = (sx2 > wx2) ? sx2 : wx2;
+        int16_t by2 = (sy2 > wy2) ? sy2 : wy2;
+
+        xcb_rectangle_t r = { bx, by, (uint16_t)(bx2 - bx), (uint16_t)(by2 - by) };
+        return r;
+    }
+
+    xcb_rectangle_t r = { wx, (uint16_t)wy, (uint16_t)ww, (uint16_t)wh };
+    return r;
+}
+
+// CPU-side bounding box of an animation's full travel range (start rect,
+// end rect, borders and shadow padding), mirroring the damage the animation
+// timer registers each frame.  A superset of every interpolated frame rect.
+// Used by paintAll: to decide whether an animating window must be repainted
+// and to expand the repaint set so higher windows stay on top.
+- (xcb_rectangle_t)animationUnionRect:(URSCompositeWindow *)cw {
+    XCBRect s = cw.animationStartRect;
+    XCBRect e = cw.animationEndRect;
+    if (!FnCheckXCBRectIsValid(s) || !FnCheckXCBRectIsValid(e)) {
+        xcb_rectangle_t r = { cw.x, cw.y,
+            (uint16_t)(cw.width + 2 * cw.borderWidth),
+            (uint16_t)(cw.height + 2 * cw.borderWidth) };
+        return r;
+    }
+    int16_t x1 = MIN(s.position.x, e.position.x);
+    int16_t y1 = MIN(s.position.y, e.position.y);
+    int16_t x2 = MAX(s.position.x + (int16_t)s.size.width,
+                     e.position.x + (int16_t)e.size.width) + 2 * cw.borderWidth;
+    int16_t y2 = MAX(s.position.y + (int16_t)s.size.height,
+                     e.position.y + (int16_t)e.size.height) + 2 * cw.borderWidth;
+    uint16_t shadowPad = self.gaussianSize + abs(SHADOW_OFFSET_X);
+    x1 -= shadowPad;
+    y1 -= shadowPad;
+    x2 += shadowPad;
+    y2 += shadowPad;
+    xcb_rectangle_t r = { x1, y1, (uint16_t)(x2 - x1), (uint16_t)(y2 - y1) };
+    return r;
+}
+
+// CPU-side rectangle intersection test (no X round-trip).  Used to skip
+// windows whose extents cannot overlap the repaint region.
+static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
+    if (a.width == 0 || a.height == 0 || b.width == 0 || b.height == 0) {
+        return NO;
+    }
+    int32_t aR = (int32_t)a.x + (int32_t)a.width;
+    int32_t aB = (int32_t)a.y + (int32_t)a.height;
+    int32_t bR = (int32_t)b.x + (int32_t)b.width;
+    int32_t bB = (int32_t)b.y + (int32_t)b.height;
+    return ((int32_t)a.x < bR && (int32_t)b.x < aR &&
+            (int32_t)a.y < bB && (int32_t)b.y < aB);
+}
+
 - (xcb_xfixes_region_t)getScreenRegion {
     xcb_connection_t *conn = [self.connection connection];
     
@@ -2027,51 +2640,55 @@
         URS_PROFILE_END(performRepair);
         return;
     }
-    
+
     // Check if there's damage to paint
     if (self.allDamage == XCB_NONE) {
         self.repairScheduled = NO;
         URS_PROFILE_END(performRepair);
         return;
     }
-    
-    // Update lastRepairTime here so that the drag/resize throttle works
-    // correctly after a deferred performRepair fires. Without this, the next
-    // performRepairNow call would see a stale lastRepairTime and might skip the
-    // throttle, causing a burst of paints.
-    self.lastRepairTime = [NSDate timeIntervalSinceReferenceDate];
-    
+
+    // Frame cap: while the previous paint is younger than one frame
+    // interval, reschedule this pass for the remaining time.  The damage
+    // stays in allDamage so nothing is lost; more damage may accumulate
+    // meanwhile and is painted in the same pass.
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval elapsed = now - self.lastRepairTime;
+    if (self.lastRepairTime > 0 && elapsed < URSMinPaintInterval) {
+        self.repairScheduled = YES;
+        [self performSelector:@selector(performRepair)
+                   withObject:nil
+                   afterDelay:(URSMinPaintInterval - elapsed)];
+        URS_PROFILE_END(performRepair);
+        return;
+    }
+
+    self.lastRepairTime = now;
+
     xcb_xfixes_region_t damage = self.allDamage;
     self.allDamage = XCB_NONE;
     self.repairScheduled = NO;
-    
+
     [self paintAll:damage];
-    
+
     xcb_xfixes_destroy_region([self.connection connection], damage);
     URS_PROFILE_END(performRepair);
 }
 
-- (void)performRepairNow {
-    if (!self.compositingActive) {
-        return;
-    }
+ - (BOOL)windowIsAnimating:(xcb_window_t)windowId {
+     URSCompositeWindow *cw = [self findCWindow:windowId];
+     return cw != nil && cw.animating;
+ }
 
-    if ([self.connection dragState] || [self.connection resizeState]) {
-        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-        NSTimeInterval elapsed = now - self.lastRepairTime;
+ - (void)performRepairNow {
+     if (!self.compositingActive) {
+         return;
+     }
 
-        if (elapsed < 0.016 && self.lastRepairTime > 0) {
-            if (!self.repairScheduled) {
-                self.repairScheduled = YES;
-                [self performSelector:@selector(performRepair)
-                           withObject:nil
-                           afterDelay:0.016 - elapsed];
-            }
-            return;
-        }
-        self.lastRepairTime = now;
-    }
-
+    // Drop any deferred pass queued by scheduleRepair first — its delay-0
+    // fire would bypass the frame cap — then run one pass right now.
+    // performRepair itself defers when the previous paint is younger than
+    // one frame interval, so this paints immediately only when allowed.
     if (self.repairScheduled) {
         [NSObject cancelPreviousPerformRequestsWithTarget:self
                                                  selector:@selector(performRepair)
@@ -2079,16 +2696,7 @@
         self.repairScheduled = NO;
     }
 
-    if (self.allDamage == XCB_NONE) {
-        return;
-    }
-
-    xcb_xfixes_region_t damage = self.allDamage;
-    self.allDamage = XCB_NONE;
-
-    [self paintAll:damage];
-
-    xcb_xfixes_destroy_region([self.connection connection], damage);
+    [self performRepair];
 }
 
 - (void)scheduleComposite {
@@ -2138,7 +2746,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     if (self.animationTimer || self.activeAnimations == 0) {
         return;
     }
-    self.animationTimer = [NSTimer scheduledTimerWithTimeInterval:0.033
+    self.animationTimer = [NSTimer scheduledTimerWithTimeInterval:0.016
                                                            target:self
                                                          selector:@selector(animationTimerFired:)
                                                          userInfo:nil
@@ -2189,12 +2797,33 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                      fromRect:(XCBRect)startRect
                        toRect:(XCBRect)endRect {
-        [self animateWindowTransition:windowId
-                                                 fromRect:startRect
-                                                     toRect:endRect
-                                                 duration:0.8
-                                                         fade:YES
-                                                minimizing:YES];
+    [self animateWindowTransition:windowId
+                         fromRect:startRect
+                           toRect:endRect
+                         duration:0.4
+                             fade:YES
+                    minimizing:YES];
+}
+
+/* Mark a window as close-animating so its compositor picture survives the
+ * unmap/re-map churn during the shrink+fade close animation. */
+- (void)setCloseAnimating:(BOOL)closeAnimating forWindow:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (cw) {
+        cw.closeAnimating = closeAnimating;
+    }
+}
+
+/* Capture the close-animation snapshot NOW, while the client is still mapped.
+ * Called from the Workspace close message (prepare phase); the animation itself
+ * is triggered later by the client's UnmapNotify.  Must be called before the
+ * unmap, or the frame's IncludeInferiors picture has already lost the client. */
+- (void)captureCloseSnapshotNowForWindow:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (cw) {
+        cw.closeAnimating = YES;
+        [self captureCloseSnapshotForWindow:cw];
+    }
 }
 
 - (void)animateWindowMinimize:(xcb_window_t)windowId
@@ -2218,12 +2847,38 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 - (void)animateWindowRestore:(xcb_window_t)windowId
                     fromRect:(XCBRect)startRect
                       toRect:(XCBRect)endRect {
-        [self animateWindowTransition:windowId
-                                                 fromRect:startRect
-                                                     toRect:endRect
-                                                 duration:0.8
-                                                         fade:YES
-                                                minimizing:NO];
+    [self animateWindowTransition:windowId
+                         fromRect:startRect
+                           toRect:endRect
+                         duration:0.4
+                             fade:YES
+                    minimizing:NO];
+}
+
+// Shrink (e.g. unmaximize) animation: the window's own (start) rect is the
+// natural size and it scales down to the end rect, without being hidden at
+// the end.  Completion fires from finishAnimationForWindow:.
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration {
+    [self animateWindowShrink:windowId fromRect:startRect toRect:endRect
+                     duration:duration completion:nil];
+}
+
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration
+                 completion:(dispatch_block_t)completion {
+    [self animateWindow:windowId
+               fromRect:startRect
+                 toRect:endRect
+            minimizing:NO
+                duration:duration
+                    fade:NO
+                  shrink:YES
+              completion:completion];
 }
 
 - (void)animateWindowTransition:(xcb_window_t)windowId
@@ -2244,8 +2899,21 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                                                     toRect:(XCBRect)endRect
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade
+                                                completion:(dispatch_block_t)completion {
+        [self animateWindow:windowId fromRect:startRect toRect:endRect
+                 minimizing:NO duration:duration fade:fade
+                     shrink:NO completion:completion];
+}
+
+- (void)animateWindowTransition:(xcb_window_t)windowId
+                                                fromRect:(XCBRect)startRect
+                                                    toRect:(XCBRect)endRect
+                                                duration:(NSTimeInterval)duration
+                                                        fade:(BOOL)fade
                                              minimizing:(BOOL)minimizing {
-        [self animateWindow:windowId fromRect:startRect toRect:endRect minimizing:minimizing duration:duration fade:fade];
+        [self animateWindow:windowId fromRect:startRect toRect:endRect
+                 minimizing:minimizing duration:duration fade:fade
+                     shrink:NO completion:nil];
 }
 
 - (void)animateWindow:(xcb_window_t)windowId
@@ -2253,7 +2921,9 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                              toRect:(XCBRect)endRect
                      minimizing:(BOOL)minimizing
                          duration:(NSTimeInterval)duration
-                                 fade:(BOOL)fade {
+                                 fade:(BOOL)fade
+                             shrink:(BOOL)shrink
+                         completion:(dispatch_block_t)completion {
     //NSLog(@"[Compositor] animateWindow called for window %u startRect={%d,%d,%hu,%hu} endRect={%d,%d,%hu,%hu} duration=%.2f fade=%d minimizing=%d compositingActive=%d",
           //windowId,
           //(int)startRect.position.x, (int)startRect.position.y, startRect.size.width, startRect.size.height,
@@ -2261,8 +2931,9 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
           //duration, (int)fade, (int)minimizing, (int)self.compositingActive);
 
     if (!self.compositingActive || windowId == XCB_NONE) {
-        //NSLog(@"[Compositor] animateWindow aborted: compositingActive=%d, windowId=%u",
-              //(int)self.compositingActive, windowId);
+        NSLog(@"[Compositor] animateWindow aborted: compositingActive=%d, windowId=%u",
+              (int)self.compositingActive, windowId);
+        if (completion) completion();
         return;
     }
 
@@ -2274,26 +2945,41 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 
     if (!cw) {
         NSLog(@"[Compositor] animateWindow aborted: could not create composite window for %u", windowId);
+        if (completion) completion();
         return;
     }
 
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     BOOL wasAnimating = cw.animating;
 
+    /* The close snapshot was captured during the prepare phase (Workspace
+     * close message), while the client was still mapped.  It must NOT be
+     * re-captured here: by the time the UnmapNotify triggers the animation the
+     * client is already unmapped, so a fresh capture would lose the content. */
     cw.animationStartRect = startRect;
     cw.animationEndRect = endRect;
     cw.animationStart = now;
     cw.animationDuration = duration;
     cw.animating = YES;
     cw.animatingMinimize = minimizing;
+    cw.animatingShrink = shrink;
     cw.animatingFade = fade;
+    cw.animationCompletion = completion;
 
     if (!wasAnimating) {
         self.activeAnimations += 1;
     }
 
-    cw.pictureValid = NO;
-    cw.needsPictureCreation = YES;
+    if (cw.closeAnimating) {
+        /* The close snapshot (captured above) already replaced cw.picture with
+         * a frozen copy; do not invalidate it, or paintWindow: would recreate
+         * the live drawable picture and lose the client content again. */
+        cw.pictureValid = YES;
+        cw.needsPictureCreation = NO;
+    } else {
+        cw.pictureValid = NO;
+        cw.needsPictureCreation = YES;
+    }
 
     [self startAnimationTimerIfNeeded];
     [self scheduleComposite];
@@ -2306,11 +2992,11 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 
     BOOL wasMinimized = cw.animatingMinimize;
 
-    //NSLog(@"[Compositor] Animation finished for window %u (wasMinimize=%d)", cw.windowId, (int)wasMinimized);
-
     cw.animating = NO;
     cw.animatingMinimize = NO;
+    cw.animatingShrink = NO;
     cw.animatingFade = NO;
+    cw.closeAnimating = NO;
     cw.animationStart = 0;
     cw.animationDuration = 0;
     cw.animationStartRect = XCBInvalidRect;
@@ -2364,65 +3050,149 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self.windowStackingOrder addObject:@(children[i])];
     }
     
+    /* Keep close-animating windows in the paint list even if they are
+     * momentarily unmapped (the client's orderOut raced the re-map): the
+     * animation must still render to completion. */
+    for (NSNumber *key in self.cwindows) {
+        URSCompositeWindow *cw = self.cwindows[key];
+        if (cw && cw.animating && cw.closeAnimating
+            && ![self.windowStackingOrder containsObject:key]) {
+            [self.windowStackingOrder addObject:key];
+        }
+    }
+    
     free(tree_reply);
     self.stackingOrderDirty = NO;
+}
+
+// Debounce stacking order damage: multiple rapid changes coalesce into one pass
+- (void)scheduleStackingDamage {
+    if (self.stackingDamageScheduled) {
+        return; // Already scheduled, coalesce
+    }
+    self.stackingDamageScheduled = YES;
+    [self performSelector:@selector(performStackingDamage)
+               withObject:nil
+               afterDelay:0.016]; // 16ms debounce (matches animation timer)
+}
+
+- (void)performStackingDamage {
+    if (!self.stackingDamageScheduled) {
+        return;
+    }
+    self.stackingDamageScheduled = NO;
+    if (self.compositingActive) {
+        // Damage full screen to ensure stacking change is visible.
+        // Multiple rapid stacking changes are coalesced into this one pass.
+        [self damageScreen];
+    }
 }
 
 // OPTIMIZATION: Notify that stacking order changed (e.g., window raised/lowered)
 - (void)markStackingOrderDirty {
     self.stackingOrderDirty = YES;
     if (self.compositingActive) {
-        // ALWAYS damage the screen on stacking order change.
-        // If we don't, and some other damage was already pending,
-        // we might only repaint a small part of the screen while the
-        // stacking change requires a full redraw of the affected windows.
-        [self damageScreen];
+        // Debounce: coalesce multiple rapid stacking changes into one damage pass.
+        // This avoids creating redundant full-screen XFixes regions for each event.
+        [self scheduleStackingDamage];
     }
 }
 
-// Paint the Menu.app shadow at the bottom of the z-order so it appears
-// below all other windows (only the desktop background is lower).
+// Per-window stacking notification: a raise/lower in place only changes
+// pixels inside the restacked window's own extents — whatever it newly
+// covers or reveals lies within them — so damaging just those extents is
+// sufficient.  paintAll repaints everything overlapping them in correct
+// z-order via its paintedBBox expansion.  Falls back to the debounced
+// full-screen pass when the window is unknown, not viewable or unredirected.
+- (void)markStackingOrderDirtyForWindow:(xcb_window_t)windowId {
+    self.stackingOrderDirty = YES;
+    if (!self.compositingActive) {
+        return;
+    }
+
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw) {
+        xcb_window_t parentFrame = [self findParentFrameWindow:windowId];
+        if (parentFrame != XCB_NONE) {
+            cw = [self findCWindow:parentFrame];
+        }
+    }
+
+    if (cw && cw.viewable && cw.redirected) {
+        [self damageWindowArea:cw];
+        return;
+    }
+
+    [self scheduleStackingDamage];
+}
+
+// Composite shadow in 4 non-overlapping strips (top, bottom, left, right)
+// around the window rectangle. This never paints behind the window.
+- (void)compositeShadowStrips:(URSCompositeWindow *)cw
+                   connection:(xcb_connection_t *)conn
+                      shadowX:(int16_t)shadowX shadowY:(int16_t)shadowY
+                 shadowWidth:(uint16_t)shadowWidth shadowHeight:(uint16_t)shadowHeight
+                       winX:(int16_t)winX winY:(int16_t)winY
+                       winW:(uint16_t)winW winH:(uint16_t)winH
+{
+    int16_t topH = winY - shadowY;
+    int16_t botH = (shadowY + shadowHeight) - (winY + winH);
+    int16_t leftW = winX - shadowX;
+    int16_t rightW = (shadowX + shadowWidth) - (winX + winW);
+
+    if (topH > 0) {
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, 0, 0, 0,
+                             shadowX, shadowY,
+                             shadowWidth, (uint16_t)topH);
+    }
+
+    if (botH > 0) {
+        uint16_t botSrcY = shadowHeight - (uint16_t)botH;
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, botSrcY, 0, 0,
+                             shadowX, winY + winH,
+                             shadowWidth, (uint16_t)botH);
+    }
+
+    if (leftW > 0 && winH > 0) {
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, (uint16_t)topH, 0, 0,
+                             shadowX, winY,
+                             (uint16_t)leftW, winH);
+    }
+
+    if (rightW > 0 && winH > 0) {
+        uint16_t rightSrcX = shadowWidth - (uint16_t)rightW;
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             rightSrcX, (uint16_t)topH, 0, 0,
+                             winX + winW, winY,
+                             (uint16_t)rightW, winH);
+    }
+}
+
+// Paint the Menu.app shadow in strips around the window rectangle so it
+// never overlays the menu bar itself.
 - (void)paintMenuShadow:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];
 
-    // Ensure the shadow picture exists (paintWindow: skips creation when it
-    // recognizes the Menu.app, so we must create it here).
     if (cw.shadowPicture == XCB_NONE && ![self.connection resizeState]) {
         [self createShadowForWindow:cw];
     }
     if (cw.shadowPicture == XCB_NONE) return;
+    if (!cw.damaged) return;
 
-    int16_t screenX = cw.x;
-    int16_t screenY = cw.y;
-    int16_t shadowX = screenX + cw.shadowOffsetX;
-    int16_t shadowY = screenY + cw.shadowOffsetY;
-    uint16_t winW = cw.width + 2 * cw.borderWidth;
-    uint16_t winH = cw.height + 2 * cw.borderWidth;
-
-    xcb_rectangle_t shadowRect = { shadowX, shadowY, cw.shadowWidth, cw.shadowHeight };
-    xcb_rectangle_t winRect = { screenX, screenY, winW, winH };
-
-    xcb_xfixes_region_t shadowRegion = xcb_generate_id(conn);
-    xcb_xfixes_create_region(conn, shadowRegion, 1, &shadowRect);
-    xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
-    xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
-    xcb_xfixes_region_t clipRegion = xcb_generate_id(conn);
-    xcb_xfixes_create_region(conn, clipRegion, 0, NULL);
-    xcb_xfixes_subtract_region(conn, clipRegion, shadowRegion, winRegion);
-
-    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, 0, 0, clipRegion);
-
-    xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                         cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                         0, 0, 0, 0,
-                         shadowX, shadowY,
-                         cw.shadowWidth, cw.shadowHeight);
-
-    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, 0, 0, XCB_NONE);
-
-    xcb_xfixes_destroy_region(conn, clipRegion);
-    xcb_xfixes_destroy_region(conn, winRegion);
-    xcb_xfixes_destroy_region(conn, shadowRegion);
+    [self compositeShadowStrips:cw connection:conn
+                        shadowX:cw.x + cw.shadowOffsetX
+                        shadowY:cw.y + cw.shadowOffsetY
+                   shadowWidth:cw.shadowWidth shadowHeight:cw.shadowHeight
+                         winX:cw.x winY:cw.y
+                         winW:cw.width + 2 * cw.borderWidth
+                         winH:cw.height + 2 * cw.borderWidth];
 }
 
 - (void)paintAll:(xcb_xfixes_region_t)region {
@@ -2444,13 +3214,70 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     
     NSUInteger num_windows = [self.windowStackingOrder count];
 
-    // Fill rootBuffer with the desktop background colour so that areas not
-    // covered by any window (including transparent window corners) show the
-    // intended background instead of undefined/black pixels.
-    xcb_render_color_t bg_color = {0x8000, 0x8000, 0x8000, 0xFFFF};
-    xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
-    xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
-                               self.rootBuffer, bg_color, 1, &bg_rect);
+    // OPTIMIZATION: Clip ALL rendering into rootBuffer to the damage region.
+    // The X server clips every subsequent fill/composite that targets
+    // rootBuffer, so the background fill, window composites and shadow strips
+    // only touch pixels that actually changed.  Undamaged areas of the
+    // persistent rootBuffer keep their previously-painted content, which is
+    // still correct.  The clip is reset to XCB_NONE below, before the buffer
+    // is presented.  Without this, every DAMAGE_NOTIFY caused a full-screen
+    // background refill plus a full repaint of every window.
+    if (region != XCB_NONE) {
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, region, 0, 0);
+    }
+
+    // Bounding box of the damage region, used to skip windows that cannot
+    // possibly overlap the damage.  A single round trip here replaces a full
+    // per-window repaint pass for undamaged windows.
+    xcb_rectangle_t damageBBox = {0, 0, self.screenWidth, self.screenHeight};
+    if (region != XCB_NONE) {
+        xcb_xfixes_fetch_region_cookie_t fetchCookie = xcb_xfixes_fetch_region(conn, region);
+        xcb_xfixes_fetch_region_reply_t *fetchReply = xcb_xfixes_fetch_region_reply(conn, fetchCookie, NULL);
+        if (fetchReply) {
+            damageBBox = fetchReply->extents;
+            free(fetchReply);
+        }
+    }
+
+    // Region of rootBuffer whose pixels are FRESH this cycle: the background
+    // fill erased the damage area, and every window composite below is opaque
+    // and re-covers its window rect.  Semi-transparent shadow strips must only
+    // be composited over fresh pixels - painting them over their own stale
+    // pixels from the previous frame darkens the shadow every cycle ("shadow
+    // drawn multiple times").  As windows are repainted we union their window
+    // rect into this region, so the shadow of a window that overlaps a
+    // repainted lower window is repainted over that window's fresh content.
+    // This is the precise region; a bounding box would over-cover and
+    // reintroduce the double-shadow artifact in the box corners.
+    xcb_xfixes_region_t freshRegion = XCB_NONE;
+    if (region != XCB_NONE) {
+        freshRegion = xcb_generate_id(conn);
+        xcb_xfixes_create_region(conn, freshRegion, 0, NULL);
+        // xcb_xfixes_union_region takes (c, source1, source2, destination) -
+        // sources first, destination last.  Copy the damage region into the
+        // freshly-created empty freshRegion.
+        xcb_xfixes_union_region(conn, freshRegion, region, freshRegion);
+    }
+
+    // Fill rootBuffer with the desktop background (image or solid colour)
+    // from ~/Library/Preferences/org.gnustep.Workspace.plist desktopinfo.
+    // This ensures areas not covered by any window show the user's chosen
+    // wallpaper instead of undefined/black pixels.
+    if (self.desktopBgPicture != XCB_NONE) {
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_SRC,
+                             self.desktopBgPicture, XCB_NONE, self.rootBuffer,
+                             0, 0, 0, 0,
+                             0, 0,
+                             self.screenWidth, self.screenHeight);
+    } else {
+        uint16_t r16 = (uint16_t)(self.desktopBgRed * 0xFFFF);
+        uint16_t g16 = (uint16_t)(self.desktopBgGreen * 0xFFFF);
+        uint16_t b16 = (uint16_t)(self.desktopBgBlue * 0xFFFF);
+        xcb_render_color_t bg_color = {r16, g16, b16, 0xFFFF};
+        xcb_rectangle_t bg_rect = {0, 0, self.screenWidth, self.screenHeight};
+        xcb_render_fill_rectangles(conn, XCB_RENDER_PICT_OP_SRC,
+                                   self.rootBuffer, bg_color, 1, &bg_rect);
+    }
 
     // Find Menu.app and ensure its shadow is created early so we can
     // paint it at the desktop z-order (below all other windows).
@@ -2468,6 +3295,15 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self createShadowForWindow:menuCW];
     }
     BOOL menuShadowPainted = NO;
+
+    // Cumulative area whose pixels were refreshed this cycle (damage plus the
+    // full extents of every repainted window).  A window must be repainted if
+    // it overlaps the damage region OR if it overlaps a lower window that was
+    // repainted this cycle - that window's opaque composite would otherwise
+    // cover the upper window's pixels, breaking z-order.  Starting from the
+    // damage bounding box captures both the background-fill area and the
+    // animation-union damage.
+    xcb_rectangle_t paintedBBox = damageBBox;
 
     // Paint windows from bottom to top (so higher z-order windows are on top)
     for (NSUInteger i = 0; i < num_windows; i++) {
@@ -2499,16 +3335,119 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) {
             continue;
         }
-        
-        [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:region];
+
+        if (!cw.animating) {
+            // OPTIMIZATION: Skip windows whose full extents (window + shadow)
+            // cannot overlap the refreshed area.  Their pixels in rootBuffer
+            // were painted on an earlier pass and nothing changed underneath
+            // them, so repainting them (composite + up to 4 shadow strips) is
+            // wasted X traffic.  Animating windows are always repainted:
+            // their geometry moves every frame, and the animation timer
+            // damages the union of the start and end rects so the tracked
+            // position may trail the current frame.
+            xcb_rectangle_t windowBBox = [self windowExtentsRect:cw];
+            if (!URSRectIntersects(windowBBox, paintedBBox)) {
+                continue;
+            }
+
+            // Clip the window's OPAQUE composite to its full window rect
+            // (frame + client), not to the damage sub-rectangle.  The frame's
+            // grey back_pixel is part of the frame drawable; a composite
+            // restricted to the damage region leaves previously-painted frame
+            // pixels stale, so that back_pixel can leak through as a dark
+            // border.  The composite fully re-covers its rect, which also
+            // heals any transient back_pixel captured while the client was
+            // still rendering.  The semi-transparent shadow strips must NOT
+            // use this clip - paintWindow: switches them to the fresh region
+            // (see below) so they are never composited over stale pixels.
+            xcb_rectangle_t winRect = { cw.x, cw.y,
+                (uint16_t)(cw.width + 2 * cw.borderWidth),
+                (uint16_t)(cw.height + 2 * cw.borderWidth) };
+            // Clip the opaque composite to the FULL window rect.  Use a region
+            // clip (set_picture_clip_region) rather than set_picture_clip_rectangles:
+            // the two clip mechanisms are not mutually exclusive on every X server,
+            // so a rectangle clip does not reliably replace the damage-region clip
+            // set above.  The result was the composite being silently restricted to
+            // the damage sub-rectangle, leaving the rest of the window stale and
+            // the frame's grey back_pixel bleeding through.  A region clip made
+            // from the same rect always replaces the damage-region clip.
+            xcb_xfixes_region_t winClip = xcb_generate_id(conn);
+            xcb_xfixes_create_region(conn, winClip, 1, &winRect);
+            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, winClip, 0, 0);
+            xcb_xfixes_destroy_region(conn, winClip);
+
+            [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion];
+
+            // The opaque composite refreshed the window rect, so shadows that
+            // overlap it may be repainted over it this cycle.
+            if (freshRegion != XCB_NONE) {
+                xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
+                xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
+                xcb_xfixes_union_region(conn, freshRegion, winRegion, freshRegion);
+                xcb_xfixes_destroy_region(conn, winRegion);
+            }
+
+            // This window now owns its full extents in the root buffer, so
+            // any higher window overlapping it must also be repainted this
+            // cycle to stay on top.
+            int32_t bx = MIN(paintedBBox.x, windowBBox.x);
+            int32_t by = MIN(paintedBBox.y, windowBBox.y);
+            int32_t bx2 = MAX((int32_t)paintedBBox.x + (int32_t)paintedBBox.width,
+                              (int32_t)windowBBox.x + (int32_t)windowBBox.width);
+            int32_t by2 = MAX((int32_t)paintedBBox.y + (int32_t)paintedBBox.height,
+                              (int32_t)windowBBox.y + (int32_t)windowBBox.height);
+            paintedBBox.x = bx;
+            paintedBBox.y = by;
+            paintedBBox.width = (uint16_t)(bx2 - bx);
+            paintedBBox.height = (uint16_t)(by2 - by);
+        } else {
+            // Animating windows move every frame; the animation timer damages
+            // the full start..end union, so a skip based on the static window
+            // rect would miss frames.  Clip them to the fresh region (damage
+            // plus the full rects of every window repainted below them), NOT
+            // to the raw damage region: when a lower window repaints over the
+            // animation, its opaque composite erases the animation window's
+            // pixels across the lower window's WHOLE rect, and clipping the
+            // animation window to just the damage sub-rect would leave the
+            // rest of it cut away until the next timer tick - visible
+            // flicker.  The fresh region covers the full erased area, so the
+            // animation window repaints completely.  Their shadow strips are
+            // skipped during animation.
+            xcb_rectangle_t animBBox = [self animationUnionRect:cw];
+            if (!URSRectIntersects(animBBox, paintedBBox)) {
+                continue;
+            }
+            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, freshRegion, 0, 0);
+            [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion];
+
+            // This window now owns its animation range in the root buffer, so
+            // any higher window overlapping it must also be repainted this
+            // cycle to stay on top.
+            int32_t bx = MIN(paintedBBox.x, animBBox.x);
+            int32_t by = MIN(paintedBBox.y, animBBox.y);
+            int32_t bx2 = MAX((int32_t)paintedBBox.x + (int32_t)paintedBBox.width,
+                              (int32_t)animBBox.x + (int32_t)animBBox.width);
+            int32_t by2 = MAX((int32_t)paintedBBox.y + (int32_t)paintedBBox.height,
+                              (int32_t)animBBox.y + (int32_t)animBBox.height);
+            paintedBBox.x = bx;
+            paintedBBox.y = by;
+            paintedBBox.width = (uint16_t)(bx2 - bx);
+            paintedBBox.height = (uint16_t)(by2 - by);
+        }
 
         // Paint Menu.app shadow right after the first (bottommost) window,
         // typically the desktop, so the shadow sits below all other windows
-        // but above the desktop/background.
+        // but above the desktop/background.  Only when the refreshed area
+        // overlaps the menu shadow extents - otherwise the shadow pixels in
+        // rootBuffer are still valid and repainting them is wasted work.
         if (!menuShadowPainted && menuCW
             && menuCW.shadowPicture != XCB_NONE
             && ![self.noShadowWindows containsObject:@(menuCW.windowId)]) {
-            [self paintMenuShadow:menuCW];
+            xcb_rectangle_t menuBBox = [self windowExtentsRect:menuCW];
+            if (URSRectIntersects(menuBBox, paintedBBox)) {
+                xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, freshRegion, 0, 0);
+                [self paintMenuShadow:menuCW];
+            }
             menuShadowPainted = YES;
         }
     }
@@ -2518,17 +3457,59 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     // uploads) between paint cycles.
     xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, XCB_NONE, 0, 0);
 
+    if (freshRegion != XCB_NONE) {
+        xcb_xfixes_destroy_region(conn, freshRegion);
+    }
+
     if (self.presentAvailable) {
-        // Vblank-synced presentation via X Present extension.
-        // Use a flip chain with 2 pixmaps, alternating each frame.
-        // This guarantees we never overwrite a buffer that the X server
-        // may still be scanning out — by the time we cycle back to a
-        // buffer (2 frames later, ~33ms at 60Hz), the server is done.
+        // Vblank-synced presentation via X Present extension, using a flip
+        // chain of 2 persistent pixmaps.  Every paint pass presents exactly
+        // once — gating on CompleteNotify instead made updates skip frames
+        // (paint cadence ≈ vblank period) and could orphan the last burst
+        // of damage until an unrelated later event.  The flip-chain race is
+        // prevented by the frame cap in performRepair: paints are at most
+        // one per frame interval, so the same buffer is always rewritten at
+        // least two intervals after its previous flip completed, while a
+        // flip is scanned out for at most one interval.
         int idx = self.currentPresentIndex;
         xcb_pixmap_t pixmap = (idx == 0) ? self.presentPixmap0 : self.presentPixmap1;
         xcb_render_picture_t picture = (idx == 0) ? self.presentPicture0 : self.presentPicture1;
+        xcb_xfixes_region_t pending = (idx == 0) ? self.presentPendingDamage0
+                                                 : self.presentPendingDamage1;
+        xcb_xfixes_region_t otherPending = (idx == 0) ? self.presentPendingDamage1
+                                                      : self.presentPendingDamage0;
         self.currentPresentIndex = 1 - idx;
 
+        // Copy only what the target buffer is missing: the damage
+        // accumulated since its last presentation plus this frame's
+        // damage.  Pixels outside that region keep their content from
+        // the buffer's previous presentation, which is still correct —
+        // every content change damages the affected window's full
+        // extents, so undamaged pixels never change.
+        xcb_xfixes_region_t copyRegion;
+        if (pending != XCB_NONE) {
+            copyRegion = xcb_generate_id(conn);
+            xcb_xfixes_create_region(conn, copyRegion, 0, NULL);
+            xcb_xfixes_union_region(conn, copyRegion, pending, copyRegion);
+            if (region != XCB_NONE) {
+                xcb_xfixes_union_region(conn, copyRegion, region, copyRegion);
+            }
+            xcb_xfixes_destroy_region(conn, pending);
+            if (idx == 0) {
+                self.presentPendingDamage0 = XCB_NONE;
+            } else {
+                self.presentPendingDamage1 = XCB_NONE;
+            }
+        } else {
+            // Defensive: without a pending accumulator this buffer's
+            // content state is unknown — refresh it fully.
+            copyRegion = [self getScreenRegion];
+        }
+        if (otherPending != XCB_NONE && region != XCB_NONE) {
+            xcb_xfixes_union_region(conn, otherPending, region, otherPending);
+        }
+
+        xcb_xfixes_set_picture_clip_region(conn, picture, copyRegion, 0, 0);
         xcb_flush(conn);
         xcb_render_composite(conn,
                             XCB_RENDER_PICT_OP_SRC,
@@ -2537,6 +3518,8 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                             picture,
                             0, 0, 0, 0, 0, 0,
                             self.screenWidth, self.screenHeight);
+        xcb_xfixes_set_picture_clip_region(conn, picture, XCB_NONE, 0, 0);
+        xcb_xfixes_destroy_region(conn, copyRegion);
 
         xcb_present_pixmap(conn,
                           self.outputWindow,
@@ -2557,9 +3540,14 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         [self.connection flush];
     } else {
         // Non-vblank-synced path: direct copy to screen (fallback).
-        // Compose the full rootBuffer — never clip to the damage region since
-        // the damage-region clip was already applied during rendering and is
-        // no longer valid once window positions may have shifted.
+        // Copy only the damaged area: rootBuffer is persistent and its
+        // content outside the damage is unchanged since the last copy
+        // (every content change damages the affected window's full
+        // extents), so the screen stays in sync without a full-screen
+        // blit on every paint.
+        if (region != XCB_NONE) {
+            xcb_xfixes_set_picture_clip_region(conn, self.rootPicture, region, 0, 0);
+        }
         xcb_flush(conn);
         xcb_render_composite(conn,
                             XCB_RENDER_PICT_OP_SRC,
@@ -2778,6 +3766,27 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         return;
     }
 
+    // General rule: never paint a drop shadow around a window with a
+    // transparent background - the shadow rectangle would outline empty
+    // space around the irregular content (like a GL effect overlay).
+    if (!cw.overrideRedirect && cw.depth == 32) {
+        if (cw.backgroundTransparentChecked) {
+            if (cw.backgroundTransparent)
+                return;
+        } else {
+            int probe = [self detectTransparentBackground:cw];
+            if (probe < 0) {
+                // Undetermined (not painted yet): defer.  The shadow is
+                // created on a later pass once real content is available.
+                return;
+            }
+            cw.backgroundTransparentChecked = YES;
+            cw.backgroundTransparent = (probe == 1);
+            if (probe == 1)
+                return;
+        }
+    }
+
     // Skip shadow for the Dock panel (a DOCK-type window with _NET_WM_NAME "Dock").
     // The MenuBar is also DOCK type but keeps its shadow.  Relying solely on
     // setSkipShadowForWindow: from the connection layer can fail if the compositor
@@ -2794,6 +3803,15 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             && typeReply->format == 32 && typeReply->length > 0) {
             xcb_atom_t *atoms = (xcb_atom_t *)xcb_get_property_value(typeReply);
             for (uint32_t i = 0; i < typeReply->length; i++) {
+                // NOTIFICATION-type windows are pure visual overlays (e.g. a
+                // smoke effect rising above an app window); a drop shadow
+                // would outline their full transparent rectangle.
+                if (self.wmTypeNotificationAtom != XCB_NONE
+                    && atoms[i] == self.wmTypeNotificationAtom) {
+                    [self.noShadowWindows addObject:@(cw.windowId)];
+                    free(typeReply);
+                    return;
+                }
                 if (atoms[i] == self.wmTypeDockAtom) {
                     // It is a DOCK-type window — verify _NET_WM_NAME is "Dock".
                     xcb_get_property_cookie_t nameCookie =
@@ -2870,9 +3888,11 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     xcb_gcontext_t gc = xcb_generate_id(conn);
     xcb_create_gc(conn, gc, cw.shadowPixmap, 0, NULL);
     
-    xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.shadowPixmap, gc,
-                 swidth, sheight, 0, 0, 0, 32,
-                 swidth * sheight * 4, (uint8_t *)argb_data);
+    // Banded upload: the shadow is sized from the window, so a full-screen
+    // window on a 4K display would exceed the maximum request length.
+    URSPutImageBanded(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.shadowPixmap, gc,
+                      swidth, sheight, 0, 0, 0, 32,
+                      (uint32_t)swidth * 4, (uint8_t *)argb_data);
     // No blocking flush here — the batch flush in the event loop sends it.
     // The next xcb_render_create_picture is queued after put_image in order,
     // so the server will process them in sequence without an explicit sync.
@@ -2902,21 +3922,32 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     double destW = (double)cw.width + (2.0 * (double)cw.borderWidth);
     double destH = (double)cw.height + (2.0 * (double)cw.borderWidth);
 
+    // Delay window painting for up to 3s after mapping until the
+    // window receives its first damage event (content has been drawn).
+    // This avoids showing unrendered background colour through the
+    // window.  After 3s the window paints regardless.
+    if (!animating && !cw.damaged && cw.mappedAt > 0 && (now - cw.mappedAt) < 3.0) {
+        URS_PROFILE_END(paintWindow);
+        return;
+    }
+
     if (animating && FnCheckXCBRectIsValid(cw.animationStartRect) &&
         FnCheckXCBRectIsValid(cw.animationEndRect) && cw.animationDuration > 0.0) {
         double t = (now - cw.animationStart) / cw.animationDuration;
         t = URSClampDouble(t, 0.0, 1.0);
         BOOL wasMinimize = cw.animatingMinimize;
-        BOOL isBirthAnimation = !wasMinimize;
+        BOOL isShrink = cw.animatingShrink;
 
         // Determine ease curve per PRD:
-        // - Birth/unminimize: cubic ease-out f(t)=1-(1-t)^3  — fast start, gradual finish
         // - Minimize: smoothstep f(t)=t²(3-2t)               — symmetric ease-in-out
+        // - Everything else (birth, restore, maximize, shrink/unmaximize):
+        //   cubic ease-out f(t)=1-(1-t)^3.  Shrink is the exact reverse of
+        //   maximize, so it shares maximize's curve.
         double ease;
-        if (isBirthAnimation) {
-            ease = URSEaseOutCubic(t);
-        } else {
+        if (wasMinimize) {
             ease = URSEaseSmooth(t);
+        } else {
+            ease = URSEaseOutCubic(t);
         }
 
         // Log the first frame of animation to help debugging (not spammy)
@@ -2933,21 +3964,6 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         double endW = fmax(1.0, (double)cw.animationEndRect.size.width);
         double endH = fmax(1.0, (double)cw.animationEndRect.size.height);
 
-        // Always preserve the window's natural aspect ratio, defined by
-        // the LARGER start/end rect (the non-minimized state has the true
-        // window shape, the icon rect is often square).
-        double naturalW = fmax(startW, endW);
-        double naturalH = fmax(startH, endH);
-        double rawW = startW + (endW - startW) * ease;
-        double rawH = startH + (endH - startH) * ease;
-        double scaleFromNaturalW = rawW / naturalW;
-        double scaleFromNaturalH = rawH / naturalH;
-        double uniformScale = fmax(scaleFromNaturalW, scaleFromNaturalH);
-        uniformScale = fmax(0.01, uniformScale); // never smaller than 1%
-
-        double currentW = naturalW * uniformScale;
-        double currentH = naturalH * uniformScale;
-
         double startCenterX = cw.animationStartRect.position.x + (startW * 0.5);
         double endCenterX = cw.animationEndRect.position.x + (endW * 0.5);
         double currentCenterX = startCenterX + (endCenterX - startCenterX) * ease;
@@ -2955,6 +3971,54 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         double startBottom = cw.animationStartRect.position.y + startH;
         double endBottom = cw.animationEndRect.position.y + endH;
         double currentBottom = startBottom + (endBottom - startBottom) * ease;
+
+        double currentW, currentH;
+
+        if (isShrink) {
+            // Shrink (unmaximize) is the exact reverse of maximize: move the
+            // rect linearly from start (maximized) to end (restored) so it
+            // lands precisely on the target.  Using the aspect-preserving
+            // scale below would stop at the wrong size whenever the maximized
+            // and restored rects have different aspects, then snap/jump to the
+            // final rect when the animation ends.
+            currentW = startW + (endW - startW) * ease;
+            currentH = startH + (endH - startH) * ease;
+        } else {
+            // Always preserve the aspect ratio of the actual WINDOW throughout
+            // the animation, regardless of the source rect (icon, or the
+            // _WINDOW_BIRTH_ANIMATION atom rect, which may have any aspect).
+            // For opens (birth/restore) the window is the end rect; for minimize
+            // the window is the start rect.  Using max(start,end) per axis
+            // would distort the shape whenever the source rect is larger than
+            // the window in one dimension.
+            double naturalW, naturalH;
+            if (wasMinimize || cw.closeAnimating) {
+                // Minimize AND close shrink FROM the window's natural size
+                // (the start rect) down to the icon.  Close is the exact
+                // reverse of birth: using end as natural would render the
+                // window at icon size from the very first frame, which reads
+                // as an instant vanish.
+                naturalW = startW;
+                naturalH = startH;
+            } else {
+                naturalW = endW;
+                naturalH = endH;
+            }
+            double rawW = startW + (endW - startW) * ease;
+            double rawH = startH + (endH - startH) * ease;
+            double scaleFromNaturalW = rawW / naturalW;
+            double scaleFromNaturalH = rawH / naturalH;
+            // Always scale the picture uniformly, preserving the window's
+            // natural aspect, and never exceed the window's own size.  For
+            // opens (birth, maximize) this makes the window grow to fill; for
+            // minimize it makes the window close in on the icon.
+            double uniformScale = fmin(scaleFromNaturalW, scaleFromNaturalH);
+            uniformScale = fmax(0.01, uniformScale);   // never smaller than 1%
+            uniformScale = fmin(1.0, uniformScale);    // never larger than the window
+
+            currentW = naturalW * uniformScale;
+            currentH = naturalH * uniformScale;
+        }
 
         destW = fmax(1.0, currentW);
         destH = fmax(1.0, currentH);
@@ -3018,93 +4082,12 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             [self createShadowForWindow:cw];
         }
     }
-
-    // Draw shadow whenever available (including during resize),
-    // except for explicitly excluded windows (e.g. snap preview overlay)
-    // and the Menu.app top panel (its shadow is painted separately at the bottom).
-    BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
-    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
-    if (cw.shadowPicture != XCB_NONE && !animating && !skipShadow) {
-        int16_t shadowX = screenX + cw.shadowOffsetX;
-        int16_t shadowY = screenY + cw.shadowOffsetY;
-        uint16_t drawShadowWidth = cw.shadowWidth;
-        uint16_t drawShadowHeight = cw.shadowHeight;
-        BOOL appliedShadowScale = NO;
-
-        if ([self.connection resizeState]) {
-            int32_t expectedShadowWidth = (int32_t)cw.width + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
-            int32_t expectedShadowHeight = (int32_t)cw.height + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
-            if (expectedShadowWidth < 1) expectedShadowWidth = 1;
-            if (expectedShadowHeight < 1) expectedShadowHeight = 1;
-            if (expectedShadowWidth > 65535) expectedShadowWidth = 65535;
-            if (expectedShadowHeight > 65535) expectedShadowHeight = 65535;
-
-            if (cw.shadowWidth > 0 && cw.shadowHeight > 0 &&
-                (cw.shadowWidth != expectedShadowWidth || cw.shadowHeight != expectedShadowHeight)) {
-                double sx = (double)cw.shadowWidth / (double)expectedShadowWidth;
-                double sy = (double)cw.shadowHeight / (double)expectedShadowHeight;
-                xcb_render_transform_t shadowTransform = URSIdentityTransform();
-                shadowTransform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
-                shadowTransform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
-                xcb_render_set_picture_transform(conn, cw.shadowPicture, shadowTransform);
-                drawShadowWidth = (uint16_t)expectedShadowWidth;
-                drawShadowHeight = (uint16_t)expectedShadowHeight;
-                appliedShadowScale = YES;
-            }
-        }
-        
-        // Clip the shadow to exclude the window area so we never waste
-        // fill rate rendering shadow behind the window content.
-        {
-            xcb_rectangle_t shadowRect = { (int16_t)shadowX, (int16_t)shadowY,
-                                            drawShadowWidth, drawShadowHeight };
-            uint16_t winClipW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
-            uint16_t winClipH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
-            xcb_rectangle_t winRect = { (int16_t)screenX, (int16_t)screenY,
-                                         winClipW, winClipH };
-
-            xcb_xfixes_region_t shadowRegion = xcb_generate_id(conn);
-            xcb_xfixes_create_region(conn, shadowRegion, 1, &shadowRect);
-
-            xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
-            xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
-
-            xcb_xfixes_region_t clipRegion = xcb_generate_id(conn);
-            xcb_xfixes_create_region(conn, clipRegion, 0, NULL);
-            xcb_xfixes_subtract_region(conn, clipRegion, shadowRegion, winRegion);
-
-            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer,
-                                               0, 0, clipRegion);
-
-            // Composite ARGB32 shadow with proper alpha blending
-            xcb_render_composite(conn,
-                                XCB_RENDER_PICT_OP_OVER,
-                                cw.shadowPicture,
-                                XCB_NONE,
-                                self.rootBuffer,
-                                0, 0, 0, 0,
-                                shadowX, shadowY,
-                                drawShadowWidth, drawShadowHeight);
-
-            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer,
-                                               0, 0, XCB_NONE);
-
-            xcb_xfixes_destroy_region(conn, clipRegion);
-            xcb_xfixes_destroy_region(conn, winRegion);
-            xcb_xfixes_destroy_region(conn, shadowRegion);
-        }
-
-        if (appliedShadowScale) {
-            xcb_render_transform_t resetShadow = URSIdentityTransform();
-            xcb_render_set_picture_transform(conn, cw.shadowPicture, resetShadow);
-        }
-    }
 #endif
-    
+
     // OPTIMIZATION: Lazy picture creation - only create when first painting
     // NOTE: The underlying NameWindowPixmap is automatically updated by X server on damage
     // so we only need to recreate when pictureValid is false (size change, etc.)
-    if (!cw.pictureValid || cw.needsPictureCreation) {
+    if ((!cw.pictureValid || cw.needsPictureCreation) && !cw.closeAnimating) {
         if (cw.picture != XCB_NONE) {
             xcb_render_free_picture(conn, cw.picture);
             cw.picture = XCB_NONE;
@@ -3146,36 +4129,47 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
 
         if (animating) {
+            double t = URSClampDouble((now - cw.animationStart) / cw.animationDuration, 0.0, 1.0);
             double srcW = fmax(1.0, (double)cw.width + (2.0 * (double)cw.borderWidth));
             double srcH = fmax(1.0, (double)cw.height + (2.0 * (double)cw.borderWidth));
             double sx = srcW / (double)destWInt;
             double sy = srcH / (double)destHInt;
+
+            double alpha = 1.0;
+            if (cw.animatingFade) {
+                if (cw.animatingMinimize || cw.closeAnimating) {
+                    // Minimize/close: fade OUT (start opaque, end transparent).
+                    // Close must fade out, not in like birth, or the window
+                    // begins fully transparent and reads as an instant vanish.
+                    alpha = 1.0 - (t * t);
+                } else {
+                    // Window-open animation (map/birth): fade IN from fully
+                    // transparent.  A cubic ease-out makes the window opaque
+                    // much sooner than the quadratic curve, so it reads as a
+                    // quick materialization rather than a lingering ghost.
+                    double oneMinusT = 1.0 - t;
+                    alpha = 1.0 - (oneMinusT * oneMinusT * oneMinusT);
+                }
+                alpha = URSClampDouble(alpha, 0.0, 1.0);
+            }
 
             xcb_render_transform_t transform = URSIdentityTransform();
             transform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
             transform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
             xcb_render_set_picture_transform(conn, cw.picture, transform);
 
-            if (cw.animatingFade) {
-                double t = URSClampDouble((now - cw.animationStart) / cw.animationDuration, 0.0, 1.0);
-                double alpha;
-                if (cw.animatingMinimize) {
-                    // Minimize: fade OUT with quadratic ease-in
-                    alpha = 1.0 - (t * t);
-                } else {
-                    // Birth animation (window-open): start translucent (40%), gradually resolve
-                    // Uses quadratic ease-up from a 0.4 base:
-                    //   alpha = 0.4 + 0.6 * (1 - (1-t)^2)
-                    // Per PRD Sections 9 Phase 3 (translucent appearance) and Phase 5
-                    // (chrome materialization during final third).
-                    double oneMinusT = 1.0 - t;
-                    alpha = 0.4 + 0.6 * (1.0 - (oneMinusT * oneMinusT));
-                }
-                alpha = URSClampDouble(alpha, 0.0, 1.0);
-                if (alpha < 0.999 && self.argbFormat != XCB_NONE) {
-                    alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha];
-                }
+            if (cw.animatingFade && alpha < 0.999 && self.argbFormat != XCB_NONE) {
+                alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha * cw.opacity];
             }
+        }
+
+        // Persistent opacity (hover-peek): keep the window translucent even
+        // when no animation is running.  Skipped for close-animation snapshots
+        // (they are frozen and never peeked).
+        if (alphaMask == XCB_NONE && cw.opacity < 0.999 && !cw.closeAnimating &&
+            self.argbFormat != XCB_NONE)
+        {
+            alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:cw.opacity];
         }
 
         // Paint the window - IncludeInferiors captures all child content
@@ -3205,12 +4199,149 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             xcb_render_free_picture(conn, alphaMask);
         }
     }
+
+#if 1
+    // Render shadow AFTER window content in 4 strips (top, bottom, left, right)
+    // that surround the window rectangle. This never paints shadow pixels behind
+    // the window and avoids any temporary picture allocation.
+    BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
+    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
+    if (cw.shadowPicture != XCB_NONE && !animating && !skipShadow && cw.picture != XCB_NONE && cw.pictureValid) {
+        // The composite above ran under a clip to the window's full rect.
+        // The shadow strips are semi-transparent and must ONLY be composited
+        // over pixels that are fresh this cycle (background fill or a lower
+        // window's opaque composite).  Restrict them to the fresh region
+        // passed in - painting them over their own stale pixels from the
+        // previous frame darkens the shadow every cycle.  The picture must be
+        // valid (created from the window drawable) rather than merely damaged:
+        // windows adopted at startup or with static content never receive a
+        // DamageNotify, so cw.damaged stays NO and their shadow would never be
+        // painted.
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
+        int16_t shadowX = screenX + cw.shadowOffsetX;
+        int16_t shadowY = screenY + cw.shadowOffsetY;
+        uint16_t drawShadowWidth = cw.shadowWidth;
+        uint16_t drawShadowHeight = cw.shadowHeight;
+        BOOL appliedShadowScale = NO;
+
+        if ([self.connection resizeState]) {
+            int32_t expectedShadowWidth = (int32_t)cw.width + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
+            int32_t expectedShadowHeight = (int32_t)cw.height + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
+            if (expectedShadowWidth < 1) expectedShadowWidth = 1;
+            if (expectedShadowHeight < 1) expectedShadowHeight = 1;
+            if (expectedShadowWidth > 65535) expectedShadowWidth = 65535;
+            if (expectedShadowHeight > 65535) expectedShadowHeight = 65535;
+
+            if (cw.shadowWidth > 0 && cw.shadowHeight > 0 &&
+                (cw.shadowWidth != expectedShadowWidth || cw.shadowHeight != expectedShadowHeight)) {
+                double sx = (double)cw.shadowWidth / (double)expectedShadowWidth;
+                double sy = (double)cw.shadowHeight / (double)expectedShadowHeight;
+                xcb_render_transform_t shadowTransform = URSIdentityTransform();
+                shadowTransform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
+                shadowTransform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
+                xcb_render_set_picture_transform(conn, cw.shadowPicture, shadowTransform);
+                drawShadowWidth = (uint16_t)expectedShadowWidth;
+                drawShadowHeight = (uint16_t)expectedShadowHeight;
+                appliedShadowScale = YES;
+            }
+        }
+
+        uint16_t winW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
+        uint16_t winH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
+        [self compositeShadowStrips:cw connection:conn
+                            shadowX:shadowX shadowY:shadowY
+                       shadowWidth:drawShadowWidth shadowHeight:drawShadowHeight
+                             winX:screenX winY:screenY
+                             winW:winW winH:winH];
+
+        if (appliedShadowScale) {
+            xcb_render_transform_t resetShadow = URSIdentityTransform();
+            xcb_render_set_picture_transform(conn, cw.shadowPicture, resetShadow);
+        }
+    }
+#endif
+
     // No need to recursively paint children - IncludeInferiors handles that
     URS_PROFILE_END(paintWindow);
 }
 
 // Note: Child window painting is handled automatically by IncludeInferiors
 // No need for explicit recursive painting
+
+/* Freeze the window's current content (frame + client, via IncludeInferiors)
+ * into a fresh pixmap so a close animation can keep painting it after the app
+ * unmaps the client.  The picture created by getWindowPicture: is a live view
+ * of the frame drawable - once the client child unmaps, that picture loses the
+ * client content and the animation would render an empty frame.  Sets
+ * snapshotPixmap (freed in freeWindowData:) and replaces cw.picture with a
+ * picture on the snapshot. */
+- (void)captureCloseSnapshotForWindow:(URSCompositeWindow *)cw {
+    xcb_connection_t *conn = [self.connection connection];
+    if (!cw || cw.windowId == XCB_NONE || cw.depth == 0) {
+        return;
+    }
+
+    uint16_t snapW = cw.width + 2 * cw.borderWidth;
+    uint16_t snapH = cw.height + 2 * cw.borderWidth;
+    if (snapW == 0 || snapH == 0) {
+        return;
+    }
+
+    xcb_render_pictformat_t format = [self findVisualFormat:cw.visual];
+    if (format == XCB_NONE) {
+        format = [self findFormatForDepth:cw.depth];
+    }
+    if (format == XCB_NONE) {
+        return;
+    }
+
+    // Free any previous snapshot (a recycled frame must not leak the old pixmap).
+    if (cw.snapshotPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, cw.snapshotPixmap);
+        cw.snapshotPixmap = XCB_NONE;
+    }
+
+    cw.snapshotPixmap = xcb_generate_id(conn);
+    xcb_create_pixmap(conn, cw.depth, cw.snapshotPixmap, self.rootWindow, snapW, snapH);
+
+    // Composite the live window content (children included via IncludeInferiors)
+    // into the snapshot pixmap, then draw that onto the snapshot picture.  A
+    // plain copy_area from the frame drawable would only copy the frame's own
+    // pixels, omitting the client and titlebar children.
+    xcb_render_picture_t snapshotPicture = xcb_generate_id(conn);
+    xcb_render_create_picture(conn, snapshotPicture, cw.snapshotPixmap, format, 0, NULL);
+
+    xcb_render_picture_t livePicture = [self getWindowPicture:cw];
+    if (livePicture == XCB_NONE) {
+        xcb_render_free_picture(conn, snapshotPicture);
+        xcb_free_pixmap(conn, cw.snapshotPixmap);
+        cw.snapshotPixmap = XCB_NONE;
+        return;
+    }
+
+    xcb_render_composite(conn, XCB_RENDER_PICT_OP_SRC,
+                         livePicture, XCB_NONE, snapshotPicture,
+                         0, 0, 0, 0, 0, 0,
+                         snapW, snapH);
+    xcb_render_free_picture(conn, livePicture);
+    xcb_render_free_picture(conn, snapshotPicture);
+
+    // Replace the live picture with one on the frozen snapshot.
+    if (cw.picture != XCB_NONE) {
+        xcb_render_free_picture(conn, cw.picture);
+        cw.picture = XCB_NONE;
+    }
+    cw.picture = xcb_generate_id(conn);
+    uint32_t pa_mask = XCB_RENDER_CP_SUBWINDOW_MODE;
+    uint32_t pa_values[] = { XCB_SUBWINDOW_MODE_INCLUDE_INFERIORS };
+    xcb_render_create_picture(conn, cw.picture, cw.snapshotPixmap, format, pa_mask, pa_values);
+    const char *filter = "good";
+    xcb_render_set_picture_filter(conn, cw.picture, strlen(filter), filter, 0, NULL);
+    cw.pictureValid = YES;
+    cw.needsPictureCreation = NO;
+    cw.pictureWidth = snapW;
+    cw.pictureHeight = snapH;
+}
 
 - (xcb_render_picture_t)getWindowPicture:(URSCompositeWindow *)cw {
     xcb_connection_t *conn = [self.connection connection];
@@ -3364,6 +4495,14 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     xcb_connection_t *conn = [self.connection connection];
     if (!conn) return;
 
+    // addDamage: intersects every region against screenRegion, so a stale
+    // region would silently drop all damage outside the old screen bounds.
+    // Reset it; it is recreated lazily at the new size.
+    if (self.screenRegion != XCB_NONE) {
+        xcb_xfixes_destroy_region(conn, self.screenRegion);
+        self.screenRegion = XCB_NONE;
+    }
+
     // Recreate the backing pixmap and root buffer at the new size
     if (self.rootPixmap != XCB_NONE) {
         xcb_free_pixmap(conn, self.rootPixmap);
@@ -3415,6 +4554,14 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         self.presentPicture1 = xcb_generate_id(conn);
         xcb_render_create_picture(conn, self.presentPicture1,
                                   self.presentPixmap1, self.rootFormat, 0, NULL);
+        // Recreated flip pixmaps have undefined content: both buffers must
+        // be fully refreshed on their next presentations.
+        if (self.presentPendingDamage0 != XCB_NONE)
+            xcb_xfixes_destroy_region(conn, self.presentPendingDamage0);
+        if (self.presentPendingDamage1 != XCB_NONE)
+            xcb_xfixes_destroy_region(conn, self.presentPendingDamage1);
+        self.presentPendingDamage0 = [self getScreenRegion];
+        self.presentPendingDamage1 = [self getScreenRegion];
     }
 
     [self.connection flush];
@@ -3481,6 +4628,16 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             self.screenRegion = XCB_NONE;
         }
         
+        // Free desktop background resources
+        if (self.desktopBgPicture != XCB_NONE) {
+            xcb_render_free_picture(conn, self.desktopBgPicture);
+            self.desktopBgPicture = XCB_NONE;
+        }
+        if (self.desktopBgPixmap != XCB_NONE) {
+            xcb_free_pixmap(conn, self.desktopBgPixmap);
+            self.desktopBgPixmap = XCB_NONE;
+        }
+
         // Free shadow resources
         if (self.blackPicture != XCB_NONE) {
             xcb_render_free_picture(conn, self.blackPicture);
@@ -3531,6 +4688,15 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
         }
         
                 // Free present extension resources (flip chain)
+        if (self.presentPendingDamage0 != XCB_NONE) {
+            xcb_xfixes_destroy_region(conn, self.presentPendingDamage0);
+            self.presentPendingDamage0 = XCB_NONE;
+        }
+        if (self.presentPendingDamage1 != XCB_NONE) {
+            xcb_xfixes_destroy_region(conn, self.presentPendingDamage1);
+            self.presentPendingDamage1 = XCB_NONE;
+        }
+        self.presentInFlight = NO;
         if (self.presentPicture0 != XCB_NONE) {
             xcb_render_free_picture(conn, self.presentPicture0);
             self.presentPicture0 = XCB_NONE;

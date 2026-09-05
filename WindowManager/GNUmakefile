@@ -1,6 +1,7 @@
 PACKAGE_NAME = uroswm
 
 include $(GNUSTEP_MAKEFILES)/common.make
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
 WindowManager_INSTALL_DIR = /System/Library/CoreServices/Applications
 WindowManager_PRINCIPAL_CLASS = UROSWMApplication
 
@@ -30,6 +31,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \
 		URSProfiler.m \
+		URSImageUpload.m \
 		GSThemeTitleBar.m \
 		xcb/XCBConnection.m \
 		xcb/XCBWindow.m \
@@ -69,6 +71,7 @@ $(APP_NAME)_HEADER_FILES = \
 		URSSnapPreviewOverlay.h \
 		URSThemeIntegration.h \
 		URSProfiler.h \
+		URSImageUpload.h \
 		GSThemeTitleBar.h \
 		xcb/XCBConnection.h \
 		xcb/XCBWindow.h \
@@ -103,10 +106,9 @@ $(APP_NAME)_HEADER_FILES = \
 $(APP_NAME)_GUI_LIBS = \
 		$(shell pkg-config --libs xcb xcb-icccm xcb-xfixes xcb-aux xcb-cursor xcb-shape xcb-randr) \
 		-lxcb-util -lX11 -lXcomposite -lXext \
-		-lxcb-composite -lxcb-render -lxcb-damage -lxcb-shm -lxcb-present \
-		-ldispatch
+		-lxcb-composite -lxcb-render -lxcb-damage -lxcb-shm -lxcb-present
 
-ADDITIONAL_OBJCFLAGS = -std=c99 -g -O0 -fobjc-arc -fblocks -Wall -Wno-typedef-redefinition
+ADDITIONAL_OBJCFLAGS = -std=c99 -g -O0 -fobjc-arc -fblocks -Wall -Wno-typedef-redefinition -D_GNU_SOURCE
 
 # Profiling: build with  make PROFILE=1  to enable CPU instrumentation.
 # When enabled, a summary is printed every 10s and on SIGUSR1.
@@ -115,4 +117,5 @@ ADDITIONAL_OBJCFLAGS += -DURS_PROFILING=1
 endif
 
 include $(GNUSTEP_MAKEFILES)/application.make
+
 

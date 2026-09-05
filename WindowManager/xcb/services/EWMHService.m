@@ -308,7 +308,7 @@
         EWMHMoveresizeWindow,
         EWMHWMMoveresize,
         EWMHRestackWindow,
-        //EWMHRequestFrameExtents,
+        EWMHRequestFrameExtents,
         EWMHWMName,
         EWMHWMVisibleName,
         EWMHWMIconName,
@@ -434,6 +434,7 @@
         // Window Manager Protocols
         EWMHWMPing,
         EWMHWMSyncRequest,
+        EWMHRequestFrameExtents,
         
         // Client Window Properties
         EWMHWMName,
@@ -493,9 +494,21 @@
         EWMHWMActionClose,
         EWMHWMActionAbove,
         EWMHWMActionBelow,
+
+        // Gershwin window-animation protocol.  Advertising these atoms tells
+        // clients (Workspace) that this WM implements the spatial open/close
+        // animation protocol, so they set _WINDOW_BIRTH_ANIMATION and send
+        // _WINDOW_CLOSE_ANIMATION only when the WM actually consumes them.
+        @"_WINDOW_BIRTH_ANIMATION",
+        @"_WINDOW_CLOSE_ANIMATION",
     };
 
     NSArray *rootAtoms = [NSArray arrayWithObjects:rootProperties count:sizeof(rootProperties)/sizeof(NSString*)];
+
+    // Make sure the window-animation protocol atoms are interned so the
+    // _NET_SUPPORTED array below carries real atom ids (FnFromNSArrayAtomsToXcbAtomTArray
+    // only reads the cache; uncached names would map to 0).
+    [atomService cacheAtoms: @[ @"_WINDOW_BIRTH_ANIMATION", @"_WINDOW_CLOSE_ANIMATION" ]];
 
     xcb_atom_t atomsTransformed[[rootAtoms count]];
     FnFromNSArrayAtomsToXcbAtomTArray(rootAtoms, atomsTransformed, atomService);
@@ -603,7 +616,6 @@
 
     if (error)
     {
-        NSLog(@"X11 error %d (resource %u)", error->error_code, error->resource_id);
         free(error);
         return NULL;
     }
@@ -641,7 +653,8 @@
         }
     }
 
-    uint32_t cb = compositorActive ? 0 : 1;
+    CGFloat sf = [settings scaleFactor];
+    uint32_t cb = compositorActive ? 0 : (uint32_t)sf;
     uint32_t extents[4];
     extents[0] = cb;              // left border
     extents[1] = cb;              // right border
@@ -842,7 +855,23 @@
                 frame = nil;
                 titleBar = nil;
             }
+            else if ([aWindow isKindOfClass:[XCBFrame class]])
+            {
+                // Activation requests addressed to the frame id (what
+                // pagers resolve via WM_NAME) must raise the frame too;
+                // it has no parent frame, so the branch above never fired
+                // and the window was focused but left buried.
+                [(XCBFrame *)aWindow stackAbove];
+                [connection restackDockWindowsAbove];
+            }
         }
+
+        // Always publish the active window on the root, even when the window
+        // was already the topmost and we skipped the raise/focus above.
+        // Menu.app tracks _NET_ACTIVE_WINDOW to show the frontmost app's menu,
+        // and without this an automation request for an already-topmost window
+        // would leave the property pointing at a stale window.
+        [self updateNetActiveWindow:aWindow];
 
         return;
     }
@@ -872,26 +901,84 @@
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateAbove] ||
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateAbove])
         {
-            BOOL above = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow isAbove]);
+            // The keep-above flag is reported through _NET_WM_STATE on the
+            // CLIENT window, but the frame is what actually takes part in
+            // root-level stacking.  Messages may address either id, so both
+            // objects are resolved up front; without this, requests were
+            // either silently ignored (client addressed: only the client was
+            // restacked inside its frame) or left the window stuck above its
+            // peers forever (no restack on remove/toggle-off).
+            XCBWindow *topLevel = aWindow;
+            XCBWindow *stateOwner = aWindow;
 
-            if (above)
+            if ([aWindow isKindOfClass:[XCBFrame class]])
             {
-                [aWindow stackAbove];
-                [connection restackDockWindowsAbove];
+                topLevel = aWindow;
+                stateOwner = [(XCBFrame *)aWindow childWindowForKey:ClientWindow] ?: aWindow;
+            }
+            else if ([aWindow decorated] &&
+                     [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+            {
+                topLevel = [aWindow parentWindow];
             }
 
-            [self updateNetWmState:aWindow];
+            BOOL wasAbove = [stateOwner isAbove];
+            BOOL above = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && !wasAbove);
+
+            // Only restack when the state really changes; a redundant REMOVE
+            // on an ordinary window must not move anything.
+            if (above && !wasAbove)
+            {
+                [topLevel stackAbove];
+                [connection restackDockWindowsAbove];
+                [stateOwner setIsAbove:YES];
+                [stateOwner setIsBelow:NO];
+            }
+            else if (!above && wasAbove)
+            {
+                [connection lowerNormalWindowBeneathAllPeers:topLevel];
+                [stateOwner setIsAbove:NO];
+            }
+
+            [self updateNetWmState:stateOwner];
         }
 
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateBelow] ||
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateBelow])
         {
-            BOOL below = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow isBelow]);
+            XCBWindow *topLevel = aWindow;
+            XCBWindow *stateOwner = aWindow;
 
-            if (below)
-                [aWindow stackBelow];
+            if ([aWindow isKindOfClass:[XCBFrame class]])
+            {
+                topLevel = aWindow;
+                stateOwner = [(XCBFrame *)aWindow childWindowForKey:ClientWindow] ?: aWindow;
+            }
+            else if ([aWindow decorated] &&
+                     [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+            {
+                topLevel = [aWindow parentWindow];
+            }
 
-            [self updateNetWmState:aWindow];
+            BOOL wasBelow = [stateOwner isBelow];
+            BOOL below = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && !wasBelow);
+
+            if (below && !wasBelow)
+            {
+                // Keep-below stops at the desktop layer; a window must never
+                // disappear underneath it.
+                [connection lowerNormalWindowAboveDesktop:topLevel];
+                [stateOwner setIsBelow:YES];
+                [stateOwner setIsAbove:NO];
+            }
+            else if (!below && wasBelow)
+            {
+                // Removing keep-below returns the window to ordinary stacking.
+                [connection lowerNormalWindowBeneathAllPeers:topLevel];
+                [stateOwner setIsBelow:NO];
+            }
+
+            [self updateNetWmState:stateOwner];
         }
 
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateMaximizedHorz] ||
@@ -1204,23 +1291,39 @@
             screen = nil;
         }
 
-        /*** TODO: test and complete it, but shading support has really low priority ***/
+        /*** WindowShade (titlebar double-click uses the same XCBFrame methods) ***/
 
         if (firstProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateShaded] ||
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateShaded])
         {
-            BOOL shaded = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow shaded]);
+            // Same target resolution as the above/below states: the flag is
+            // reported on the CLIENT, but the frame is what gets resized.
+            XCBWindow *stateOwner = aWindow;
+            XCBFrame *topLevel = nil;
 
-            if (shaded)
+            if ([aWindow isKindOfClass:[XCBFrame class]])
             {
-                if ([aWindow isMinimized])
-                    return;
-
-                [aWindow shade];
-                [aWindow setShaded:shaded];
+                topLevel = (XCBFrame *)aWindow;
+                stateOwner = [topLevel childWindowForKey:ClientWindow] ?: aWindow;
+            }
+            else if ([aWindow decorated] &&
+                     [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+            {
+                topLevel = (XCBFrame *)[aWindow parentWindow];
             }
 
-            [self updateNetWmState:aWindow];
+            BOOL wasShaded = [stateOwner shaded];
+            BOOL shade = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && !wasShaded);
+
+            if (topLevel)
+            {
+                if (shade && !wasShaded)
+                    [topLevel shade];
+                else if (!shade && wasShaded)
+                    [topLevel unshade];
+            }
+
+            [self updateNetWmState:stateOwner];
         }
 
         /*** TODO: test ***/
@@ -1488,6 +1591,54 @@
                            withData:atomList];
 }
 
+/* Write _GNUSTEP_FRAME_OFFSETS on the root window.  The GNUstep backend
+ * reads this to determine how much frame decoration surrounds each window
+ * style, so the top offset MUST match the real titlebar height.  The
+ * property holds 15 styles x 4 (l,r,t,b) 16-bit values.  Missing one (or
+ * leaving a stale value from a previous titlebar height) makes the backend
+ * position content below the decoration, leaving a visible gap. */
+- (void) updateGNUStepFrameOffsetsForRootWindow:(XCBWindow *)aRootWindow
+{
+    if (!aRootWindow)
+        return;
+
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+
+    BOOL compositorActive = NO;
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        id<URSCompositingManaging> compositor = [compositorClass performSelector:@selector(sharedManager)];
+        if (compositor && [compositor respondsToSelector:@selector(compositingActive)] &&
+            [compositor compositingActive])
+        {
+            compositorActive = YES;
+        }
+    }
+
+    CGFloat sf = [settings scaleFactor];
+    uint16_t cb = compositorActive ? 0 : (uint16_t)sf;
+
+    /* 15 window styles x 4 offsets (l, r, t, b), 16-bit each, matching what
+     * the GNUstep backend reads (XA_CARDINAL, format 16, 60 items). */
+    uint16_t offsets[60];
+    for (int i = 0; i < 15; i++)
+    {
+        offsets[i*4 + 0] = cb;           /* left */
+        offsets[i*4 + 1] = cb;           /* right */
+        offsets[i*4 + 2] = titleHeight;  /* top (titlebar) */
+        offsets[i*4 + 3] = cb;           /* bottom */
+    }
+
+    [self changePropertiesForWindow:aRootWindow
+                           withMode:XCB_PROP_MODE_REPLACE
+                       withProperty:GNUStepFrameOffset
+                           withType:XCB_ATOM_CARDINAL
+                         withFormat:16 withDataLength:60
+                           withData:offsets];
+}
+
 #pragma mark - EWMH Client Window Properties
 
 /**
@@ -1705,13 +1856,13 @@
         return;
     }
     
-    xcb_atom_t *atoms = xcb_list_properties_atoms(propReply);
+    xcb_atom_t *clientAtoms = xcb_list_properties_atoms(propReply);
     int atomCount = xcb_list_properties_atoms_length(propReply);
     
     // Iterate through all properties on the client window
     for (int i = 0; i < atomCount; i++)
     {
-        xcb_atom_t propAtom = atoms[i];
+        xcb_atom_t propAtom = clientAtoms[i];
         
         // Get property name for blacklist check
         xcb_get_atom_name_cookie_t nameCookie = xcb_get_atom_name(conn, propAtom);

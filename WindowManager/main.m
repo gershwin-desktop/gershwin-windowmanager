@@ -20,16 +20,6 @@ static URSHybridEventHandler *globalEventHandler = nil;
 // Signal handler for clean shutdown
 static void signalHandler(int sig)
 {
-    const char *signame;
-    switch (sig) {
-        case SIGTERM: signame = "SIGTERM"; break;
-        case SIGINT: signame = "SIGINT"; break;
-        case SIGHUP: signame = "SIGHUP"; break;
-        default: signame = "UNKNOWN"; break;
-    }
-    
-    //NSLog(@"[WindowManager] Received signal %d (%s), initiating clean shutdown...", sig, signame);
-    
     if (globalEventHandler) {
         [globalEventHandler cleanupBeforeExit];
     }
@@ -91,6 +81,12 @@ int main(int argc, const char * argv[])
             }
         }
         
+        // Prevent GNUstep from loading user-defined AppKit bundles (DriveUI, OnDemand)
+        // into the WM process - they spin on idle sockets and waste CPU.
+        // Must be set before +sharedApplication triggers bundle loading.
+        [[NSUserDefaults standardUserDefaults] setObject:@[]
+                                                  forKey:@"GSAppKitUserBundles"];
+
         // Store compositing preference directly on the event handler
         UROSWMApplication *app = [UROSWMApplication sharedApplication];
         URSHybridEventHandler *hybridHandler = [[URSHybridEventHandler alloc] init];
@@ -110,12 +106,23 @@ int main(int argc, const char * argv[])
         [URSThemeIntegration initializeGSTheme];
         [URSThemeIntegration enableGSThemeTitleBars];
 
-        // Set titlebar height from theme (authoritative source: AppearanceMetrics.h in Eau theme)
+        // Read GSScaleFactor for HiDPI support (default 1.0)
+        {
+            CGFloat sf = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
+            if (sf == 0) {
+                sf = [[NSScreen mainScreen] backingScaleFactor];
+            }
+            if (sf == 0) sf = 1.0;
+            [settings setScaleFactor:sf];
+        }
+
+        // Set titlebar height from theme (authoritative source: AppearanceMetrics.h in Eau theme).
+        // The theme now returns pixel-scaled height (multiplied by GSScaleFactor internally).
         {
             GSTheme *theme = [GSTheme theme];
             uint16_t themeHeight = [theme respondsToSelector:@selector(titlebarHeight)]
                 ? (uint16_t)[theme titlebarHeight]
-                : 22;
+                : (uint16_t)(22 * [settings scaleFactor]);
             [settings setHeight:themeHeight];
         }
 
@@ -132,7 +139,11 @@ int main(int argc, const char * argv[])
         ursProfileInstallSignalHandler();
 
         // Start NSApplication main loop (replaces blocking XCB event loop)
-        [app run];
+        @try {
+            [app run];
+        } @catch (NSException *e) {
+            NSLog(@"[WM] Uncaught exception: %@ reason=%@", e.name, e.reason);
+        }
     }
     return 0;
 }

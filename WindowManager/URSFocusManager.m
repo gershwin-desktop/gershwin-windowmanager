@@ -25,9 +25,17 @@
         return;
     }
 
-    // Ensure AppKit global UI (including menu bar visuals) reflects the
-    // window that was just focused via X11 path.
-    [NSApp activateIgnoringOtherApps:YES];
+    // The WindowManager is not a user-facing application and must NOT take
+    // part in the cross-app activation protocol.  Calling
+    // -activateIgnoringOtherApps: here broadcasts a distributed
+    // NSApplicationDidBecomeActiveNotification (NSWorkspace's
+    // _GSWorkspaceCenter forwards it to the distributed notification center,
+    // gdnc).  Every other GNUstep app then resigns and broadcasts
+    // NSApplicationDidResignActiveNotification, and the resulting
+    // resign/become pair ping-pongs through gdnc forever - the "two active
+    // states never resolved" problem described further below.  The newly
+    // focused app activates itself through the backend as soon as it gains
+    // X11 input focus, so the WM has no reason to activate itself at all.
     [NSApp updateWindows];
 
     NSMenu *menu = [NSApp mainMenu];
@@ -166,6 +174,32 @@
 
     xcb_window_t windowId = [clientWindow window];
     NSNumber *windowIdNum = @(windowId);
+
+    // Don't steal focus from an already-focused window.  A window that maps
+    // while another is focused (e.g. a background app finishing startup, or
+    // an automation-driven launch) must not yank focus - that is what kept
+    // xterm's titlebar "active" while Processes stole focus a moment after
+    // activate had focused xterm, and the two active states never resolved.
+    // Exceptions: the newly mapped window IS the focused window, or it is a
+    // sibling of the focused one (same app - a dialog/alert/sheet of the
+    // frontmost app may still grab focus).
+    if (self.lastFocusedWindowId != XCB_NONE
+        && self.lastFocusedWindowId != windowId)
+      {
+        XCBWindow *focused = [self windowForClientWindowId:self.lastFocusedWindowId];
+        BOOL sameApp = NO;
+        if (focused && [focused respondsToSelector: @selector(window)])
+          {
+            EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+            uint32_t newPid = [ewmh netWMPidForWindow:clientWindow];
+            uint32_t curPid = [ewmh netWMPidForWindow:focused];
+            sameApp = (newPid != (uint32_t)-1 && newPid == curPid);
+          }
+        if (!sameApp)
+          {
+            return;
+          }
+      }
 
     //NSLog(@"[Focus] Focusing newly mapped window %u", windowId);
     if ([self isWindowFocusable:clientWindow allowDesktop:NO]) {

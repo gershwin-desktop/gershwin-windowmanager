@@ -18,23 +18,27 @@
 #import <enums/EIcccm.h>
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
-#import <dispatch/dispatch.h>
 #import <GNUstepGUI/GSTheme.h>
 #import <AppKit/NSColor.h>
 #import <AppKit/NSGraphics.h>
+#import <dirent.h>
+#import <unistd.h>
 
 #import <objc/message.h> // for dynamic messaging to compositor helper
 
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
 - (BOOL)compositingActive;
+- (void)updateBypassCompositorForWindow:(xcb_window_t)windowId;
+- (void)setCloseAnimating:(BOOL)closeAnimating forWindow:(xcb_window_t)windowId;
+- (void)captureCloseSnapshotNowForWindow:(xcb_window_t)windowId;
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                                          fromRect:(XCBRect)startRect
                                              toRect:(XCBRect)endRect;
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                                          fromRect:(XCBRect)startRect
                                              toRect:(XCBRect)endRect
-                                         completion:(dispatch_block_t)completion;
+                                         completion:(void (^)(void))completion;
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
@@ -43,13 +47,30 @@
                                                     toRect:(XCBRect)endRect
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade;
+- (void)animateWindowTransition:(xcb_window_t)windowId
+                                                fromRect:(XCBRect)startRect
+                                                    toRect:(XCBRect)endRect
+                                                duration:(NSTimeInterval)duration
+                                                        fade:(BOOL)fade
+                                                 completion:(void (^)(void))completion;
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration;
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration
+                 completion:(void (^)(void))completion;
 + (void)animateZoomRectsFromRect:(XCBRect)startRect
                           toRect:(XCBRect)endRect
                       connection:(XCBConnection *)connection
                           screen:(xcb_screen_t *)screen
                         duration:(NSTimeInterval)duration;
 - (void)setSkipShadowForWindow:(xcb_window_t)windowId;
+- (void)invalidateWindowPixmap:(xcb_window_t)windowId;
 - (void)markStackingOrderDirty;
+- (void)markStackingOrderDirtyForWindow:(xcb_window_t)windowId;
 @end
 
 // Find 32-bit ARGB visual for alpha transparency support
@@ -77,6 +98,104 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     return 0;
 }
+
+// Resolve a symlink to its actual path
+static NSString *resolveSymlink(NSString *linkPath) {
+    char buffer[PATH_MAX];
+    ssize_t len = readlink([linkPath fileSystemRepresentation], buffer, sizeof(buffer) - 1);
+    if (len != -1) {
+        buffer[len] = '\0';
+        return [NSString stringWithUTF8String:buffer];
+    }
+    return nil;
+}
+
+// Resolve an executable path to its canonical absolute path when possible.
+static NSString *canonicalPathForExecutable(NSString *path)
+{
+    char resolved[PATH_MAX];
+
+    if (!path) {
+        return nil;
+    }
+
+    if (realpath([path fileSystemRepresentation], resolved) != NULL) {
+        return [NSString stringWithUTF8String:resolved];
+    }
+
+    return path;
+}
+
+// Kill any other instances of this application after we've registered as WM
+static void killOtherInstances(void) {
+    NSString *currentPath = [[NSBundle mainBundle] executablePath];
+    if (!currentPath) {
+        return;
+    }
+
+    pid_t currentPID = getpid();
+    NSString *currentRealPath = canonicalPathForExecutable(currentPath);
+
+    DIR *procDir = opendir("/proc");
+    if (!procDir) {
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(procDir)) != NULL) {
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+            continue;
+        }
+
+        pid_t otherPID = (pid_t)strtol(entry->d_name, NULL, 10);
+        if (otherPID <= 0 || otherPID == currentPID) {
+            continue;
+        }
+
+        NSString *exePath = [NSString stringWithFormat:@"/proc/%d/exe", otherPID];
+        NSString *linkedPath = resolveSymlink(exePath);
+
+        if (!linkedPath) {
+            exePath = [NSString stringWithFormat:@"/proc/%d/file", otherPID];
+            linkedPath = resolveSymlink(exePath);
+        }
+
+        if (!linkedPath) {
+            continue;
+        }
+
+        NSString *otherRealPath = canonicalPathForExecutable(linkedPath);
+
+        if ([otherRealPath isEqualToString:currentRealPath]) {
+            NSLog(@"[WindowManager] Killing stale instance with PID %d", otherPID);
+            kill(otherPID, SIGTERM);
+            usleep(100000);
+
+            BOOL stillAlive = (kill(otherPID, 0) == 0);
+            int waitedMs = 100;
+            while (stillAlive && waitedMs < 2000) {
+                usleep(100000);
+                waitedMs += 100;
+                stillAlive = (kill(otherPID, 0) == 0);
+            }
+
+            if (stillAlive) {
+                NSLog(@"[WindowManager] Force killing stale instance with PID %d", otherPID);
+                kill(otherPID, SIGKILL);
+            }
+        }
+    }
+
+    closedir(procDir);
+}
+
+@interface XCBConnection ()
+{
+    // Last titlebar ButtonPress, for double-click (WindowShade toggle) detection.
+    xcb_timestamp_t _lastTitlebarClickTime;
+    xcb_window_t _lastTitlebarClickWindow;
+}
+@end
 
 @implementation XCBConnection
 
@@ -302,11 +421,43 @@ static XCBConnection *sharedInstance;
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
     NSString *dockType = [ewmhService EWMHWMWindowTypeDock];
 
+    // PID of the currently focused application.  Auxiliary and transient
+    // windows (dialogs, tooltips, notifications, menus) must stay above their
+    // OWN application's windows, but must never be raised above a window of a
+    // different application that the user just focused.  Without this guard a
+    // leftover tooltip/notification/dialog from an unfocused app would pop on
+    // top of the active window for no apparent reason whenever any window is
+    // raised.
+    uint32_t fpid = 0;
+    {
+        xcb_get_input_focus_cookie_t focC = xcb_get_input_focus(connection);
+        xcb_get_input_focus_reply_t *focR = xcb_get_input_focus_reply(connection, focC, NULL);
+        if (focR) {
+            XCBWindow *fw = [self windowForXCBId:focR->focus];
+            free(focR);
+            if (fw) fpid = [fw pid];
+        }
+    }
+
+    // Notify the compositor per restacked window: a raise only changes
+    // pixels inside the raised window's extents, so the compositor can
+    // repair just those instead of repainting the whole screen.
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    id<URSCompositingManaging> compositor = nil;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        compositor = [compositorClass performSelector:@selector(sharedManager)];
+    }
+
     for (XCBWindow *aWindow in [windowsMap allValues])
     {
         if ([[aWindow windowType] isEqualToString:dockType])
         {
             [aWindow stackAbove];
+            if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+            {
+                [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+            }
         }
     }
 
@@ -326,6 +477,10 @@ static XCBConnection *sharedInstance;
                 [wtype isEqualToString:dropdownMenuType])
             {
                 [aWindow stackAbove];
+                if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+                {
+                    [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+                }
             }
         }
     }
@@ -337,32 +492,34 @@ static XCBConnection *sharedInstance;
         {
             XCBFrame *fsFrame = (XCBFrame *)[aWindow parentWindow];
             [fsFrame stackAbove];
+            if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+            {
+                [compositor markStackingOrderDirtyForWindow:[fsFrame window]];
+            }
         }
     }
 
     // All undecorated (auxiliary) windows of the focused application must
     // stay above their parent after any restack operation.  Broad check:
     // any window with the same PID that is not itself an XCBFrame.
-    uint32_t fpid = 0;
-    xcb_get_input_focus_cookie_t focC = xcb_get_input_focus(connection);
-    xcb_get_input_focus_reply_t *focR = xcb_get_input_focus_reply(connection, focC, NULL);
-    if (focR) {
-        XCBWindow *fw = [self windowForXCBId:focR->focus];
-        free(focR);
-        if (fw) fpid = [fw pid];
-    }
     if (fpid > 0) {
         for (XCBWindow *aWindow in [windowsMap allValues]) {
             if ([aWindow pid] != fpid) continue;
             if ([aWindow isKindOfClass:[XCBFrame class]]) continue;
             if (![aWindow decorated]) {
                 [aWindow stackAbove];
+                if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+                {
+                    [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+                }
             }
         }
     }
 
     // Transient popup windows (dialog, tooltip, notification, utility, splash)
-    // must stay above the dock so they are always visible.
+    // must stay above the dock so they are always visible.  Only transients of
+    // the focused application are raised; transients belonging to other apps
+    // must not cover the window the user is working with.
     {
         NSSet<NSString *> *transientTypes = [NSSet setWithObjects:
             [ewmhService EWMHWMWindowTypeDialog],
@@ -373,25 +530,215 @@ static XCBConnection *sharedInstance;
             nil];
         [self flush];
         for (XCBWindow *aWindow in [windowsMap allValues]) {
-            if ([transientTypes containsObject:[aWindow windowType]]) {
-                [aWindow stackAbove];
+            if (![transientTypes containsObject:[aWindow windowType]]) continue;
+            if (fpid == 0 || [aWindow pid] != fpid) continue;
+            // Decorated transients already live inside a managed frame; there
+            // is nothing to raise at the root level.
+            if ([aWindow parentWindow] &&
+                [[aWindow parentWindow] isKindOfClass:[XCBFrame class]]) continue;
+            [aWindow stackAbove];
+            if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+            {
+                [compositor markStackingOrderDirtyForWindow:[aWindow window]];
             }
         }
         [self flush];
     }
 
-    // Notify compositor that stacking order has changed
-    Class compositorClass = NSClassFromString(@"URSCompositingManager");
-    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
-    {
-        id compositor = [compositorClass performSelector:@selector(sharedManager)];
-        if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirty)])
-        {
-            [compositor performSelector:@selector(markStackingOrderDirty)];
+    ewmhService = nil;
+}
+
+// Called from the compositor damage path.  A dedicated Damage object is
+// created on each managed client window (see URSCompositingManager
+// -addWindow:), so a DamageNotify whose drawable IS that client window is an
+// unambiguous, reliable signal that the application redrew its content.  The
+// X server only emits damage when the client actually draws, so no pixel
+// comparison is needed - the old snapshot-diff heuristic was fragile and
+// missed redraws (e.g. Terminal.app output).
+//
+// This fires regardless of visibility: while WindowShaded the client window is
+// deliberately left mapped and untouched, so it keeps drawing and its Damage
+// object keeps reporting - the frame's own (clipped) Damage would be silent,
+// which is exactly why the client-level object is what makes shaded-activity
+// detection work.
+- (void)noteClientContentDamage:(xcb_window_t)windowId
+                           area:(xcb_rectangle_t)area
+{
+    // Resolve the owning managed frame by walking the tracked window
+    // hierarchy (cheap, in-process - no X round-trips).  The drawable is
+    // either the frame itself or, for the client-level Damage object, the
+    // client child.
+    XCBWindow *cur = [self windowForXCBId:windowId];
+    XCBFrame *frame = nil;
+    for (int i = 0; i < 16 && cur; i++) {
+        if ([cur isKindOfClass:[XCBFrame class]]) {
+            frame = (XCBFrame *)cur;
+            break;
         }
+        cur = [cur parentWindow];
+    }
+    if (!frame)
+        return;
+
+    // Only the client window's own drawable counts as content activity.
+    // Titlebar/chrome redraws arrive on their own windows and are ignored.
+    XCBWindow *client = [frame childWindowForKey:ClientWindow];
+    if (!client || [client window] != windowId)
+        return;
+
+    [frame noteContentChanged];
+}
+
+
+// X window id of the LOWEST root-level child that belongs to another
+// managed, decorated, ordinary window (frame).  Desktops, docks, menus and
+// fullscreen frames never count as peers: removing keep-above must place a
+// window among its normal siblings, not below (or above) special layers.
+- (xcb_window_t)lowestManagedNormalFrameIdExcluding:(xcb_window_t)excludeWin
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    NSString *dockType = [ewmhService EWMHWMWindowTypeDock];
+    NSString *desktopType = [ewmhService EWMHWMWindowTypeDesktop];
+    NSString *menuType = [ewmhService EWMHWMWindowTypeMenu];
+    NSString *popupMenuType = [ewmhService EWMHWMWindowTypePopupMenu];
+    NSString *dropdownMenuType = [ewmhService EWMHWMWindowTypeDropdownMenu];
+
+    xcb_window_t rootWin = [[[[self screens] firstObject] rootWindow] window];
+    xcb_query_tree_cookie_t treeCookie = xcb_query_tree(connection, rootWin);
+    xcb_query_tree_reply_t *treeReply = xcb_query_tree_reply(connection, treeCookie, NULL);
+    xcb_window_t peer = 0;
+
+    if (treeReply)
+    {
+        int n = xcb_query_tree_children_length(treeReply);
+        xcb_window_t *kids = xcb_query_tree_children(treeReply);
+
+        // Children are listed bottom-most first, so scan from the start.
+        for (int i = 0; i < n && peer == 0; i++)
+        {
+            if (kids[i] == excludeWin)
+                continue;
+
+            XCBWindow *managed = [self windowForXCBId:kids[i]];
+            if (![managed isKindOfClass:[XCBFrame class]])
+                continue;
+
+            XCBWindow *client = [(XCBFrame *)managed childWindowForKey:ClientWindow];
+            if (!client)
+                continue;
+
+            // Fullscreen frames live above the dock layer, not in the
+            // normal sibling order.
+            if ([client fullScreen])
+                continue;
+
+            NSString *type = [client windowType];
+            if ([type isEqualToString:dockType] ||
+                [type isEqualToString:desktopType] ||
+                [type isEqualToString:menuType] ||
+                [type isEqualToString:popupMenuType] ||
+                [type isEqualToString:dropdownMenuType])
+                continue;
+
+            peer = kids[i];
+        }
+        free(treeReply);
     }
 
     ewmhService = nil;
+    return peer;
+}
+
+// Place aWindow directly beneath the LOWEST other managed normal frame,
+// i.e. beneath ALL of them, so a removed keep-above (_NET_WM_STATE_ABOVE)
+// or keep-below state returns the window to ordinary stacking instead of
+// leaving it stuck above (or at the very bottom of) its peers.
+- (void)lowerNormalWindowBeneathAllPeers:(XCBWindow *)aWindow
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    BOOL isDesktop = [aWindow windowType] &&
+        [[aWindow windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]];
+    ewmhService = nil;
+
+    if (!aWindow || isDesktop)
+        return;
+
+    uint32_t selfWin = [aWindow window];
+    xcb_window_t peer = [self lowestManagedNormalFrameIdExcluding:selfWin];
+
+    if (peer != 0)
+    {
+        uint32_t values[2] = { peer, XCB_STACK_MODE_BELOW };
+        xcb_configure_window(connection,
+                             selfWin,
+                             XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE,
+                             values);
+        [self flush];
+    }
+
+    [self restackDockWindowsAbove];
+}
+
+// Place aWindow directly above the lowest desktop window.  Used when
+// _NET_WM_STATE_BELOW is added: "below" must not push a window underneath
+// the desktop layer, where it would be invisible.
+//
+// The desktop surface cannot be looked up through windowsMap: Workspace's
+// desktop window is kept UNMANAGED (a plain root child), so its type must
+// be read straight off the tree.
+- (void)lowerNormalWindowAboveDesktop:(XCBWindow *)aWindow
+{
+    if (!aWindow)
+        return;
+
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self];
+    xcb_atom_t desktopTypeAtom = [atomService atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDesktop]];
+    xcb_atom_t typePropertyAtom = [atomService atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowType]];
+    ewmhService = nil;
+    atomService = nil;
+
+    xcb_window_t rootWin = [[[[self screens] firstObject] rootWindow] window];
+    xcb_query_tree_cookie_t treeCookie = xcb_query_tree(connection, rootWin);
+    xcb_query_tree_reply_t *treeReply = xcb_query_tree_reply(connection, treeCookie, NULL);
+
+    if (treeReply)
+    {
+        int n = xcb_query_tree_children_length(treeReply);
+        xcb_window_t *kids = xcb_query_tree_children(treeReply);
+        xcb_window_t desktopWin = 0;
+
+        // Bottom-most root child carrying _NET_WM_WINDOW_TYPE_DESKTOP,
+        // managed or not.
+        for (int i = 0; i < n && desktopWin == 0; i++)
+        {
+            xcb_get_property_cookie_t pc = xcb_get_property(connection,
+                                                            0,
+                                                            kids[i],
+                                                            typePropertyAtom,
+                                                            XCB_ATOM_ATOM,
+                                                            0,
+                                                            32);
+            xcb_get_property_reply_t *pr = xcb_get_property_reply(connection, pc, NULL);
+            if (pr && xcb_get_property_value_length(pr) > 0
+                && ((xcb_atom_t *)xcb_get_property_value(pr))[0] == desktopTypeAtom)
+                desktopWin = kids[i];
+            free(pr);
+        }
+        free(treeReply);
+
+        if (desktopWin != 0 && desktopWin != [aWindow window])
+        {
+            uint32_t values[2] = { desktopWin, XCB_STACK_MODE_ABOVE };
+            xcb_configure_window(connection,
+                                 [aWindow window],
+                                 XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE,
+                                 values);
+            [self flush];
+        }
+    }
+
+    [self restackDockWindowsAbove];
 }
 
 - (void)closeConnection
@@ -600,6 +947,65 @@ static XCBConnection *sharedInstance;
     window = nil;
 }
 
+/* Find the first free cascade position by scanning existing managed windows.
+ * Classic HIG: start at workarea origin + (22, 48), step 24px diagonally.
+ * Returns the first position that doesn't overlap any existing managed
+ * non-dialog/non-desktop frame. */
+- (XCBPoint)nextCascadePositionForSize:(XCBSize)size
+                             screenX:(int32_t)scrX
+                             screenY:(int32_t)scrY
+                        screenWidth:(uint32_t)scrW
+                       screenHeight:(uint32_t)scrH
+{
+    const int step = 22;
+    /* 22 = Eau theme menuBarHeight (Eau+Menu.m:33), 12 = padding.
+       Must match at runtime; Menu.app may not be launched yet. */
+    const int menuBarHeight = 22;
+    const int padY = menuBarHeight + 12;
+    const int padX = 12;
+    EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self];
+    NSString *dialogType = [ewmh EWMHWMWindowTypeDialog];
+    NSString *desktopType = [ewmh EWMHWMWindowTypeDesktop];
+    NSString *dockType = [ewmh EWMHWMWindowTypeDock];
+
+    /* Count managed non-special decorated windows to determine cascade offset. */
+    NSUInteger count = 0;
+    for (XCBWindow *w in [windowsMap allValues])
+    {
+        if (![w isKindOfClass:[XCBFrame class]])
+            continue;
+
+        XCBFrame *frame = (XCBFrame *)w;
+        XCBWindow *client = [frame childWindowForKey:ClientWindow];
+        if (client == nil || ![client decorated])
+            continue;
+
+        NSString *wType = [client windowType];
+        if (wType != nil)
+        {
+            if ([wType isEqualToString:dialogType] ||
+                [wType isEqualToString:desktopType] ||
+                [wType isEqualToString:dockType])
+                continue;
+        }
+
+        count++;
+    }
+
+    /* Classic HIG: step diagonally by count, wrapping when past screen.
+       No overlap avoidance - windows overlap but title bars stay visible. */
+    int16_t x = scrX + padX + (int)(count % 20) * step;
+    int16_t y = scrY + padY + (int)(count % 20) * step;
+
+    /* Wrap within raw screen bounds. */
+    if (x + (int32_t)size.width > scrX + (int32_t)scrW)
+        x = scrX + padX;
+    if (y + (int32_t)size.height > scrY + (int32_t)scrH)
+        y = scrY + padY;
+
+    return XCBMakePoint(x, y);
+}
+
 - (void)handleUnMapNotify:(xcb_unmap_notify_event_t *)anEvent
 {
     // If we were dragging when this window unmapped, cancel the drag.
@@ -659,6 +1065,40 @@ static XCBConnection *sharedInstance;
         free(reply);
     }
 
+    /* Close animation, unmap-driven: the Workspace close message (received
+     * before the app's orderOut) only PREPARES the animation - it captures a
+     * snapshot of the still-mapped window and stores the target rect.  The
+     * app's UnmapNotify IS the close event; it triggers the shrink/fade, like
+     * KDE fading every window on unmap.  Only windows carrying the close
+     * atom get the animation; everything else tears down immediately.
+     *
+     * Note: the frame itself is never unmapped by the app - only the client
+     * child is - so the frame stays viewable and in the paint list on its own;
+     * the compositor's closeAnimating keeps its picture alive. */
+    if (frameWindow && [frameWindow isKindOfClass:[XCBFrame class]])
+    {
+        XCBFrame *closeFrame = (XCBFrame *)frameWindow;
+        if (closeFrame.closeAnimating)
+        {
+            frameWindow = nil;
+            scr = nil;
+            ewmhService = nil;
+            rootWindow = nil;
+            return;
+        }
+        if (closeFrame.closeAnimationPrepared)
+        {
+            /* This UnmapNotify is the close event: start the shrink/fade now
+             * and defer the teardown until it completes. */
+            [self startCloseAnimationForFrame:closeFrame];
+            frameWindow = nil;
+            scr = nil;
+            ewmhService = nil;
+            rootWindow = nil;
+            return;
+        }
+    }
+
     if (frameWindow &&
         ![frameWindow isMinimized] &&
         [frameWindow window] != [[scr rootWindow] window])
@@ -716,7 +1156,14 @@ static XCBConnection *sharedInstance;
 
         [self reparentWindow:window toWindow:[[window queryTree] rootWindow] position:reparentPos];
         [window setDecorated:NO];
+        [self unregisterWindow:frameWindow];
+        XCBTitleBar *titleBar = (XCBTitleBar *) [frameWindow childWindowForKey:TitleBar];
+        if (titleBar != nil) {
+            [self unregisterWindow:titleBar];
+        }
+        [[frameWindow getChildren] removeAllObjects];
         [frameWindow destroy];
+        [self unregisterWindow:window];
     }
 
     window = nil;
@@ -724,6 +1171,164 @@ static XCBConnection *sharedInstance;
     scr = nil;
     ewmhService = nil;
     rootWindow = nil;
+}
+
+// Fade in and grow slightly for a window that was just mapped.
+// Desktop windows and windows adopted at startup are skipped.
+// If the client carries a _WINDOW_BIRTH_ANIMATION property (set by the
+// Workspace app) when it is mapped, animate from that source rect
+// instead of the default 90% grow, and honour its animation type
+// (type 1 = NoAnimation).  The property is present only when a folder was
+// opened; a re-mapped window without a fresh property (e.g. unminimized)
+// must not use it.
+- (void)animateMappedWindow:(xcb_window_t)frameId
+                   clientId:(xcb_window_t)clientId
+                 windowRect:(XCBRect)windowRect
+                  newWindow:(BOOL)newWindow
+{
+    if (self.adoptingExistingWindows)
+    {
+        return;
+    }
+
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (!compositorClass || ![compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        return;
+    }
+    id<URSCompositingManaging> compositor = [compositorClass performSelector:@selector(sharedManager)];
+    if (!compositor || ![compositor compositingActive])
+    {
+        return;
+    }
+
+    // Desktop windows must not animate; they always sit at the bottom.
+    XCBWindow *frame = [self windowForXCBId:frameId];
+    if (frame && [frame isKindOfClass:[XCBFrame class]])
+    {
+        XCBWindow *client = [(XCBFrame *)frame childWindowForKey:ClientWindow];
+        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+        if (client && [[client windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]])
+        {
+            return;
+        }
+    }
+
+    // Read _WINDOW_BIRTH_ANIMATION (source rect + animation type) from the
+    // client window, if present.  Layout: 9 x int32 = src(x,y,w,h), dst(x,y,w,h),
+    // animationType.  animationType == 1 means "NoAnimation" (suppress).
+    // Read the birth rect whenever a fresh _WINDOW_BIRTH_ANIMATION property is present.
+    // Workspace sets it only on a real folder open (never on unminimize), so
+    // gating on newWindow would make the birth animation fire only once per
+    // window: a reopened folder reuses the same X window id, and the re-map
+    // (newWindow:NO) would skip the freshly-set property.  The property is
+    // deleted below, so a plain re-map such as unminimize (no fresh property)
+    // still gets its own separate restore animation, not a birth.
+    XCBRect startRect = XCBInvalidRect;
+    NSTimeInterval duration = 0.22;
+    BOOL suppressAnimation = NO;
+    BOOL foundBirthAtom = NO;
+
+    if (clientId != XCB_NONE)
+    {
+        XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
+        xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_WINDOW_BIRTH_ANIMATION"];
+        if (birthAtom != XCB_NONE)
+        {
+            xcb_get_property_cookie_t cookie = xcb_get_property([self connection], 0, clientId,
+                                                                  birthAtom, XCB_ATOM_CARDINAL, 0,
+                                                                  WINDOW_BIRTH_NUM_INTS);
+            xcb_generic_error_t *birthError = NULL;
+            xcb_get_property_reply_t *reply = xcb_get_property_reply([self connection], cookie, &birthError);
+            if (birthError) { free(birthError); reply = NULL; }
+
+            if (reply)
+            {
+                int len = xcb_get_property_value_length(reply);
+                if (len == WINDOW_BIRTH_BYTE_LEN)
+                {
+                    foundBirthAtom = YES;
+                    int32_t *data = (int32_t *)xcb_get_property_value(reply);
+                    int32_t animType = data[WINDOW_BIRTH_IDX_ANIM_TYPE];
+
+                    if (animType == 1)
+                    {
+                        suppressAnimation = YES;
+                    }
+                    else
+                    {
+                        startRect.position.x = data[WINDOW_BIRTH_IDX_SRC_X];
+                        startRect.position.y = data[WINDOW_BIRTH_IDX_SRC_Y];
+                        startRect.size.width = data[WINDOW_BIRTH_IDX_SRC_W];
+                        startRect.size.height = data[WINDOW_BIRTH_IDX_SRC_H];
+                        // Expanding from a source rect is a more deliberate
+                        // effect than the default 90% grow.
+                        duration = 0.2;
+                    }
+                }
+                // Delete the property so it doesn't persist past birth.
+                xcb_delete_property([self connection], clientId, birthAtom);
+                free(reply);
+            }
+        }
+    }
+
+    if (suppressAnimation)
+    {
+        return;
+    }
+
+    // Workspace is the producer of the birth-atom protocol.  Every Workspace
+    // window that is mapped should carry a _WINDOW_BIRTH_ANIMATION property
+    // describing where it should grow from.  If a Workspace window is missing
+    // it, the producer side is broken (e.g. the atom was only written for
+    // icon-driven folder opens, or not written at all on non-Linux builds) -
+    // warn so it can be fixed.
+    if (!foundBirthAtom)
+    {
+        XCBWindow *frame = [self windowForXCBId:frameId];
+        XCBWindow *client = nil;
+        if (frame && [frame isKindOfClass:[XCBFrame class]]) {
+            client = [(XCBFrame *)frame childWindowForKey:ClientWindow];
+        }
+        if (client && [[client windowClass] count] >= 2)
+        {
+            NSString *cls = [[client windowClass] objectAtIndex:0];
+            if ([cls isEqualToString:@"Workspace"])
+            {
+                NSLog(@"WARNING: Workspace window 0x%x (\"%@\") mapped without "
+                      @"_WINDOW_BIRTH_ANIMATION atom - birth animation "
+                      @"source rect missing",
+                      clientId,
+                      [[client windowClass] objectAtIndex:1]);
+            }
+        }
+    }
+
+    // If no valid birth source rect, grow from 90% of the final size,
+    // anchored at the same center, while fading in from transparent.
+    if (!FnCheckXCBRectIsValid(startRect) ||
+        startRect.size.width <= 0 || startRect.size.height <= 0)
+    {
+        double w = fmax(1.0, (double)windowRect.size.width);
+        double h = fmax(1.0, (double)windowRect.size.height);
+        double cx = windowRect.position.x + w * 0.5;
+        double cy = windowRect.position.y + h * 0.5;
+        double startW = w * 0.9;
+        double startH = h * 0.9;
+        startRect = XCBMakeRect(
+            XCBMakePoint((int16_t)(cx - startW * 0.5),
+                         (int16_t)(cy - startH * 0.5)),
+            XCBMakeSize((uint16_t)startW, (uint16_t)startH));
+        duration = 0.11;
+    }
+
+
+    [compositor animateWindowTransition:frameId
+                               fromRect:startRect
+                                 toRect:windowRect
+                               duration:duration
+                                   fade:YES];
 }
 
 - (void)handleMapRequest:(xcb_map_request_event_t *)anEvent
@@ -903,75 +1508,6 @@ static XCBConnection *sharedInstance;
             {
                 // Normal map for non-minimized window
                 
-                // Check for window birth animation property
-                XCBRect animStartRect = XCBInvalidRect;
-                BOOL hasAnimationRect = NO;
-
-                xcb_connection_t *conn = [self connection];
-                xcb_window_t win = [window window];
-                XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
-
-                // Read _GSWORKSPACE_WINDOW_BIRTH property (format: 9 x int32)
-                // Per PRD.md section 8: source(x,y,w,h), target(x,y,w,h), animationType
-                xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_GSWORKSPACE_WINDOW_BIRTH"];
-
-                if (birthAtom != XCB_NONE) {
-                    xcb_get_property_cookie_t cookie = xcb_get_property(conn, 0, win, birthAtom, XCB_ATOM_CARDINAL, 0, GSWORKSPACE_WINDOW_BIRTH_NUM_INTS);
-                    xcb_generic_error_t *birthError = NULL;
-                    xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, cookie, &birthError);
-                    if (birthError)
-                    {
-                        free(birthError);
-                        reply = NULL;
-                    }
-
-                    if (reply) {
-                        int len = xcb_get_property_value_length(reply);
-                        if (len == GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN) {
-                            int32_t *data = (int32_t *)xcb_get_property_value(reply);
-
-                            // Parse source rect (index 0-3)
-                            animStartRect.position.x = data[GSWORKSPACE_BIRTH_IDX_SRC_X];
-                            animStartRect.position.y = data[GSWORKSPACE_BIRTH_IDX_SRC_Y];
-                            animStartRect.size.width = data[GSWORKSPACE_BIRTH_IDX_SRC_W];
-                            animStartRect.size.height = data[GSWORKSPACE_BIRTH_IDX_SRC_H];
-
-                            // Parse target rect (index 4-7) for validation
-                            XCBRect birthTargetRect;
-                            birthTargetRect.position.x = data[GSWORKSPACE_BIRTH_IDX_DST_X];
-                            birthTargetRect.position.y = data[GSWORKSPACE_BIRTH_IDX_DST_Y];
-                            birthTargetRect.size.width = data[GSWORKSPACE_BIRTH_IDX_DST_W];
-                            birthTargetRect.size.height = data[GSWORKSPACE_BIRTH_IDX_DST_H];
-
-                            // Parse animation type (index 8)
-                            int32_t animType = data[GSWORKSPACE_BIRTH_IDX_ANIM_TYPE];
-
-                            hasAnimationRect = YES;
-
-                            // Delete the property so it doesn't interfere with future operations
-                            xcb_delete_property(conn, win, birthAtom);
-
-                            //NSLog(@"[MapRequest] Found birth property: src={%d, %d, %hu, %hu} dst={%d, %d, %hu, %hu} type=%d",
-                            //      (int)animStartRect.position.x, (int)animStartRect.position.y,
-                            //      animStartRect.size.width, animStartRect.size.height,
-                            //      (int)birthTargetRect.position.x, (int)birthTargetRect.position.y,
-                            //      birthTargetRect.size.width, birthTargetRect.size.height,
-                            //      animType);
-
-                            // If animation type is NoAnimation, skip the animation
-                            if (animType == 1) {
-                                //NSLog(@"[MapRequest] Birth animation suppressed by animation type (NoAnimation)");
-                                hasAnimationRect = NO;
-                            }
-                        } else {
-                            //NSLog(@"[MapRequest] Birth property present but length=%d (expected %d)", len, GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN);
-                        }
-                        free(reply);
-                    } else {
-                        //NSLog(@"[MapRequest] No reply reading birth property");
-                    }
-                }
-                
                 // Map the window
                 [self mapWindow:frame];
 
@@ -981,73 +1517,23 @@ static XCBConnection *sharedInstance;
                 }
 
                 [self mapWindow:window];
-                
-                // Trigger animation if we have a start rect
-                if (hasAnimationRect) {
-                    Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                    
-                    if (compositorClass) {
-                        id<URSCompositingManaging> compositor = nil;
-                        if ([compositorClass respondsToSelector:@selector(sharedManager)]) {
-                            compositor = [compositorClass performSelector:@selector(sharedManager)];
-                        }
-                        
-                        if (compositor) {
-                            BOOL compActive = [compositor compositingActive];
-                            XCBRect endRect = [frame windowRect];
-                            //NSLog(@"[MapRequest] compositor present. compositingActive=%d, startRect={%d,%d,%hu,%hu}, endRect={%d,%d,%hu,%hu}",
-                            //      compActive,
-                            //      (int)animStartRect.position.x, (int)animStartRect.position.y, animStartRect.size.width, animStartRect.size.height,
-                            //      (int)endRect.position.x, (int)endRect.position.y, endRect.size.width, endRect.size.height);
 
-                            if (compActive) {
-                                // Compositing mode: use birth animation
-                                [compositor animateWindowTransition:[frame window]
-                                                           fromRect:animStartRect
-                                                             toRect:endRect
-                                                           duration:0.8
-                                                               fade:YES];
-                                //NSLog(@"[MapRequest] Composited birth animation for window %u", [frame window]);
-                            } else {
-                                // Non-compositing mode: use fast zoom rect animation
-                                XCBScreen *screenObj = [[self screens] objectAtIndex:0];
-                                xcb_screen_t *screen = [screenObj screen];
-                                
-                                [compositorClass animateZoomRectsFromRect:animStartRect
-                                                                  toRect:endRect
-                                                              connection:self
-                                                                  screen:screen
-                                                                duration:0.2];
-                                //NSLog(@"[MapRequest] Completed zoom rect window open animation");
-                            }
-                        } else {
-                            //NSLog(@"[MapRequest] No compositor available; falling back to non-compositing behavior");
-                            XCBRect endRect = [frame windowRect];
-                            XCBScreen *screenObj = [[self screens] objectAtIndex:0];
-                            xcb_screen_t *screen = [screenObj screen];
-
-                            Class compClassDynamic = NSClassFromString(@"URSCompositingManager");
-                            if (compClassDynamic && [compClassDynamic respondsToSelector:@selector(animateZoomRectsFromRect:toRect:connection:screen:duration:)]) {
-                                // Use objc_msgSend to call class method with multiple args
-                                void (*msg)(id, SEL, XCBRect, XCBRect, id, xcb_screen_t*, NSTimeInterval) = (void *)objc_msgSend;
-                                msg(compClassDynamic, @selector(animateZoomRectsFromRect:toRect:connection:screen:duration:), animStartRect, endRect, self, screen, 0.2);
-                                //NSLog(@"[MapRequest] Called dynamic animator animateZoomRectsFromRect");
-                            } else {
-                                //NSLog(@"[MapRequest] No animator class/method available for zoom rects");
-                            }
-                        }
-                    }
-                }
+                // Fade in + grow slightly whenever a window is (re)shown.
+                // This is a re-map (e.g. unminimize/unmaximize), so no birth rect.
+                [self animateMappedWindow:[frame window]
+                                 clientId:[window window]
+                               windowRect:[frame windowRect]
+                                newWindow:NO];
             }
         }
         else
         {
             //NSLog(@"[MapRequest] Window has no frame parent, mapping directly");
-            // No frame, consider applying golden ratio if it would otherwise be
-            // placed at the bottom-left (GNUstep default origin).
+            // No frame, reposition unless the application set the window's
+            // screen coordinates itself (WM_NORMAL_HINTS USPosition /
+            // PPosition) — those are mapped directly at the requested
+            // location.
             XCBRect winRect = [window windowRect];
-            int16_t reqX = winRect.position.x;
-            int16_t reqY = winRect.position.y;
             uint16_t reqW = winRect.size.width;
             uint16_t reqH = winRect.size.height;
 
@@ -1059,62 +1545,50 @@ static XCBConnection *sharedInstance;
             }
 
             if (screen) {
-                int16_t screenHeight = screen->height_in_pixels;
-                int16_t screenWidth = screen->width_in_pixels;
+                int16_t screenHeight = [screenObj height];
+                int16_t screenWidth = [screenObj width];
+                BOOL isFullWidth = (reqW >= screenWidth);
 
-                // Candidate for bottom-left default: near left edge and near bottom
-                if (reqX < 64 && abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100 && reqW < screenWidth) {
-                    xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
-                    if (hints) {
-                        // Respect user specified position (USPosition). If not present, apply placement.
-                        if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
-                            BOOL isDialog = NO;
-                            if ([window windowType] != nil && ewmhService != nil) {
-                                isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
-                            }
-
-                            int16_t xPos, yPos;
-                            if (isDialog) {
-                                // Dialogs: centered horizontally, golden ratio vertically
-                                xPos = (screenWidth - reqW) / 2;
-                                yPos = (screenHeight - reqH) * 0.381966;
-                                //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
-                            } else {
-                                // Other windows: 22 px from left, 44 px from top
-                                xPos = 22;
-                                yPos = 44;
-                                //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
-                            }
-                            XCBRect newRect = winRect;
-                            newRect.position.x = xPos;
-                            newRect.position.y = yPos;
-                            [window setWindowRect:newRect];
-                        }
-                        free(hints);
-                    } else {
-                        // No hints: assume default -> apply placement
-                        BOOL isDialog = NO;
-                        if ([window windowType] != nil && ewmhService != nil) {
-                            isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
-                        }
-
-                        int16_t xPos, yPos;
-                        if (isDialog) {
-                            // Dialogs: centered horizontally, golden ratio vertically
-                            xPos = (screenWidth - reqW) / 2;
-                            yPos = (screenHeight - reqH) * 0.381966;
-                            //NSLog(@"[MapRequest] Applying golden ratio placement (undecorated) for dialog window %u: %d, %d", [window window], xPos, yPos);
-                        } else {
-                            // Other windows: 22 px from left, 44 px from top
-                            xPos = 22;
-                            yPos = 44;
-                            //NSLog(@"[MapRequest] Applying default placement (undecorated) for window %u: %d, %d", [window window], xPos, yPos);
-                        }
-                        XCBRect newRect = winRect;
-                        newRect.position.x = xPos;
-                        newRect.position.y = yPos;
-                        [window setWindowRect:newRect];
+                BOOL appPositioned = [icccmService windowSpecifiesPosition:window];
+                if (appPositioned) {
+                    /* A requested position that hugs the screen's bottom-left
+                       corner (its bottom-left corner at (0,0) in the app's
+                       bottom-left-origin coordinate system) is what apps pass
+                       when they have no real position — cascade instead,
+                       unless the window spans the full width or height. */
+                    BOOL fullSpan = (reqW >= (uint16_t)screenWidth) ||
+                                    (reqH >= (uint16_t)screenHeight);
+                    if (winRect.position.x <= 0 &&
+                        ((int32_t)winRect.position.y + (int32_t)winRect.size.height) >= screenHeight &&
+                        !fullSpan) {
+                        appPositioned = NO;
                     }
+                }
+
+                if (!appPositioned && !isFullWidth) {
+                    BOOL isDialog = NO;
+                    if ([window windowType] != nil && ewmhService != nil) {
+                        isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
+                    }
+
+                    int16_t xPos, yPos;
+                    if (isDialog) {
+                        xPos = (screenWidth - reqW) / 2;
+                        yPos = (screenHeight - reqH) * 0.381966;
+                    } else {
+                        XCBSize winSize = {reqW, reqH};
+                        XCBPoint pos = [self nextCascadePositionForSize:winSize
+                                                              screenX:0
+                                                              screenY:0
+                                                         screenWidth:screenWidth
+                                                        screenHeight:screenHeight];
+                        xPos = pos.x;
+                        yPos = pos.y;
+                    }
+                    XCBRect newRect = winRect;
+                    newRect.position.x = xPos;
+                    newRect.position.y = yPos;
+                    [window setWindowRect:newRect];
                 }
             }
 
@@ -1182,9 +1656,7 @@ static XCBConnection *sharedInstance;
         }
 
         /** check allowed actions **/
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-          [window checkNetWMAllowedActions];
-        });
+        [window checkNetWMAllowedActions];
 
 
         //NSLog(@"Window Type %@ and window: %u", [ewmhService EWMHWMWindowType], [window window]);
@@ -1373,10 +1845,8 @@ static XCBConnection *sharedInstance;
                 return;
             }
 
-            if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeDialog]] ||
-                *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeTooltip]] ||
+            if (*atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeTooltip]] ||
                 *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeNotification]] ||
-                *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeUtility]] ||
                 *atom == [[ewmhService atomService] atomFromCachedAtomsWithKey:[ewmhService EWMHWMWindowTypeSplash]])
             {
                 [self registerWindow:window];
@@ -1397,6 +1867,11 @@ static XCBConnection *sharedInstance;
                 free(windowTypeReply);
                 return;
             }
+
+            /* Dialogs (e.g. confirmation panels) are real windows and must be
+               decorated with a title bar like any normal window.  Only the
+               main menu bar (DOCK), dropdown menus (MENU) and the transient
+               windows handled above stay undecorated. */
 
             atom = NULL; // atom points into windowTypeReply memory, cleared to avoid dangling pointer
             free(windowTypeReply);
@@ -1454,6 +1929,9 @@ static XCBConnection *sharedInstance;
         [window updateRectsFromGeometries];
         [window setFirstRun:YES];
         [window setWindowType:name];
+        // Record _NET_WM_PID so z-order/restack logic can tell which windows
+        // belong to the focused application (see restackDockWindowsAbove).
+        [window updatePid];
         // windowTypeReply already freed above if it was non-NULL
         name = nil;
     }
@@ -1485,6 +1963,16 @@ static XCBConnection *sharedInstance;
             [borderColor getRed:&r green:&g blue:&b alpha:&a];
             borderPixel = ((uint8_t)(r * 255) << 16) | ((uint8_t)(g * 255) << 8) | (uint8_t)(b * 255);
         }
+    }
+
+    // Without a compositor the only window outline is the frame background
+    // showing through the clientBorder strips around the client.  Theme stroke
+    // colors are tuned for composited drop shadows and can be near-invisible
+    // here, so pin the strips to a fixed mid grey that separates windows on
+    // any background.  With compositing on, drop shadows separate windows and
+    // the theme color applies.
+    if (!compositorActive) {
+        borderPixel = 0x808080;
     }
 
     XCBVisual *visual = nil;
@@ -1550,66 +2038,50 @@ static XCBConnection *sharedInstance;
     uint16_t reqW = [window windowRect].size.width;
     uint16_t reqH = [window windowRect].size.height;
 
+    // In compositor mode (drop shadows), the client sits flush inside the frame
+    // with no pixel-wide border strips, so cb=0.  Non-compositor uses cb=1.
+    // Scale cb by GSScaleFactor for HiDPI displays.
+    CGFloat cbScaleFactor = [[TitleBarSettingsService sharedInstance] scaleFactor];
+    int cb = compositorActive ? 0 : (int)cbScaleFactor;
+
     // Determine if we should reposition the window.
     // When adopting pre-existing windows at startup, never reposition them.
-    // Otherwise, reposition if the app hasn't explicitly specified a position.
-    // Dialogs get centered (golden ratio) placement; other windows get a
-    // top-left offset (22 px from left, 44 px from top).
+    // Otherwise, reposition unless the application set the window's screen
+    // coordinates itself (WM_NORMAL_HINTS USPosition / PPosition) — those
+    // are mapped directly at the requested location.  Dialogs get centered
+    // (golden ratio) placement; other windows get cascading.
     BOOL shouldReposition = NO;
     BOOL isDialog = NO;
 
     if (!self.adoptingExistingWindows) {
-        // Check _GNUSTEP_WM_ATTR: GNUstep apps set this on all their windows.
-        // If present, the app manages its own positioning (including centering
-        // of alert/modal panels) and the WM must not override it.
-        BOOL isGNUstepApp = NO;
-        if (ewmhService != nil) {
-            xcb_get_property_cookie_t gsCookie =
-                xcb_get_property([self connection], 0, [window window],
-                                 [[ewmhService atomService]
-                                    atomFromCachedAtomsWithKey: [ewmhService GNUStepWmAttr]],
-                                 XCB_GET_PROPERTY_TYPE_ANY, 0, sizeof(uint32_t) * 4);
-            xcb_generic_error_t *gsErr = NULL;
-            xcb_get_property_reply_t *gsReply =
-                xcb_get_property_reply([self connection], gsCookie, &gsErr);
-            if (gsReply != NULL) {
-                isGNUstepApp = (xcb_get_property_value_length(gsReply) > 0);
-                free(gsReply);
-            }
-            if (gsErr) free(gsErr);
+        // The WM is the authority on window placement.  Cascade all
+        // newly mapped non-dialog, non-desktop, non-fullscreen windows
+        // whose position the application did not set itself.
+        BOOL isFullWidth = NO;
+        if (screen && reqW >= [screen width]) {
+            isFullWidth = YES;
         }
 
-        if (!isGNUstepApp) {
-            BOOL isAtDefaultPos = NO;
-            if (screen) {
-                int16_t screenHeight = [screen screen]->height_in_pixels;
-                if (reqY < 64) {
-                    isAtDefaultPos = YES;
-                } else if (abs((int)reqY - ((int)screenHeight - (int)reqH)) < 100) {
-                    isAtDefaultPos = YES;
-                }
+        BOOL appPositioned = [icccmService windowSpecifiesPosition:window];
+        if (appPositioned && screen) {
+            /* A requested position whose window — frame included — would
+               hug the screen's bottom-left corner (its bottom-left corner
+               at (0,0) in the app's bottom-left-origin coordinate system)
+               is what apps pass when they have no real position.  Ignore
+               it and cascade instead, unless the window spans the full
+               width or height (docks, panels). */
+            int32_t screenW = [screen width];
+            int32_t screenH = [screen height];
+            int32_t frameHeight = (int32_t)reqH + titleHeight + cb;
+            int32_t frameBottom = (int32_t)reqY + frameHeight;
+            BOOL fullSpan = ((int32_t)reqW >= screenW) || (frameHeight >= screenH);
+            if (reqX <= 0 && frameBottom >= screenH && !fullSpan) {
+                appPositioned = NO;
             }
+        }
 
-            if (isAtDefaultPos) {
-                BOOL isFullWidth = NO;
-                if (screen && reqW >= [screen screen]->width_in_pixels) {
-                    isFullWidth = YES;
-                }
-
-                if (!isFullWidth) {
-                    xcb_size_hints_t *hints = [icccmService wmNormalHintsForWindow:window];
-                    if (hints) {
-                        if (!(hints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION)) {
-                            shouldReposition = YES;
-                        }
-                        free(hints);
-                    } else {
-                        shouldReposition = YES;
-                    }
-                }
-            }
-        } else {
-            //NSLog(@"[MapRequest] GNUstep window %u — skipping WM placement override", [window window]);
+        if (!appPositioned && !isFullWidth) {
+            shouldReposition = YES;
         }
     } else {
         //NSLog(@"[MapRequest] Skipping WM placement override for adopted window %u", [window window]);
@@ -1620,9 +2092,6 @@ static XCBConnection *sharedInstance;
         isDialog = [[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDialog]];
     }
 
-    // In compositor mode (drop shadows), the client sits flush inside the frame
-    // with no pixel-wide border strips, so cb=0.  Non-compositor uses cb=1.
-    int cb = compositorActive ? 0 : 1;
     // GNUstep's DPSplacewindow uses _XFrameToXHints which places the CLIENT at the
     // desired FRAME top-left position (not the content area position). So reqX/reqY
     // are already the frame coordinates — do NOT subtract cb or titleHeight.
@@ -1634,19 +2103,23 @@ static XCBConnection *sharedInstance;
     //NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
     if (shouldReposition && screen) {
-        uint16_t screenWidth = [screen screen]->width_in_pixels;
-        uint16_t screenHeight = [screen screen]->height_in_pixels;
+        uint16_t screenWidth = [screen width];
+        uint16_t screenHeight = [screen height];
 
         if (isDialog) {
-            // Dialogs: centered horizontally, golden ratio vertically
+            // Dialogs: centered horizontally, golden ratio vertically within raw screen
             xPos = (screenWidth - winWidth) / 2;
-            yPos = (screenHeight - winHeight) * 0.381966; // Golden ratio from top
-            //NSLog(@"[MapRequest] Applying golden ratio placement for dialog window %u: %d, %d", [window window], xPos, yPos);
+            yPos = (screenHeight - winHeight) * 0.381966;
         } else {
-            // Other windows: 22 px from left, 44 px from top
-            xPos = 22;
-            yPos = 44;
-            //NSLog(@"[MapRequest] Applying default placement for window %u: %d, %d", [window window], xPos, yPos);
+            // Classic HIG: step diagonally by window count.
+            XCBSize winSize = {winWidth, winHeight};
+            XCBPoint pos = [self nextCascadePositionForSize:winSize
+                                                  screenX:0
+                                                  screenY:0
+                                             screenWidth:screenWidth
+                                            screenHeight:screenHeight];
+            xPos = pos.x;
+            yPos = pos.y;
         }
 
         // Keep the client rect in root coordinates while frame uses xPos/yPos.
@@ -1732,6 +2205,16 @@ static XCBConnection *sharedInstance;
         [ewmhService updateNetWmState:window];
         if (!self.adoptingExistingWindows)
             [frame stackBelow];
+    } else if ([[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeUtility]]) {
+        [window setSkipTaskBar:YES];
+        [window setSkipPager:YES];
+        [window setIsAbove:YES];
+        [ewmhService updateNetWmState:window];
+        if (!self.adoptingExistingWindows) {
+            [frame stackAbove];
+            [frame raiseResizeHandle];
+            [self restackDockWindowsAbove];
+        }
     } else {
         if (!self.adoptingExistingWindows) {
             [frame stackAbove];
@@ -1744,78 +2227,12 @@ static XCBConnection *sharedInstance;
     [icccmService wmClassForWindow:window];
     [frame configureClient];
 
-    // Check for window birth animation property on newly-created windows.
-    // (Windows mapped a second time are handled earlier in this method.)
-    {
-        XCBAtomService *atomSvc = [XCBAtomService sharedInstanceWithConnection:self];
-        xcb_atom_t birthAtom = [atomSvc cacheAtom: @"_GSWORKSPACE_WINDOW_BIRTH"];
-
-        if (birthAtom != XCB_NONE) {
-            xcb_get_property_cookie_t cookie = xcb_get_property([self connection], 0, [window window],
-                                                                  birthAtom, XCB_ATOM_CARDINAL, 0, GSWORKSPACE_WINDOW_BIRTH_NUM_INTS);
-            xcb_generic_error_t *birthError = NULL;
-            xcb_get_property_reply_t *reply = xcb_get_property_reply([self connection], cookie, &birthError);
-            if (birthError) { free(birthError); reply = NULL; }
-
-            if (reply) {
-                int len = xcb_get_property_value_length(reply);
-                if (len == GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN) {
-                    int32_t *data = (int32_t *)xcb_get_property_value(reply);
-                    int32_t animType = data[8];
-
-                    if (animType != 1) {  // Not NoAnimation
-                        XCBRect animStartRect = XCBInvalidRect;
-                        animStartRect.position.x = data[0];
-                        animStartRect.position.y = data[1];
-                        animStartRect.size.width = data[2];
-                        animStartRect.size.height = data[3];
-
-                        // Delete so it doesn't persist past birth
-                        xcb_delete_property([self connection], [window window], birthAtom);
-
-                        //NSLog(@"[MapRequest] Birth rect on NEW window %u: src={%d,%d,%hu,%hu}",
-                        //      [window window],
-                        //      (int)animStartRect.position.x, (int)animStartRect.position.y,
-                        //      animStartRect.size.width, animStartRect.size.height);
-
-                        // Trigger compositor animation
-                        Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                        if (compositorClass) {
-                            id<URSCompositingManaging> compositor = nil;
-                            if ([compositorClass respondsToSelector:@selector(sharedManager)])
-                                compositor = [compositorClass performSelector:@selector(sharedManager)];
-
-                            if (compositor) {
-                                XCBRect endRect = [frame windowRect];
-                                if ([compositor compositingActive]) {
-                                    [compositor animateWindowTransition:[frame window]
-                                                               fromRect:animStartRect
-                                                                 toRect:endRect
-                                                               duration:0.8
-                                                                   fade:YES];
-                                    //NSLog(@"[MapRequest] Composited birth animation for NEW window %u", [frame window]);
-                                } else {
-                                    XCBScreen *screenObj = [[self screens] objectAtIndex:0];
-                                    xcb_screen_t *screen = [screenObj screen];
-                                    [compositorClass animateZoomRectsFromRect:animStartRect
-                                                                      toRect:endRect
-                                                                  connection:self
-                                                                      screen:screen
-                                                                    duration:0.2];
-                                    //NSLog(@"[MapRequest] Zoom-rect birth animation for NEW window %u", [frame window]);
-                                }
-                            }
-                        }
-                    } else {
-                        // NoAnimation — still delete the property
-                        xcb_delete_property([self connection], [window window], birthAtom);
-                        //NSLog(@"[MapRequest] Birth rect suppressed (NoAnimation) for NEW window %u", [window window]);
-                    }
-                }
-                free(reply);
-            }
-        }
-    }
+    // Fade in + grow slightly for the newly created window.
+    // Brand-new window: the birth rect may apply.
+    [self animateMappedWindow:[frame window]
+                     clientId:[window window]
+                   windowRect:[frame windowRect]
+                    newWindow:YES];
 
     [self setNeedFlush:YES];
     window = nil;
@@ -1835,6 +2252,160 @@ static XCBConnection *sharedInstance;
     [self unmapWindow:window];
     [self setNeedFlush:YES];
     window = nil;
+}
+
+/* Finder-style close animation protocol.  The Workspace app sends a
+ * _WINDOW_CLOSE_ANIMATION client message from windowWillClose: while the
+ * window is still mapped.  data32: [0]=animationType, [1..4]=target x,y,w,h
+ * (X11 root coords).  This only PREPARES the animation (captures a snapshot of
+ * the still-mapped window and stores the target rect on the frame); the app's
+ * subsequent orderOut / UnmapNotify triggers the actual shrink+fade.  The
+ * message name is vendor-neutral (like the _WINDOW_BIRTH_ANIMATION atoms) so
+ * the protocol could be standardized. */
+- (void)prepareCloseAnimationForClient:(xcb_window_t)clientId
+                          animationType:(int32_t)animationType
+                             targetRect:(XCBRect)targetRect
+{
+    XCBWindow *window = [self windowForXCBId:clientId];
+    if (window == nil) {
+        return;
+    }
+    XCBWindow *frame = nil;
+    if ([[window parentWindow] isKindOfClass:[XCBFrame class]]) {
+        frame = (XCBFrame *)[window parentWindow];
+    } else {
+        return;
+    }
+
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    id<URSCompositingManaging> compositor = nil;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        compositor = [compositorClass performSelector:@selector(sharedManager)];
+    }
+    if (!compositor || ![compositor compositingActive]) {
+        // No compositor: nothing to animate; the app's own orderOut closes it.
+        return;
+    }
+
+    XCBWindow *target = (XCBWindow *)frame;
+    /* The animation runs on the FRAME (the compositor only paints top-level
+     * windows), so the snapshot and closeAnimating flag must target the frame,
+     * not the client - the client is unmapped before the animation starts and
+     * its picture would be empty anyway. */
+
+    /* Store the parameters and mark the frame so the client's UnmapNotify
+     * (the close event) starts the animation. */
+    [(XCBFrame *)frame setCloseAnimationType: animationType];
+    [(XCBFrame *)frame setCloseAnimationTargetRect: targetRect];
+    [(XCBFrame *)frame setCloseAnimationPrepared: YES];
+
+    /* Capture a snapshot of the still-mapped window NOW (the client has not
+     * been ordered out yet) and keep the frame's picture alive across the
+     * client's unmap.  The frame itself is never unmapped by the app - only
+     * the client child is - so the frame stays in the paint list and viewable
+     * while closeAnimating. */
+    if ([compositor respondsToSelector:@selector(captureCloseSnapshotNowForWindow:)]) {
+        [compositor captureCloseSnapshotNowForWindow:[target window]];
+    }
+}
+
+/* Trigger the shrink/fade close animation for a frame whose close message was
+ * prepared.  Called from handleUnMapNotify: when the client's UnmapNotify
+ * arrives - that event IS the window close.  The animation completion performs
+ * the frame teardown (reparent the already-unmapped client to root, undecorate,
+ * unregister, destroy the frame). */
+- (void)startCloseAnimationForFrame:(XCBFrame *)frame
+{
+    if (frame == nil) {
+        return;
+    }
+    XCBRect targetRect = [frame closeAnimationTargetRect];
+    int32_t animationType = [frame closeAnimationType];
+
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    id<URSCompositingManaging> compositor = nil;
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        compositor = [compositorClass performSelector:@selector(sharedManager)];
+    }
+    if (!compositor || ![compositor compositingActive]) {
+        return;
+    }
+
+    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+    XCBWindow *titleBar = [frame childWindowForKey:TitleBar];
+    /* Animate the frame, not the client: the compositor only paints top-level
+     * windows (children of root), so animating the client's composite window
+     * would never advance (no paintWindow calls, no finishAnimation).  Birth
+     * and minimize animate the frame for the same reason. */
+    XCBWindow *target = (XCBWindow *)frame;
+    XCBRect startRect = [frame windowRect];
+
+    [frame setCloseAnimating: YES];
+    /* The frame itself is never unmapped by the app - only the client child
+     * is - so it stays in the paint list and viewable while closeAnimating. */
+    if ([compositor respondsToSelector:@selector(setCloseAnimating:forWindow:)]) {
+        [compositor setCloseAnimating:YES forWindow:[target window]];
+    }
+
+    void (^hideWindows)(void) = ^{
+        /* Full close teardown, mirroring handleUnMapNotify: - reparent the
+         * already-unmapped client to the root, undecorate, unregister, and
+         * destroy the frame. */
+        if (frame != nil) {
+            [frame setCloseAnimating: NO];
+        }
+        if (clientWindow != nil) {
+            XCBWindow *rootWin = [[clientWindow queryTree] rootWindow];
+            [self reparentWindow:clientWindow toWindow:rootWin position:[frame windowRect].position];
+            [clientWindow setDecorated:NO];
+        }
+        if (frame != nil) {
+            [self unregisterWindow:frame];
+            [[frame getChildren] removeAllObjects];
+            [frame destroy];
+        }
+        if (titleBar != nil) {
+            [self unregisterWindow:titleBar];
+        }
+        if (clientWindow != nil) {
+            [self unregisterWindow:clientWindow];
+        }
+    };
+
+    if (animationType == WindowCloseAnimationShrinkToIcon
+        && FnCheckXCBRectIsValid(targetRect)
+        && targetRect.size.width > 0 && targetRect.size.height > 0) {
+        // Shrink+fade toward the folder icon's current position.
+        if ([compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:completion:)]) {
+            [compositor animateWindowTransition:[target window]
+                                        fromRect:startRect
+                                          toRect:targetRect
+                                        duration:0.20
+                                            fade:YES
+                                      completion:hideWindows];
+            return;
+        }
+    } else {
+        // Plain fade when no valid target is available.
+        XCBRect centerRect = startRect;
+        centerRect.position.x += centerRect.size.width / 4;
+        centerRect.position.y += centerRect.size.height / 4;
+        centerRect.size.width /= 2;
+        centerRect.size.height /= 2;
+        if ([compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:completion:)]) {
+            [compositor animateWindowTransition:[target window]
+                                        fromRect:startRect
+                                          toRect:centerRect
+                                        duration:0.20
+                                            fade:YES
+                                      completion:hideWindows];
+            return;
+        }
+    }
+
+    // No usable compositor transition method - clear the flag so the normal
+    // unmap teardown proceeds.
+    [frame setCloseAnimating: NO];
 }
 
 - (void)handleConfigureWindowRequest:(xcb_configure_request_event_t *)anEvent
@@ -2092,6 +2663,14 @@ static XCBConnection *sharedInstance;
     if ([window isKindOfClass:[XCBFrame class]] && !dragState)
     {
         frame = (XCBFrame *)window;
+        if ([frame shaded])
+        {
+            // Vertical resize is disabled while shaded, so never show a
+            // resize cursor - the normal pointer is correct.
+            [frame showLeftPointerCursor];
+        }
+        else
+        {
         MousePosition  position = [frame mouseIsOnWindowBorderForEvent:anEvent];
 
         switch (position)
@@ -2152,6 +2731,7 @@ static XCBConnection *sharedInstance;
                 break;
         }
 
+        }
     }
     else if (!dragState)
     {
@@ -2259,29 +2839,47 @@ static XCBConnection *sharedInstance;
             XCBRect startRect = [frame windowRect];
             XCBRect restoredRect = [frame oldRect];  // Get saved pre-maximize rect
 
-            // Use programmatic resize that follows the same code path as manual resize
-            [frame programmaticResizeToRect:restoredRect];
-            [frame setFullScreen:NO];
-            [titleBar setFullScreen:NO];
-            [clientWindow setFullScreen:NO];
-            [frame setIsMaximized:NO];
-            [frame updateAllResizeZonePositions];
-            [frame applyRoundedCornersShapeMask];
+            // Animate the shrink from the current (maximized) rect to the
+            // restored rect while the window is still at its old position,
+            // then actually move/resize the real window when the animation
+            // finishes.  Resizing first would capture the picture at the new
+            // (restored) size and the animation would scale the wrong content.
+            Class compositorClass = NSClassFromString(@"URSCompositingManager");
+            id<URSCompositingManaging> compositor = nil;
+            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+                compositor = [compositorClass performSelector:@selector(sharedManager)];
+            }
 
-            {
-                Class compositorClass = NSClassFromString(@"URSCompositingManager");
-                id<URSCompositingManaging> compositor = nil;
-                if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                    compositor = [compositorClass performSelector:@selector(sharedManager)];
-                }
+            if (compositor && [compositor compositingActive] &&
+                [compositor respondsToSelector:@selector(animateWindowShrink:fromRect:toRect:duration:completion:)]) {
+                [compositor animateWindowShrink:[frame window]
+                                       fromRect:startRect
+                                         toRect:restoredRect
+                                       duration:0.22
+                                     completion:^{
+                    [frame programmaticResizeToRect:restoredRect];
+                    [frame setFullScreen:NO];
+                    [titleBar setFullScreen:NO];
+                    [clientWindow setFullScreen:NO];
+                    [frame setIsMaximized:NO];
+                    [frame updateAllResizeZonePositions];
+                    [frame applyRoundedCornersShapeMask];
+                    if (compositor && [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+                        [compositor invalidateWindowPixmap:[frame window]];
+                    }
+                }];
+            } else {
+                // Use programmatic resize that follows the same code path as manual resize
+                [frame programmaticResizeToRect:restoredRect];
+                [frame setFullScreen:NO];
+                [titleBar setFullScreen:NO];
+                [clientWindow setFullScreen:NO];
+                [frame setIsMaximized:NO];
+                [frame updateAllResizeZonePositions];
+                [frame applyRoundedCornersShapeMask];
                 if (compositor && [compositor compositingActive] &&
-                    [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
-                    XCBRect endRect = [frame windowRect];
-                    [compositor animateWindowTransition:[frame window]
-                                             fromRect:startRect
-                                               toRect:endRect
-                                             duration:0.22
-                                                 fade:NO];
+                    [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+                    [compositor invalidateWindowPixmap:[frame window]];
                 }
             }
 
@@ -2315,28 +2913,76 @@ static XCBConnection *sharedInstance;
         /*** Use programmatic resize that follows the same code path as manual resize ***/
         XCBRect targetRect = XCBMakeRect(XCBMakePoint(workareaX, workareaY),
                                           XCBMakeSize(workareaWidth, workareaHeight));
-        //NSLog(@"[Maximize] frame=%u startRect=(%d,%d %u x %u) target=(%d,%d %u x %u)", [frame window], (int)startRect.position.x, (int)startRect.position.y, (unsigned)startRect.size.width, (unsigned)startRect.size.height, (int)targetRect.position.x, (int)targetRect.position.y, (unsigned)targetRect.size.width, (unsigned)targetRect.size.height);
-        [frame programmaticResizeToRect:targetRect];
-        [frame setFullScreen:YES];
-        [frame setIsMaximized:YES];
-        [titleBar setFullScreen:YES];
-        [clientWindow setFullScreen:YES];
-        [titleBar drawTitleBarComponents];
 
-        {
-            Class compositorClass = NSClassFromString(@"URSCompositingManager");
-            id<URSCompositingManaging> compositor = nil;
-            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                compositor = [compositorClass performSelector:@selector(sharedManager)];
+        // Animate the grow from the current rect to the maximized rect while
+        // the window is still at its old position, then actually move/resize
+        // the real window when the animation finishes.
+        Class compositorClass = NSClassFromString(@"URSCompositingManager");
+        id<URSCompositingManaging> compositor = nil;
+        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+            compositor = [compositorClass performSelector:@selector(sharedManager)];
+        }
+
+        if (compositor && [compositor compositingActive] &&
+            [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:completion:)]) {
+            [compositor animateWindowTransition:[frame window]
+                                       fromRect:startRect
+                                         toRect:targetRect
+                                       duration:0.22
+                                           fade:NO
+                                     completion:^{
+                [frame programmaticResizeToRect:targetRect];
+                [frame setFullScreen:YES];
+                [frame setIsMaximized:YES];
+                [titleBar setFullScreen:YES];
+                [clientWindow setFullScreen:YES];
+                [titleBar drawTitleBarComponents];
+                [frame updateAllResizeZonePositions];
+                [frame applyRoundedCornersShapeMask];
+                if (compositor && [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+                    [compositor invalidateWindowPixmap:[frame window]];
+                }
+            }];
+        } else if (compositor && [compositor compositingActive] &&
+                   [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
+            // Fallback without a completion hook: animate, then resize shortly
+            // after so the picture is captured at the old rect.
+            [compositor animateWindowTransition:[frame window]
+                                       fromRect:startRect
+                                         toRect:targetRect
+                                       duration:0.22
+                                           fade:NO];
+            // Delay the maximize finish to let the compositor capture the old rect.
+            // Store captured state in a dictionary for the timer callback.
+            NSMutableDictionary *maximizeInfo = [NSMutableDictionary dictionaryWithDictionary:@{
+                @"frame": frame,
+                @"posX": @(targetRect.position.x),
+                @"posY": @(targetRect.position.y),
+                @"width": @(targetRect.size.width),
+                @"height": @(targetRect.size.height),
+                @"titleBar": titleBar,
+                @"clientWindow": clientWindow,
+            }];
+            if (compositor) {
+                maximizeInfo[@"compositor"] = compositor;
             }
+            [NSTimer scheduledTimerWithTimeInterval:0.22
+                                             target:self
+                                           selector:@selector(_performDelayedMaximize:)
+                                           userInfo:maximizeInfo
+                                            repeats:NO];
+        } else {
+            [frame programmaticResizeToRect:targetRect];
+            [frame setFullScreen:YES];
+            [frame setIsMaximized:YES];
+            [titleBar setFullScreen:YES];
+            [clientWindow setFullScreen:YES];
+            [titleBar drawTitleBarComponents];
+            [frame updateAllResizeZonePositions];
+            [frame applyRoundedCornersShapeMask];
             if (compositor && [compositor compositingActive] &&
-                [compositor respondsToSelector:@selector(animateWindowTransition:fromRect:toRect:duration:fade:)]) {
-                XCBRect endRect = [frame windowRect];
-                [compositor animateWindowTransition:[frame window]
-                                         fromRect:startRect
-                                           toRect:endRect
-                                         duration:0.22
-                                             fade:NO];
+                [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+                [compositor invalidateWindowPixmap:[frame window]];
             }
         }
         
@@ -2813,7 +3459,7 @@ static XCBConnection *sharedInstance;
     }
 }
 
-- (void) handlePropertyNotify:(xcb_property_notify_event_t*)anEvent
+ - (void) handlePropertyNotify:(xcb_property_notify_event_t*)anEvent
 {
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self];
 
@@ -2826,6 +3472,19 @@ static XCBConnection *sharedInstance;
         atomService = nil;
         name = nil;
         return;
+    }
+
+    if ([name isEqualToString:@"_NET_WM_BYPASS_COMPOSITOR"])
+    {
+        // The client may set this only after the window is mapped, so re-apply
+        // the compositor's redirect state when it changes.  See
+        // -updateBypassCompositorForWindow: in URSCompositingManager.
+        Class compositorClass = NSClassFromString(@"URSCompositingManager");
+        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+        {
+            id<URSCompositingManaging> compositor = [compositorClass performSelector:@selector(sharedManager)];
+            [compositor updateBypassCompositorForWindow:anEvent->window];
+        }
     }
 
     if ([name isEqualToString:@"WM_HINTS"])
@@ -3003,6 +3662,22 @@ static XCBConnection *sharedInstance;
         [self tileActiveWindowToZone:SnapZoneBottomRight];
         return;
     }
+    if ([atomMessageName isEqualToString:@"_WINDOW_CLOSE_ANIMATION"]) {
+        // data32: [0]=animationType, [1..4]=target x,y,w,h (X11 root coords).
+        int32_t animType = (anEvent->format == 32 && anEvent->type != XCB_NONE)
+                           ? (int32_t)anEvent->data.data32[0] : WindowCloseAnimationFade;
+        XCBRect targetRect = XCBInvalidRect;
+        if (anEvent->format == 32) {
+            targetRect = XCBMakeRect(XCBMakePoint(anEvent->data.data32[1],
+                                                   anEvent->data.data32[2]),
+                                      XCBMakeSize(anEvent->data.data32[3],
+                                                   anEvent->data.data32[4]));
+        }
+        [self prepareCloseAnimationForClient:anEvent->window
+                               animationType:animType
+                                  targetRect:targetRect];
+        return;
+    }
 
     XCBWindow *window;
     XCBTitleBar *titleBar;
@@ -3094,7 +3769,7 @@ static XCBConnection *sharedInstance;
                 // Defer unmap until the compositor finishes the minimize
                 // animation, so the window stays in the X server tree and
                 // the compositor's stacking order cache can find it.
-                dispatch_block_t hideWindows = ^{
+    void (^hideWindows)(void) = ^{
                     if (frame != nil) {
                         [frame setIconicState];
                         [frame setIsMinimized:YES];
@@ -3207,9 +3882,12 @@ static XCBConnection *sharedInstance;
         [[window parentWindow] isKindOfClass:[XCBFrame class]])
     {
         [window grabButton];
-        
+
         // Check if this is the resize handle - change cursor to resize cursor
         XCBFrame *frameWindow = (XCBFrame *)[window parentWindow];
+        // Resize is disabled while shaded, so never advertise a resize cursor.
+        if (![frameWindow shaded])
+        {
         XCBWindow *resizeHandle = [frameWindow childWindowForKey:ResizeHandle];
         if (resizeHandle && [resizeHandle window] == anEvent->event) {
             // Mouse entered the resize handle - show resize cursor
@@ -3245,9 +3923,22 @@ static XCBConnection *sharedInstance;
             [frameWindow showResizeCursorForPosition:BottomLeftCorner];
         else if (zoneGrowBox && [zoneGrowBox window] == anEvent->event)
             [frameWindow showResizeCursorForPosition:BottomRightCorner];
+        }
+
+        // Hover-peek: rolling a shaded window down at reduced opacity while
+        // the pointer rests on its titlebar (or a titlebar subwindow).
+        XCBTitleBar *titlebar = (XCBTitleBar *)[frameWindow childWindowForKey:TitleBar];
+        BOOL isTitlebar = titlebar &&
+            (anEvent->event == [titlebar window] ||
+             [[window parentWindow] isKindOfClass:[XCBTitleBar class]]);
+        // Ignore moves between the titlebar and its own subwindows (buttons):
+        // detail INFERIOR means the pointer went to a child, still on the
+        // titlebar decoration, so the peek must not start/stop.
+        if (isTitlebar && [frameWindow shaded] &&
+            anEvent->detail != XCB_NOTIFY_DETAIL_INFERIOR)
+            [frameWindow beginHoverPeek];
 
         frameWindow = nil;
-        resizeHandle = nil;
     }
 
     if ([window isKindOfClass:[XCBFrame class]])
@@ -3301,13 +3992,27 @@ static XCBConnection *sharedInstance;
     window = nil;
 }
 
-- (void)handleLeaveNotify:(xcb_leave_notify_event_t *)anEvent
-{
-    XCBWindow *window = [self windowForXCBId:anEvent->event];
+ - (void)handleLeaveNotify:(xcb_leave_notify_event_t *)anEvent
+ {
+     XCBWindow *window = [self windowForXCBId:anEvent->event];
 
-    if ([window isKindOfClass:[XCBWindow class]] &&
-        [[window parentWindow] isKindOfClass:[XCBFrame class]])
-    {
+     // Pointer left the whole window.  If a peek is still active (its titlebar
+     // LeaveNotify can be coalesced/lost during a frantic in-out), end it here
+     // so the window always rolls back up.  Otherwise re-arm hover-peek so a
+     // later hover (after a peek collapsed) can fire again.
+     if ([window isKindOfClass:[XCBFrame class]]) {
+         XCBFrame *frameWindow = (XCBFrame *)window;
+         if (frameWindow.peeking)
+             [frameWindow endHoverPeek];
+         else
+             frameWindow.hoverPeekArmed = YES;
+         window = nil;
+         return;
+     }
+
+     if ([window isKindOfClass:[XCBWindow class]] &&
+         [[window parentWindow] isKindOfClass:[XCBFrame class]])
+     {
         // Check if this is the resize handle - change cursor back to normal pointer
         XCBFrame *frameWindow = (XCBFrame *)[window parentWindow];
         XCBWindow *resizeHandle = [frameWindow childWindowForKey:ResizeHandle];
@@ -3339,6 +4044,18 @@ static XCBConnection *sharedInstance;
         {
             [frameWindow showLeftPointerCursor];
         }
+
+        // Hover-peek ends when the pointer leaves the titlebar decoration.
+        XCBTitleBar *titlebar = (XCBTitleBar *)[frameWindow childWindowForKey:TitleBar];
+        BOOL isTitlebar = titlebar &&
+            (anEvent->event == [titlebar window] ||
+             [[window parentWindow] isKindOfClass:[XCBTitleBar class]]);
+        // Only roll up when the pointer truly leaves the titlebar decoration
+        // (to the window body or off-window), not when it moves onto a
+        // titlebar button (detail INFERIOR = went to a child subwindow).
+        if (isTitlebar && frameWindow.peeking &&
+            anEvent->detail != XCB_NOTIFY_DETAIL_INFERIOR)
+            [frameWindow endHoverPeek];
 
         frameWindow = nil;
         resizeHandle = nil;
@@ -3537,6 +4254,11 @@ static XCBConnection *sharedInstance;
         [self unregisterWindow:[titleBarWindow minimizeWindowButton]];
         [self unregisterWindow:[titleBarWindow maximizeWindowButton]];
         [self unregisterWindow:titleBarWindow];
+        // Client is going away for good: remove it from the save-set so the
+        // X server no longer reparents it if this WM later dies.
+        if (clientWindow != nil) {
+            xcb_change_save_set([self connection], XCB_SET_MODE_DELETE, [clientWindow window]);
+        }
         [self unregisterWindow:clientWindow];
         [[frameWindow getChildren] removeAllObjects];
         [frameWindow destroy];
@@ -3635,13 +4357,12 @@ static XCBConnection *sharedInstance;
 - (void)drawAllTitleBarsExcept:(XCBTitleBar *)aTitileBar
 {
     // When GSTheme is active, titlebars are rendered exclusively through
-    // focus events (handleFocusChange:) — stacking order must NOT determine
-    // which titlebar appears active.  Short-circuit here so that isAbove
-    // (set to NO on all non-clicked windows below) never overrides the
-    // focus-driven GSTheme pixmap content.
-    if ([aTitileBar isGSThemeActive]) {
-        return;
-    }
+    // focus events (handleFocusChange:), so stacking order must NOT repaint
+    // them here.  We still must reset isAbove on every other titlebar so the
+    // active-decoration and spinner state stays consistent with focus, but we
+    // skip drawTitleBarComponents: that would overwrite the GSTheme pixmaps
+    // with the non-GSTheme look.
+    BOOL gsTheme = [aTitileBar isGSThemeActive];
 
     NSArray *windows = [windowsMap allValues];
     NSUInteger size = [windows count];
@@ -3672,7 +4393,9 @@ static XCBConnection *sharedInstance;
 
                 [titleBar setIsAbove:NO];
                 [titleBar setButtonsAbove:NO];
-                [titleBar drawTitleBarComponents];
+                if (!gsTheme) {
+                    [titleBar drawTitleBarComponents];
+                }
                 [frame setIsAbove:NO];
                 frame = nil;
             }
@@ -3729,16 +4452,35 @@ static XCBConnection *sharedInstance;
             BOOL acquired = [selector aquireWithWindow:selectionWindow replace:YES];
             if (!acquired)
             {
-                NSLog(@"[WM] Failed to acquire WM selection for replacement");
-                rootWindow = nil;
-                screen = nil;
-                selector = nil;
-                atomName = nil;
-                ewmhService = nil;
-                return NO;
+                NSLog(@"[WM] Failed to acquire WM selection; killing stale WM and retrying");
+                killOtherInstances();
+                [self flush];
+                usleep(500000);
+                acquired = [selector aquireWithWindow:selectionWindow replace:YES];
             }
 
-            attributesChanged = [rootWindow changeAttributes:values withMask:XCB_CW_EVENT_MASK checked:YES];
+            if (acquired)
+            {
+                // Wait for the old WM to handle SelectionClear and release
+                // SubstructRedirect (up to 2s total, polling every 100ms)
+                for (int i = 0; i < 20; i++)
+                {
+                    [self flush];
+                    usleep(100000);
+                    attributesChanged = [rootWindow changeAttributes:values withMask:XCB_CW_EVENT_MASK checked:YES];
+                    if (attributesChanged)
+                        break;
+                }
+            }
+
+            if (!attributesChanged)
+            {
+                NSLog(@"[WM] Replacement attempt failed; killing stale WM instance");
+                killOtherInstances();
+                [self flush];
+                usleep(500000);
+                attributesChanged = [rootWindow changeAttributes:values withMask:XCB_CW_EVENT_MASK checked:YES];
+            }
 
             if (!attributesChanged)
             {
@@ -3757,6 +4499,7 @@ static XCBConnection *sharedInstance;
         rootWindow = nil;
         screen = nil;
         ewmhService = nil;
+        killOtherInstances();
         return YES;
     }
 
@@ -3797,6 +4540,7 @@ static XCBConnection *sharedInstance;
     atomName = nil;
     ewmhService = nil;
 
+    killOtherInstances();
     return YES;
 }
 
@@ -4379,6 +5123,36 @@ static XCBConnection *sharedInstance;
     [frame applyRoundedCornersShapeMask];
 
     [self flush];
+}
+
+#pragma mark - Timer callbacks (replaces libdispatch usage)
+
+- (void)_performDelayedMaximize:(NSTimer *)timer
+{
+    NSDictionary *info = timer.userInfo;
+    XCBFrame *frame = info[@"frame"];
+    XCBTitleBar *titleBar = info[@"titleBar"];
+    XCBWindow *clientWindow = info[@"clientWindow"];
+    id<URSCompositingManaging> compositor = info[@"compositor"];
+    double px = [info[@"posX"] doubleValue];
+    double py = [info[@"posY"] doubleValue];
+    double w  = [info[@"width"] doubleValue];
+    double h  = [info[@"height"] doubleValue];
+    XCBPoint pt = {px, py};
+    XCBSize sz = {(uint16_t)w, (uint16_t)h};
+    XCBRect targetRect = XCBMakeRect(pt, sz);
+
+    [frame programmaticResizeToRect:targetRect];
+    [frame setFullScreen:YES];
+    [frame setIsMaximized:YES];
+    [titleBar setFullScreen:YES];
+    [clientWindow setFullScreen:YES];
+    [titleBar drawTitleBarComponents];
+    [frame updateAllResizeZonePositions];
+    [frame applyRoundedCornersShapeMask];
+    if (compositor && [compositor respondsToSelector:@selector(invalidateWindowPixmap:)]) {
+        [compositor invalidateWindowPixmap:[frame window]];
+    }
 }
 
 @end

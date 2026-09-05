@@ -37,6 +37,10 @@ typedef NS_ENUM(NSInteger, childrenMask)
     ResizeZoneGrowBox = 18  // Theme-defined grow box overlay
 };
 
+// Posted (rarely - only on the stale-to-active transition) when a frame's
+// client content started changing after being idle; wakes the spinner engine.
+extern NSString *URSWindowTitleContentChangedNotification;
+
 @interface XCBFrame : XCBWindow
 {
     NSMutableDictionary *children;
@@ -52,6 +56,17 @@ typedef NS_ENUM(NSInteger, childrenMask)
 @property (nonatomic, assign) BOOL bottomBorderClicked;
 @property (nonatomic, assign) BOOL leftBorderClicked;
 @property (nonatomic, assign) BOOL topBorderClicked;
+/* Set while a close animation is in flight; handleUnMapNotify: skips the
+ * frame teardown until the animation completes (so the compositor can render
+ * the shrink/fade over the still-mapped window). */
+@property (nonatomic, assign) BOOL closeAnimating;
+/* Close-animation parameters carried from the Workspace close message until
+ * the client's UnmapNotify starts the animation.  The message only prepares
+ * (captures a snapshot while the client is still mapped); the unmap event is
+ * what triggers the shrink/fade, mirroring how KDE fades windows on unmap. */
+@property (nonatomic, assign) int32_t closeAnimationType;
+@property (nonatomic, assign) XCBRect closeAnimationTargetRect;
+@property (nonatomic, assign) BOOL closeAnimationPrepared;
 @property (nonatomic, assign) XCBPoint offset;
 
 - (id) initWithClientWindow:(XCBWindow*) aClientWindow withConnection:(XCBConnection*) aConnection;
@@ -75,6 +90,44 @@ typedef NS_ENUM(NSInteger, childrenMask)
 - (void) applyRoundedCornersShapeMask;
 - (void) clearShapeMasks;
 - (void) programmaticResizeToRect:(XCBRect)targetRect;
+
+// WindowShade: roll the window up into its titlebar (double-click or
+// _NET_WM_STATE_SHADED).  The client stays mapped and untouched - it is only
+// clipped by the smaller parent frame.
+- (void) shade;
+- (void) unshade;
+- (void) toggleShade;
+@property (nonatomic, assign) BOOL shadeAnimationInProgress;
+// The single in-flight shade/unshade animation timer, so a new shade request
+// can cancel an ongoing one (interruptible hover-peek on rapid input).
+@property (nonatomic, strong) NSTimer *shadeAnimTimer;
+// Whether the activity spinner was already running when a hover-peek began.
+// A peek must never start the spinner from cold - it only keeps a spinner
+// that was already spinning (as if the window stayed rolled up).
+@property (nonatomic, assign) BOOL peekSpinnerWasActive;
+
+// Hover-peek: while the pointer rests on a shaded window's titlebar the
+// window rolls down at reduced opacity and rolls back up on leave.
+@property (nonatomic, assign) BOOL peeking;
+@property (nonatomic, assign) BOOL hoverPeekArmed;
+// Timestamp of the last peek end; a too-rapid re-enter (or the synthetic
+// EnterNotify from our own collapse) inside this window is ignored so a peek
+// can't re-fire and leave the window stuck open.
+@property (nonatomic, assign) NSTimeInterval peekEndTime;
+// Set when a peek ends and the roll-up animation is running; the window stays
+// at peek opacity (0.66) during the roll-up and is restored to opaque only
+// once the animation completes (see shade / finishShadeGeometryChange).
+@property (nonatomic, assign) BOOL restoreOpacityAfterShade;
+- (void) beginHoverPeek;
+- (void) endHoverPeek;
+- (void) setCompositeOpacity:(CGFloat)opacity;
+
+// Timestamp of the most recent damage on this frame's CLIENT content.
+// The client stays mapped and rendering while shaded, so this keeps
+// advancing even when the content is hidden - it drives the titlebar
+// activity spinner.  0 = never damaged since map.
+@property (nonatomic, assign) NSTimeInterval lastContentChange;
+- (void) noteContentChanged;
 
 // Theme-driven resize zones
 - (void) createResizeZonesFromTheme;

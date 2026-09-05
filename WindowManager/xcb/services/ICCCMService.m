@@ -87,13 +87,12 @@
                                                  delete:NO
                                                  length:UINT32_MAX];
 
-    xcb_atom_t* windowProtocols = xcb_get_property_value(reply);
-
     if (!reply)
     {
-        NSLog(@"Reply is NULL");
         return hasProtocol;
     }
+
+    xcb_atom_t* windowProtocols = xcb_get_property_value(reply);
 
     for(int i = 0; i < reply->length; i++)
     {
@@ -125,6 +124,30 @@
 
     connection = NULL;
     return sizeHints;
+}
+
+/* ICCCM WM_NORMAL_HINTS position flags.  USPosition means the position was
+   explicitly requested (user geometry string); PPosition means the program
+   chose one itself.  Both are app-set screen coordinates that the WM must
+   honor instead of overriding with cascade/centering placement.  Exception:
+   PPosition (0,0) is the classic "flag set but no real position" pattern of
+   lazy toolkits and is NOT treated as a request — otherwise every default
+   window would pile up in the top-left corner instead of cascading. */
+- (BOOL)windowSpecifiesPosition:(XCBWindow *)aWindow
+{
+    xcb_size_hints_t *sizeHints = [self wmNormalHintsForWindow:aWindow];
+    if (!sizeHints) {
+        return NO;
+    }
+
+    BOOL specifies = NO;
+    if (sizeHints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION) {
+        specifies = YES;
+    } else if (sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_POSITION) {
+        specifies = !(sizeHints->x == 0 && sizeHints->y == 0);
+    }
+    free(sizeHints);
+    return specifies;
 }
 
 - (void)updateWMNormalHints:(xcb_size_hints_t*)sizeHints forWindow:(XCBWindow*)aWindow

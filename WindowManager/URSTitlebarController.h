@@ -23,6 +23,23 @@
 @property (weak, nonatomic) URSFocusManager *focusManager;
 @property (weak, nonatomic) URSWorkareaManager *workareaManager;
 
+// Double-click detection on the empty titlebar area (WindowShade toggle).
+// Uses wall-clock time: X server timestamps are unreliable for this
+// (XTEST/synthetic input may repeat identical stamps).
+// Distance is checked in ROOT coordinates: titlebar-relative coordinates are
+// identical whenever the cursor grabs the same spot, which made two quick
+// consecutive window drags look like a double-click.
+@property (assign, nonatomic) NSTimeInterval lastTitleClickWallTime;
+@property (assign, nonatomic) xcb_timestamp_t lastTitleClickXTime;
+@property (assign, nonatomic) int16_t lastTitleClickRootX;
+@property (assign, nonatomic) int16_t lastTitleClickRootY;
+@property (strong, nonatomic) XCBFrame *lastTitleClickFrame;
+
+// Content-activity spinner engine: 10 fps tick that drives the titlebar
+// spinners of frames whose client content changed within the last 2 s.
+// Started on demand (first activity notification), stops when idle.
+@property (strong, nonatomic) NSTimer *spinnerTimer;
+
 - (instancetype)initWithConnection:(XCBConnection *)connection;
 
 // Button press handling (returns YES if the event was consumed)

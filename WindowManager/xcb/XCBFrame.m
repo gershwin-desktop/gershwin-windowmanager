@@ -10,7 +10,20 @@
 #import "Transformers.h"
 #import "ICCCMService.h"
 #import "TitleBarSettingsService.h"
+#import "EWMHService.h"
 #import "XCBTypes.h"
+
+// Loose typing for the compositor, mirroring the NSClassFromString lookup
+// the xcb layer uses everywhere; keeps URSCompositingManager.h out of here.
+// Call sites are guarded by respondsToSelector.
+@protocol URSCompositorShadeAPI <NSObject>
+- (void)invalidateWindowPixmap:(xcb_window_t)windowId;
+- (void)performRepairNow;
+- (void)setWindowOpacity:(CGFloat)opacity forWindow:(xcb_window_t)windowId;
+- (BOOL)windowIsAnimating:(xcb_window_t)windowId;
+@end
+
+
 #import <AppKit/NSScroller.h>
 #import <GNUstepGUI/GSTheme.h>
 
@@ -118,6 +131,9 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     self = [super initWithXCBWindow: xcbWindow andConnection:aConnection];
     [self setWindowRect:aRect];
     [self setOriginalRect:aRect];
+    // Hover-peek is armed from creation; it is temporarily disarmed while a
+    // peek collapses so the window doesn't immediately re-peek.
+    self.hoverPeekArmed = YES;
     /*** checks normal hints for client window **/
     [connection setIsWindowsMapUpdated:NO];
     
@@ -151,15 +167,16 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
     // Determine client border: 0 in compositor mode (drop shadow handles visual separation),
-    // 1 in non-compositor mode (thin strip of frame background as border).
+    // 1 (scaled by GSScaleFactor) in non-compositor mode (thin strip of frame background as border).
     // Stored on self for use in resize functions and queried again in decorateClientWindow.
     {
         Class compositorClass = NSClassFromString(@"URSCompositingManager");
-        int cb = 1;
+        CGFloat sf = [[TitleBarSettingsService sharedInstance] scaleFactor];
+        int cb = (int)sf;
         if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
             id manager = [compositorClass sharedManager];
             if ([manager respondsToSelector:@selector(compositingActive)])
-                cb = [manager compositingActive] ? 0 : 1;
+                cb = [manager compositingActive] ? 0 : (int)sf;
         }
         self.clientBorder = cb;
     }
@@ -251,8 +268,11 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     // Update clientBorder now that we have definitive compositor state.
     // 0 = compositor mode (client flush with frame; drop shadow separates visually)
-    // 1 = non-compositor mode (1px border on left, right, bottom)
-    self.clientBorder = compositorActive ? 0 : 1;
+    // scaled (1 * scaleFactor) = non-compositor mode (border on left, right, bottom)
+    {
+        CGFloat sf = [[TitleBarSettingsService sharedInstance] scaleFactor];
+        self.clientBorder = compositorActive ? 0 : (int)sf;
+    }
 
     uint32_t values[4];  // May need up to 4 values for ARGB (back_pixel, colormap, border_pixel, event_mask)
     uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
@@ -396,6 +416,15 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     [connection reparentWindow:clientWindow toWindow:self position:position];
+
+    // Add the client to the WM's save-set (ICCCM §4.1.4).  If the window
+    // manager connection dies — even via SIGKILL — the X server automatically
+    // reparents every save-set window back to the root (preserving stacking
+    // and position) before destroying the WM-created frame windows.  Without
+    // this, killing the WM destroys the frames AND the reparented clients with
+    // them, losing windows.
+    xcb_change_save_set([connection connection], XCB_SET_MODE_INSERT, [clientWindow window]);
+
     [connection mapWindow:clientWindow];
     uint32_t border[] = {0};
     // Ensure no borders on frame window
@@ -485,9 +514,49 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
 /*** performance while resizing pixel by pixel is critical so we do everything we can to improve it also if the message signature looks bad ***/
 
-- (void) resize:(xcb_motion_notify_event_t *)anEvent xcbConnection:(xcb_connection_t*)aXcbConnection
-{
+ // While shaded there is no vertical content to resize, so the resize
+ // cursor must not advertise a resize that is disabled.  Flip every
+ // resize-zone/handle window's cursor between its resize cursor and the
+ // normal left pointer according to the shade state.
+ - (void)updateResizeCursorForShadedState
+ {
+     BOOL shaded = [self shaded];
+
+     XCBWindow *handle = [self childWindowForKey:ResizeHandle];
+     if (handle) {
+         if (shaded) [handle showLeftPointerCursor];
+         else        [handle showResizeCursorForPosition:BottomRightCorner];
+     }
+
+     struct { childrenMask key; MousePosition pos; } map[] = {
+         { ResizeZoneN,    TopBorder },
+         { ResizeZoneS,    BottomBorder },
+         { ResizeZoneE,    RightBorder },
+         { ResizeZoneW,    LeftBorder },
+         { ResizeZoneNE,   TopRightCorner },
+         { ResizeZoneNW,   TopLeftCorner },
+         { ResizeZoneSE,   BottomRightCorner },
+         { ResizeZoneSW,   BottomLeftCorner },
+         { ResizeZoneGrowBox, BottomRightCorner }
+     };
+     for (int i = 0; i < (int)(sizeof(map) / sizeof(map[0])); i++) {
+         XCBWindow *zone = [self childWindowForKey:map[i].key];
+         if (!zone)
+             continue;
+         if (shaded) [zone showLeftPointerCursor];
+         else        [zone showResizeCursorForPosition:map[i].pos];
+     }
+ }
+
+ - (void) resize:(xcb_motion_notify_event_t *)anEvent xcbConnection:(xcb_connection_t*)aXcbConnection
+ {
     int clientBorder = self.clientBorder;
+
+    /* Always use the current service titlebar height so interactive resizes
+     * match the rendered titlebar even after a GSScaleFactor change (which
+     * re-frames windows but must not leave the cached titleHeight stale). */
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
 
     /*** width ***/
 
@@ -502,17 +571,21 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
 
-    /** height **/
+    /** height - disabled while shaded (the frame is clipped to the
+     *  titlebar, so there is no vertical content to resize; corners keep
+     *  their horizontal component below). **/
 
     if (bottomBorderClicked && !rightBorderClicked && !leftBorderClicked)
     {
-        resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
     }
 
 
     if (topBorderClicked && !rightBorderClicked && !leftBorderClicked && !bottomBorderClicked)
     {
-        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
     }
 
 
@@ -521,27 +594,33 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     // SE corner (bottom-right)
     if (rightBorderClicked && bottomBorderClicked && !leftBorderClicked && !topBorderClicked)
     {
-        resizeFromAngleForEvent(anEvent, aXcbConnection, self, minWidthHint, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromAngleForEvent(anEvent, aXcbConnection, self, minWidthHint, minHeightHint, titleHeight, clientBorder);
+        else
+            resizeFromRightForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
     // NW corner (top-left) - combine top and left resizes
     if (topBorderClicked && leftBorderClicked && !rightBorderClicked && !bottomBorderClicked)
     {
-        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
         resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
     // NE corner (top-right) - combine top and right resizes
     if (topBorderClicked && rightBorderClicked && !leftBorderClicked && !bottomBorderClicked)
     {
-        resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromTopForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
         resizeFromRightForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
     // SW corner (bottom-left) - combine bottom and left resizes
     if (bottomBorderClicked && leftBorderClicked && !rightBorderClicked && !topBorderClicked)
     {
-        resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
+        if (![self shaded])
+            resizeFromBottomForEvent(anEvent, aXcbConnection, self, minHeightHint, titleHeight, clientBorder);
         resizeFromLeftForEvent(anEvent, aXcbConnection, self, minWidthHint, clientBorder);
     }
 
@@ -970,10 +1049,11 @@ void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
     [clientWindow setWindowRect:clientRect];
     [clientWindow setOriginalRect:clientRect];
 
-    // Send synthetic ConfigureNotify to client
+    // Send synthetic ConfigureNotify to client.  Coordinates must be in
+    // ROOT space (ICCCM), i.e. frame origin + client offset inside the frame.
     sendSyntheticConfigureNotify(connection, clientWindow,
-                                  cb,
-                                  [frame titleHeight],
+                                  frameRect.position.x + cb,
+                                  frameRect.position.y + [frame titleHeight],
                                   clientRect.size.width,
                                   clientRect.size.height);
 
@@ -1356,11 +1436,33 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 {
     xcb_configure_notify_event_t event;
     XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
-    // Use cached in-memory rects — no blocking xcb_get_geometry round-trip.
+    // Use the frame's cached rect to derive the client geometry instead of the
+    // client's own cache: configureForEvent: resizes the client (and flushes)
+    // but never updates the client's cached rect, so reading the stale cache
+    // here would send a synthetic ConfigureNotify describing the pre-resize
+    // size.  The client (GNUstep) processes that as the final geometry and its
+    // tracked frame ends up desynced from the real window.
     XCBRect rect = [self windowRect];
-    XCBRect clientRect = [clientWindow windowRect];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+
+    // While shaded the frame is clipped to the titlebar, so its cached rect
+    // height is tiny.  Reporting that clipped height to the client would make
+    // the application (GNUstep) shrink the client to ~0 and stop drawing;
+    // on unshade no fresh ConfigureNotify is sent, leaving the window blank
+    // (only the frame and shadow render).  The client content never actually
+    // shrinks when shaded - only the parent clip changes - so report the
+    // client's full, unshaded geometry (saved as oldRect at shade time).
+    uint16_t frameHeight = rect.size.height;
+    if ([self shaded]) {
+        XCBRect full = [self oldRect];
+        if (FnCheckXCBRectIsValid(full) && full.size.height > frameHeight)
+            frameHeight = full.size.height;
+    }
+
+    XCBRect clientRect = XCBMakeRect(XCBMakePoint(self.clientBorder, height),
+                                     XCBMakeSize(rect.size.width - 2 * self.clientBorder,
+                                                 frameHeight - height - self.clientBorder));
 
     /*** synthetic event: coordinates must be in root space. ***/
 
@@ -1464,14 +1566,440 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     [clientWindow setWindowRect:clientRect];
     [clientWindow setOriginalRect:clientRect];
 
-    // Send synthetic ConfigureNotify with the calculated dimensions
+    // Send synthetic ConfigureNotify with the calculated dimensions.
+    // Coordinates must be in ROOT space (ICCCM): the client's absolute
+    // position is the frame's origin plus its offset inside the frame.
+    // Using client-relative coords here makes GNUstep believe the window
+    // sits near the top-left of the screen (it interprets synthetic event
+    // coords as root coords), and it would then remember that wrong frame
+    // and restore it after close+reopen.
     sendSyntheticConfigureNotify(conn, clientWindow,
-                                  clientRect.position.x,
-                                  clientRect.position.y,
+                                  targetRect.position.x + clientRect.position.x,
+                                  targetRect.position.y + clientRect.position.y,
                                   clientRect.size.width,
                                   clientRect.size.height);
 
     settings = nil;
+}
+
+#pragma mark - WindowShade
+
+// Height of a shaded frame: titlebar plus the bottom border strip so the
+// rounded bottom edge stays visible.
+- (uint16_t)shadedFrameHeight
+{
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    settings = nil;
+    return titleHgt + (uint16_t)self.clientBorder;
+}
+
+// Real geometry change for shading/unshading.  The client window is
+// deliberately left mapped and untouched: X clips children to their parent,
+// so the smaller frame simply hides it.  The client receives no
+// ConfigureNotify and no Expose - unshading is a pure parent resize with
+// zero redraw round-trips on the application side.
+//
+// Light variant used for every animation step: only the resize itself plus
+// caches and the corner shape mask.
+- (void)applyFrameHeight:(uint16_t)newHeight
+{
+    xcb_connection_t *conn = [connection connection];
+    XCBRect rect = [self windowRect];
+
+    uint32_t values[2] = {rect.size.width, newHeight};
+    xcb_configure_window(conn,
+                         [self window],
+                         XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
+                         values);
+
+    XCBRect newRect = XCBMakeRect(rect.position, XCBMakeSize(rect.size.width, newHeight));
+    [self setWindowRect:newRect];
+    [self setOriginalRect:newRect];
+
+    [self applyRoundedCornersShapeMask];
+
+    xcb_flush(conn);
+}
+
+// Expensive tail work done once when a shade animation finishes: resize
+// zones back in place and tell the compositor to re-acquire the pixmap.
+ - (void)finishShadeGeometryChange
+ {
+     [self updateAllResizeZonePositions];
+
+     // A peek roll-up just finished: the window is now fully collapsed, so
+     // restore it to opaque.  (Kept translucent during the animation above.)
+     if (self.restoreOpacityAfterShade)
+     {
+         [self setCompositeOpacity:1.0];
+         self.restoreOpacityAfterShade = NO;
+     }
+
+     Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        id<URSCompositorShadeAPI> compositor = [compositorClass performSelector:@selector(sharedManager)];
+        if (compositor && [compositor respondsToSelector:@selector(invalidateWindowPixmap:)])
+            [compositor invalidateWindowPixmap:[self window]];
+        if (compositor && [compositor respondsToSelector:@selector(performRepairNow)])
+            [compositor performRepairNow];
+    }
+}
+
+// Roller-blind animation: step the REAL frame height through intermediate
+// sizes so the untouched client content slides up under the titlebar (shade)
+// or back down out of it (unshade).  Purely vertical by construction - X
+// clipping does the visual work, no scaling involved - and the exact same
+// motion plays in reverse for unshade.  Driven by an NSTimer on the main
+// runloop (the same loop that already runs the scale-factor timer).
+ - (void)animateFrameHeightFrom:(uint16_t)fromHeight toHeight:(uint16_t)toHeight
+ {
+     self.shadeAnimationInProgress = YES;
+
+     // Interrupt any animation already in flight: a hover-peek can fire while
+     // a roll-up/roll-down is still running, and we must seamlessly reverse it
+     // instead of being dropped by a "busy" guard.
+     if (self.shadeAnimTimer)
+     {
+         [self.shadeAnimTimer invalidate];
+         self.shadeAnimTimer = nil;
+     }
+
+     if (fromHeight == toHeight)
+     {
+         self.shadeAnimationInProgress = NO;
+         return;
+     }
+
+     __weak XCBFrame *weakSelf = self;
+     NSTimeInterval duration = 0.22;
+     NSDate *startDate = [NSDate date];
+
+     NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+                                             repeats:YES
+                                               block:^(NSTimer *stepTimer) {
+         XCBFrame *strongSelf = weakSelf;
+         if (!strongSelf)
+         {
+             [stepTimer invalidate];
+             return;
+         }
+
+         NSTimeInterval elapsed = -1.0 * [startDate timeIntervalSinceNow];
+         CGFloat progress = elapsed / duration;
+         if (progress < 0.0)
+             progress = 0.0;
+         BOOL done = progress >= 1.0;
+         if (!done)
+             progress = 1.0 - (1.0 - progress) * (1.0 - progress);   // ease-out
+
+         int delta = (int)toHeight - (int)fromHeight;
+         uint16_t h = (uint16_t)((int)fromHeight + (int)(delta * progress));
+         [strongSelf applyFrameHeight:h];
+
+         if (done)
+         {
+             [stepTimer invalidate];
+             strongSelf.shadeAnimTimer = nil;
+             [strongSelf applyFrameHeight:toHeight];
+             [strongSelf finishShadeGeometryChange];
+             strongSelf.shadeAnimationInProgress = NO;
+         }
+     }];
+
+     self.shadeAnimTimer = timer;
+     [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSDefaultRunLoopMode];
+ }
+
+// Publish the shaded flag through _NET_WM_STATE on the client window.
+- (void)setShadeFlags:(BOOL)flag
+{
+    [self setShaded:flag];
+
+    XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
+    if (!clientWindow)
+        return;
+
+    [clientWindow setShaded:flag];
+
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    [ewmhService updateNetWmState:clientWindow];
+    ewmhService = nil;
+}
+
+ - (void)shade
+ {
+     // Shade happens ONLY on an explicit double-click or a _NET_WM_STATE_SHADED
+     // request; single clicks take the normal focus/drag path and never reach
+     // this method.
+     // Allowed even mid-animation so a hover-peek can reverse a roll-up that is
+     // still in flight; the in-progress animation is cancelled by
+     // animateFrameHeightFrom:.  Already-shaded-and-idle is the only no-op.
+     if (([self shaded] && !self.shadeAnimationInProgress) || [self isMinimized])
+         return;
+
+     XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
+     if (!clientWindow)
+         return;
+
+    XCBRect startRect = [self windowRect];
+    uint16_t targetHeight = [self shadedFrameHeight];
+    if (startRect.size.height <= targetHeight)
+    {
+        // The window is already at (or below) the shaded height.  When a
+        // hover-peek ends before the unshade roll-down has grown the window,
+        // shade is called while the unshade animation is still in flight.  We
+        // must NOT early-return here or that in-flight unshade keeps running and
+        // the window ends up permanently unshaded.  Fall through (guarded by
+        // the animation being in progress) so animateFrameHeightFrom: cancels
+        // the unshade and the opacity is restored by the shade-completion path.
+        if (!self.shadeAnimationInProgress)
+        {
+            if (self.restoreOpacityAfterShade)
+            {
+                [self setCompositeOpacity:1.0];
+                self.restoreOpacityAfterShade = NO;
+            }
+            return;
+        }
+    }
+
+     // Restore source for unshade.  Shading a maximized window saving the
+     // maximized rect is exactly right: unshade brings the maximized size back.
+     // Preserve an existing saved rect when we are interrupting an unshade
+     // animation, otherwise the window would only roll back to the mid-animation
+     // height instead of its full size.
+     if (!self.shadeAnimationInProgress)
+         [self setOldRect:startRect];
+
+     // Flag first, so a second double-click during the animation is answered
+     // by unshade instead of queueing up a second shade.
+     [self setShadeFlags:YES];
+
+     // Disabled vertical resize also means no resize cursor while shaded.
+     [self updateResizeCursorForShadedState];
+
+     uint16_t fromHeight = startRect.size.height;
+     [self animateFrameHeightFrom:fromHeight toHeight:targetHeight];
+
+     // If the roll-up completed with no animation (already at shaded height),
+     // restore opacity here; otherwise the animation completion does it.
+     if (!self.shadeAnimationInProgress && self.restoreOpacityAfterShade)
+     {
+         [self setCompositeOpacity:1.0];
+         self.restoreOpacityAfterShade = NO;
+     }
+ }
+
+ - (void)unshade
+ {
+     if ([self isMinimized])
+         return;
+     // Allowed mid-animation (interrupting a roll-up) so a hover-peek can roll
+     // back down even while the window is still collapsing.  Only an already
+     // unshaded-and-idle window is a no-op.
+     if (![self shaded] && !self.shadeAnimationInProgress)
+         return;
+
+     XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
+     if (!clientWindow)
+         return;
+
+    uint16_t targetHeight = [self shadedFrameHeight];
+    XCBRect fullRect = [self oldRect];
+
+    if (!FnCheckXCBRectIsValid(fullRect) ||
+        fullRect.size.width == 0 ||
+        fullRect.size.height <= targetHeight)
+    {
+        // No usable saved geometry - just clear the state.
+        [self setShadeFlags:NO];
+        [self updateResizeCursorForShadedState];
+        return;
+    }
+
+    // Render the window's CURRENT contents into the compositor's pixmap
+    // BEFORE rolling the shade open.  While shaded the frame was clipped
+    // shut but the client stayed mapped and redirected, so a fresh pixmap
+    // capture now hands the compositor the up-to-date content to reveal.
+    // Doing this up front avoids a one-frame artifact on the very first
+    // animation step: applyFrameHeight: frees the composite picture, and
+    // without a render here that freed picture would be composited before
+    // it is recreated for the new (taller) frame.
+    [self paintContentBeforeShadeRoll];
+
+    // Same motion in reverse: roll back down out of the titlebar.
+    [self setShadeFlags:NO];
+
+    // Resize is enabled again: restore the resize cursors on the zones/handle.
+    [self updateResizeCursorForShadedState];
+
+    [self animateFrameHeightFrom:[self windowRect].size.height
+                        toHeight:fullRect.size.height];
+}
+
+// Re-acquire and paint the frame's current content immediately (no animation).
+// Used by unshade to guarantee fresh content before the roll-out step that
+// frees and recreates the composite picture.
+- (void)paintContentBeforeShadeRoll
+{
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (!compositorClass || ![compositorClass respondsToSelector:@selector(sharedManager)])
+        return;
+
+    id<URSCompositorShadeAPI> compositor = [compositorClass performSelector:@selector(sharedManager)];
+    if (!compositor)
+        return;
+
+    if ([compositor respondsToSelector:@selector(invalidateWindowPixmap:)])
+        [compositor invalidateWindowPixmap:[self window]];
+    if ([compositor respondsToSelector:@selector(performRepairNow)])
+        [compositor performRepairNow];
+}
+
+- (void)toggleShade
+{
+    // A hover-peek leaves the window unshaded but flagged peeking; a
+    // double-click should keep it open at full opacity rather than collapse.
+    if (self.peeking) {
+        self.peeking = NO;
+        [self setCompositeOpacity:1.0];
+        return;
+    }
+    if ([self shaded])
+        [self unshade];
+    else
+        [self shade];
+}
+
+#pragma mark - Hover-peek (shaded window preview)
+
+// Roll a shaded window down at reduced opacity while the pointer is on its
+// titlebar.  Suppressed until the pointer re-enters the window after a
+// peek ended by moving into the content (avoids collapse/expand flicker).
+ - (void)beginHoverPeek
+ {
+     if (![self shaded] || self.peeking ||
+         [self isMinimized] || !self.hoverPeekArmed)
+         return;
+
+     // Swallow any enter that arrives within the roll-up window after a peek
+     // ended (or a synthetic EnterNotify our own collapse generates): otherwise
+     // the window re-opens and stays put.  A genuine re-hover after the window
+     // has settled will arrive later and is allowed.
+     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+     if (self.peekEndTime > 0 && (now - self.peekEndTime) < 0.30)
+         return;
+
+     // Capture whether the activity spinner was already spinning before this
+     // peek.  A temporary rolldown must never start the spinner from cold - it
+     // only keeps a spinner that was already running (as if still rolled up).
+     self.peekSpinnerWasActive = self.lastContentChange > 0 &&
+                                 (now - self.lastContentChange) < 2.0;
+
+     // A new peek cancels any pending opacity restore from a previous roll-up.
+     self.restoreOpacityAfterShade = NO;
+
+     self.peeking = YES;
+     [self setCompositeOpacity:0.66];
+     [self unshade];
+ }
+
+ - (void)endHoverPeek
+ {
+      if (!self.peeking)
+          return;
+
+      // Arm the opacity-restore flag first so the roll-up animation is covered
+      // by the noteContentChanged suppression below (keeps the spinner frozen).
+      self.restoreOpacityAfterShade = YES;
+
+      self.peeking = NO;
+
+     // Remember when the peek ended so a synthetic/duplicate EnterNotify that
+     // arrives within the roll-up window (or any too-rapid re-hover) is ignored,
+     // preventing the window from getting stuck open.
+     self.peekEndTime = [NSDate timeIntervalSinceReferenceDate];
+
+     // If the pointer slid from the titlebar into the now-revealed content the
+     // window would immediately re-peek (and flicker).  Disarm until the pointer
+     // actually leaves the window; handleLeaveNotify re-arms via hoverPeekArmed.
+     self.hoverPeekArmed = NO;
+     [self shade];
+ }
+
+- (void)setCompositeOpacity:(CGFloat)opacity
+{
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (!compositorClass || ![compositorClass respondsToSelector:@selector(sharedManager)])
+        return;
+
+    id<URSCompositorShadeAPI> compositor = [compositorClass performSelector:@selector(sharedManager)];
+    if (!compositor || ![compositor respondsToSelector:@selector(setWindowOpacity:forWindow:)])
+        return;
+
+    // The frame (WM decoration / titlebar) and the client (window content)
+    // are separate composited windows; both must be made translucent so the
+    // whole rolldown reads as one semi-transparent surface.
+    [compositor setWindowOpacity:opacity forWindow:[self window]];
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    if (client)
+        [compositor setWindowOpacity:opacity forWindow:[client window]];
+}
+
+#pragma mark - Content Activity (spinner driver)
+
+NSString *URSWindowTitleContentChangedNotification = @"URSWindowTitleContentChangedNotification";
+
+static const NSTimeInterval URSWindowTitleActivityWindow = 2.0;
+
+// Called from the compositor's damage path for every damaged client
+// surface.  Must stay cheap: a timestamp write, plus one notification only
+// on the idle-to-active transition.  Activity is sampled at most every 100ms -
+// the spinner ticks at 100ms, so finer resolution is wasted work and a busy
+// terminal can emit hundreds of damage events per second.
+ - (void)noteContentChanged
+ {
+     // A hover-peek (and its roll-up) must never start the titlebar spinner
+     // from cold.  The peek's own reveal repaint and the unshade/roll-up
+     // animations generate client damage that would otherwise bump the
+     // activity timestamp and make the spinner spin after the peek, even
+     // though it was idle before.  Freeze the timestamp while a peek or its
+     // roll-up is in flight so the spinner state is unchanged across the peek.
+     if (self.peeking || self.restoreOpacityAfterShade)
+         return;
+
+     // Pixel changes produced by a window animation (birth, close, minimize,
+     // restore, shrink) are the WM's own transform repaints, not genuine
+     // client activity, so they must not trigger or refresh the spinner.
+     Class compositorClass = NSClassFromString(@"URSCompositingManager");
+     if (compositorClass)
+     {
+         id<URSCompositorShadeAPI> compositor =
+             [compositorClass performSelector:@selector(sharedManager)];
+         if (compositor &&
+             [compositor respondsToSelector:@selector(windowIsAnimating:)])
+         {
+             if ([compositor windowIsAnimating:[self window]])
+                 return;
+         }
+     }
+
+     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (_lastContentChange > 0 && (now - _lastContentChange) < 0.1)
+        return;
+
+    BOOL wasIdle = (_lastContentChange <= 0) ||
+                   (now - _lastContentChange >= URSWindowTitleActivityWindow);
+    _lastContentChange = now;
+
+    if (wasIdle)
+    {
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:URSWindowTitleContentChangedNotification
+                          object:self];
+    }
 }
 
 - (MousePosition) mouseIsOnWindowBorderForEvent:(xcb_motion_notify_event_t *)anEvent

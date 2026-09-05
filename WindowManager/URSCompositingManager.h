@@ -12,6 +12,8 @@
 #import "XCBTypes.h"
 #import <xcb/randr.h>
 
+// Replaces <dispatch/dispatch.h> dispatch_block_t without linking libdispatch
+typedef void (^dispatch_block_t)(void);
 
 @interface URSCompositingManager : NSObject
 
@@ -41,11 +43,20 @@
 - (void)moveWindow:(xcb_window_t)windowId x:(int16_t)x y:(int16_t)y;
 - (void)resizeWindow:(xcb_window_t)windowId x:(int16_t)x y:(int16_t)y 
                width:(uint16_t)width height:(uint16_t)height;
-// Invalidate cached pixmap/picture for a window (force re-acquire after move)
+// Drain a window's pending damage and schedule a repaint of its extents.
+// The window picture is a live view of the drawable, so there is no cached
+// pixmap to re-acquire; this only flushes stale damage state and makes sure
+// the area is composited on the next paint pass.
 - (void)invalidateWindowPixmap:(xcb_window_t)windowId;
 
 // OPTIMIZATION: Notify compositor that stacking order changed (window raised/lowered)
 - (void)markStackingOrderDirty;
+
+// Per-window variant: a raise/lower in place only changes pixels inside the
+// restacked window's own extents, so only those are damaged instead of the
+// whole screen.  Falls back to the debounced full-screen pass when the
+// window is unknown, unviewable or unredirected.
+- (void)markStackingOrderDirtyForWindow:(xcb_window_t)windowId;
 
 // Window animations (compositing-only)
 - (void)animateWindowMinimize:(xcb_window_t)windowId
@@ -54,7 +65,7 @@
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                                          fromRect:(XCBRect)startRect
                                              toRect:(XCBRect)endRect
-                                         completion:(dispatch_block_t)completion;
+                                         completion:(void (^)(void))completion;
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
@@ -63,6 +74,21 @@
                                                     toRect:(XCBRect)endRect
                                                 duration:(NSTimeInterval)duration
                                                         fade:(BOOL)fade;
+- (void)animateWindowTransition:(xcb_window_t)windowId
+                                                fromRect:(XCBRect)startRect
+                                                    toRect:(XCBRect)endRect
+                                                duration:(NSTimeInterval)duration
+                                                        fade:(BOOL)fade
+                                                 completion:(void (^)(void))completion;
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration;
+- (void)animateWindowShrink:(xcb_window_t)windowId
+                   fromRect:(XCBRect)startRect
+                     toRect:(XCBRect)endRect
+                   duration:(NSTimeInterval)duration
+                 completion:(void (^)(void))completion;
 
 // Non-compositing zoom rect animation (outline-based, fast)
 + (void)animateZoomRectsFromRect:(XCBRect)startRect
@@ -74,6 +100,11 @@
 // Force immediate repair without deferring to next runloop (use during interactive drag)
 - (void)performRepairNow;
 
+// True while a window (birth/close/minimize/restore/shrink) animation is in
+// flight for the given frame.  Used by the spinner to ignore the WM's own
+// repaints during an animation.
+- (BOOL)windowIsAnimating:(xcb_window_t)windowId;
+
 // Render the composite screen
 - (void)compositeScreen;
 
@@ -82,6 +113,10 @@
 
 // Perform repair immediately without deferring (for critical updates like cursor blinking)
 - (void)performRepairNow;
+
+// Re-acquire and repaint one window's content right now.  Used by direct
+// X-drawing animations (titlebar spinner) that bypass the damage pipeline.
+- (void)repairRegionForWindow:(xcb_window_t)windowId;
 
 // Mark a window to skip shadow rendering (e.g. snap preview overlay)
 - (void)setSkipShadowForWindow:(xcb_window_t)windowId;
@@ -94,7 +129,8 @@
 - (void)damageScreen;
 
 // Handle damage events
-- (void)handleDamageNotify:(xcb_window_t)window;
+- (void)handleDamageNotify:(xcb_window_t)window
+                                     area:(xcb_rectangle_t)area;
 
 // Handle RANDR screen-change events
 - (void)handleScreenChange:(xcb_randr_screen_change_notify_event_t *)event;
