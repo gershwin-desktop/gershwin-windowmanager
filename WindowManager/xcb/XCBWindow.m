@@ -1247,9 +1247,7 @@
         }
 
         config_win_mask |= XCB_CONFIG_WINDOW_STACK_MODE;
-        config_frame_mask |= XCB_CONFIG_WINDOW_STACK_MODE;
         config_win_vals[win_i++] = stack_mode;
-        config_frame_vals[frame_i++] = stack_mode;
         ewmhService = nil;
     }
 
