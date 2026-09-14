@@ -1452,13 +1452,10 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     // on unshade no fresh ConfigureNotify is sent, leaving the window blank
     // (only the frame and shadow render).  The client content never actually
     // shrinks when shaded - only the parent clip changes - so report the
-    // client's full, unshaded geometry (saved as oldRect at shade time).
+    // client's full, unshaded geometry (saved as unshadedHeight at shade time).
     uint16_t frameHeight = rect.size.height;
-    if ([self shaded]) {
-        XCBRect full = [self oldRect];
-        if (FnCheckXCBRectIsValid(full) && full.size.height > frameHeight)
-            frameHeight = full.size.height;
-    }
+    if ([self shaded] && self.unshadedHeight > frameHeight)
+        frameHeight = self.unshadedHeight;
 
     XCBRect clientRect = XCBMakeRect(XCBMakePoint(self.clientBorder, height),
                                      XCBMakeSize(rect.size.width - 2 * self.clientBorder,
@@ -1765,13 +1762,11 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
         }
     }
 
-     // Restore source for unshade.  Shading a maximized window saving the
-     // maximized rect is exactly right: unshade brings the maximized size back.
-     // Preserve an existing saved rect when we are interrupting an unshade
-     // animation, otherwise the window would only roll back to the mid-animation
-     // height instead of its full size.
+     // Preserve the saved height when interrupting an unshade animation,
+     // otherwise the window would only roll back to the mid-animation height
+     // instead of its full size.
      if (!self.shadeAnimationInProgress)
-         [self setOldRect:startRect];
+         self.unshadedHeight = startRect.size.height;
 
      // Flag first, so a second double-click during the animation is answered
      // by unshade instead of queueing up a second shade.
@@ -1806,12 +1801,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
      if (!clientWindow)
          return;
 
-    uint16_t targetHeight = [self shadedFrameHeight];
-    XCBRect fullRect = [self oldRect];
-
-    if (!FnCheckXCBRectIsValid(fullRect) ||
-        fullRect.size.width == 0 ||
-        fullRect.size.height <= targetHeight)
+    if (self.unshadedHeight <= [self shadedFrameHeight])
     {
         // No usable saved geometry - just clear the state.
         [self setShadeFlags:NO];
@@ -1836,7 +1826,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     [self updateResizeCursorForShadedState];
 
     [self animateFrameHeightFrom:[self windowRect].size.height
-                        toHeight:fullRect.size.height];
+                        toHeight:self.unshadedHeight];
 }
 
 // Re-acquire and paint the frame's current content immediately (no animation).

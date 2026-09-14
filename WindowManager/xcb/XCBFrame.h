@@ -101,6 +101,10 @@ extern NSString *URSWindowTitleContentChangedNotification;
 // The single in-flight shade/unshade animation timer, so a new shade request
 // can cancel an ongoing one (interruptible hover-peek on rapid input).
 @property (nonatomic, strong) NSTimer *shadeAnimTimer;
+// Frame height to roll back down to on unshade.  Kept apart from oldRect,
+// which holds the pre-maximize geometry: sharing it made shading a maximized
+// window destroy the rect the maximize button restores to.
+@property (nonatomic, assign) uint16_t unshadedHeight;
 // Whether the activity spinner was already running when a hover-peek began.
 // A peek must never start the spinner from cold - it only keeps a spinner
 // that was already spinning (as if the window stayed rolled up).
