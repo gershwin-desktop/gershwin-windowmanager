@@ -321,11 +321,6 @@
         XCBRect restoredRect = [frame oldRect];
 
         [frame programmaticResizeToRect:restoredRect];
-        [frame setFullScreen:NO];
-        [titlebar setFullScreen:NO];
-        if (clientWindow) {
-            [clientWindow setFullScreen:NO];
-        }
         [frame setIsMaximized:NO];
 
         [titlebar destroyPixmap];
@@ -364,12 +359,7 @@
                         (uint32_t)workarea.size.height));
 
         [frame programmaticResizeToRect:targetRect];
-        [frame setFullScreen:YES];
         [frame setIsMaximized:YES];
-        [titlebar setFullScreen:YES];
-        if (clientWindow) {
-            [clientWindow setFullScreen:YES];
-        }
 
         [titlebar destroyPixmap];
         [titlebar createPixmap];

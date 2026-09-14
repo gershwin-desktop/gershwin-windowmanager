@@ -486,6 +486,9 @@ static XCBConnection *sharedInstance;
     }
 
     // Fullscreen windows must stay above docks/panels even after restack.
+    // This is why fullScreen may only ever mean _NET_WM_STATE_FULLSCREEN:
+    // setting it for a merely maximized window pins that window above every
+    // other window on each raise.
     for (XCBWindow *aWindow in [windowsMap allValues])
     {
         if ([aWindow fullScreen] && [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
@@ -2858,9 +2861,6 @@ static XCBConnection *sharedInstance;
                                        duration:0.22
                                      completion:^{
                     [frame programmaticResizeToRect:restoredRect];
-                    [frame setFullScreen:NO];
-                    [titleBar setFullScreen:NO];
-                    [clientWindow setFullScreen:NO];
                     [frame setIsMaximized:NO];
                     [frame updateAllResizeZonePositions];
                     [frame applyRoundedCornersShapeMask];
@@ -2871,9 +2871,6 @@ static XCBConnection *sharedInstance;
             } else {
                 // Use programmatic resize that follows the same code path as manual resize
                 [frame programmaticResizeToRect:restoredRect];
-                [frame setFullScreen:NO];
-                [titleBar setFullScreen:NO];
-                [clientWindow setFullScreen:NO];
                 [frame setIsMaximized:NO];
                 [frame updateAllResizeZonePositions];
                 [frame applyRoundedCornersShapeMask];
@@ -2932,10 +2929,7 @@ static XCBConnection *sharedInstance;
                                            fade:NO
                                      completion:^{
                 [frame programmaticResizeToRect:targetRect];
-                [frame setFullScreen:YES];
                 [frame setIsMaximized:YES];
-                [titleBar setFullScreen:YES];
-                [clientWindow setFullScreen:YES];
                 [titleBar drawTitleBarComponents];
                 [frame updateAllResizeZonePositions];
                 [frame applyRoundedCornersShapeMask];
@@ -2961,7 +2955,6 @@ static XCBConnection *sharedInstance;
                 @"width": @(targetRect.size.width),
                 @"height": @(targetRect.size.height),
                 @"titleBar": titleBar,
-                @"clientWindow": clientWindow,
             }];
             if (compositor) {
                 maximizeInfo[@"compositor"] = compositor;
@@ -2973,10 +2966,7 @@ static XCBConnection *sharedInstance;
                                             repeats:NO];
         } else {
             [frame programmaticResizeToRect:targetRect];
-            [frame setFullScreen:YES];
             [frame setIsMaximized:YES];
-            [titleBar setFullScreen:YES];
-            [clientWindow setFullScreen:YES];
             [titleBar drawTitleBarComponents];
             [frame updateAllResizeZonePositions];
             [frame applyRoundedCornersShapeMask];
@@ -5132,7 +5122,6 @@ static XCBConnection *sharedInstance;
     NSDictionary *info = timer.userInfo;
     XCBFrame *frame = info[@"frame"];
     XCBTitleBar *titleBar = info[@"titleBar"];
-    XCBWindow *clientWindow = info[@"clientWindow"];
     id<URSCompositingManaging> compositor = info[@"compositor"];
     double px = [info[@"posX"] doubleValue];
     double py = [info[@"posY"] doubleValue];
@@ -5143,10 +5132,7 @@ static XCBConnection *sharedInstance;
     XCBRect targetRect = XCBMakeRect(pt, sz);
 
     [frame programmaticResizeToRect:targetRect];
-    [frame setFullScreen:YES];
     [frame setIsMaximized:YES];
-    [titleBar setFullScreen:YES];
-    [clientWindow setFullScreen:YES];
     [titleBar drawTitleBarComponents];
     [frame updateAllResizeZonePositions];
     [frame applyRoundedCornersShapeMask];
