@@ -163,16 +163,18 @@
     memset(&property, 0, sizeof(property));
 
     xcb_generic_error_t *error = NULL;
-    xcb_icccm_get_wm_name_reply(conn, cookie, &property, &error);
-    if (error)
+    if (!xcb_icccm_get_wm_name_reply(conn, cookie, &property, &error))
     {
         free(error);
         return nil;
     }
 
-    NSString *name = nil;
-    if (property.name != NULL)
-        name = [NSString stringWithCString:property.name encoding:NSASCIIStringEncoding];
+    // The value is not NUL-terminated: read as a C string it runs into the
+    // bytes that follow it in the reply buffer and picks up stray characters.
+    NSString *name = [[NSString alloc] initWithBytes:property.name
+                                              length:property.name_len
+                                            encoding:NSASCIIStringEncoding];
+    xcb_icccm_get_text_property_reply_wipe(&property);
 
     return name;
 }
