@@ -40,6 +40,10 @@
 // to determine which titlebar should appear active.
 + (void)refreshAllTitlebarsWithFocusedWindow:(xcb_window_t)focusedClientId;
 
+// Reset the cached GSScaleFactor used for titlebar drawing constants, so the
+// next render picks up a live scale-factor change.
++ (void)invalidateScaleFactorCache;
+
 // Event handlers
 - (void)handleWindowCreated:(XCBTitleBar*)titlebar;
 - (void)handleWindowFocusChanged:(XCBTitleBar*)titlebar isActive:(BOOL)active;

@@ -13,6 +13,7 @@
 
 #import "URSSnapPreviewOverlay.h"
 #import "URSCompositingManager.h"
+#import <GNUstepGUI/GSDisplayServer.h>
 
 // Constants for the snap preview appearance
 static const CGFloat kCornerRadius = 8.0;
@@ -101,9 +102,10 @@ static const CGFloat kBorderWidth = 3.0;
             [[URSSnapPreviewOverlayView alloc] initWithFrame:contentRect];
         [self setContentView:contentView];
 
-        // Capture the underlying X11 window ID so we can tell the compositor
-        // to skip drop shadows for this overlay.
-        _overlayX11Window = (xcb_window_t)[self windowNumber];
+        // The compositor keys its no-shadow set by X window id; -windowNumber
+        // is the backend's window tag, not the X window id.
+        _overlayX11Window = (xcb_window_t)(uintptr_t)
+            [GSCurrentServer() windowDevice:[self windowNumber]];
 
         // Register with compositor to skip shadows (if compositing is active)
         URSCompositingManager *compositor = [URSCompositingManager sharedManager];

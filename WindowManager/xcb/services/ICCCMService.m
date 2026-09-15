@@ -8,6 +8,10 @@
 
 #import "ICCCMService.h"
 
+// Text property types WM_NAME may carry besides STRING
+static NSString * const kUTF8StringAtom = @"UTF8_STRING";
+static NSString * const kCompoundTextAtom = @"COMPOUND_TEXT";
+
 @implementation ICCCMService
 
 @synthesize WMDeleteWindow;
@@ -54,7 +58,9 @@
         WMState,
         WMHints,
         WMChangeState,
-        WMClass
+        WMClass,
+        kUTF8StringAtom,
+        kCompoundTextAtom
     };
     
     atomsArray = [NSArray arrayWithObjects:icccmAtoms count:sizeof(icccmAtoms)/sizeof(NSString*)];
@@ -87,13 +93,12 @@
                                                  delete:NO
                                                  length:UINT32_MAX];
 
-    xcb_atom_t* windowProtocols = xcb_get_property_value(reply);
-
     if (!reply)
     {
-        NSLog(@"Reply is NULL");
         return hasProtocol;
     }
+
+    xcb_atom_t* windowProtocols = xcb_get_property_value(reply);
 
     for(int i = 0; i < reply->length; i++)
     {
@@ -127,6 +132,30 @@
     return sizeHints;
 }
 
+/* ICCCM WM_NORMAL_HINTS position flags.  USPosition means the position was
+   explicitly requested (user geometry string); PPosition means the program
+   chose one itself.  Both are app-set screen coordinates that the WM must
+   honor instead of overriding with cascade/centering placement.  Exception:
+   PPosition (0,0) is the classic "flag set but no real position" pattern of
+   lazy toolkits and is NOT treated as a request — otherwise every default
+   window would pile up in the top-left corner instead of cascading. */
+- (BOOL)windowSpecifiesPosition:(XCBWindow *)aWindow
+{
+    xcb_size_hints_t *sizeHints = [self wmNormalHintsForWindow:aWindow];
+    if (!sizeHints) {
+        return NO;
+    }
+
+    BOOL specifies = NO;
+    if (sizeHints->flags & XCB_ICCCM_SIZE_HINT_US_POSITION) {
+        specifies = YES;
+    } else if (sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_POSITION) {
+        specifies = !(sizeHints->x == 0 && sizeHints->y == 0);
+    }
+    free(sizeHints);
+    return specifies;
+}
+
 - (void)updateWMNormalHints:(xcb_size_hints_t*)sizeHints forWindow:(XCBWindow*)aWindow
 {
     xcb_icccm_set_wm_size_hints([[aWindow connection] connection], [aWindow window], XCB_ATOM_WM_NORMAL_HINTS, sizeHints);
@@ -140,16 +169,34 @@
     memset(&property, 0, sizeof(property));
 
     xcb_generic_error_t *error = NULL;
-    xcb_icccm_get_wm_name_reply(conn, cookie, &property, &error);
-    if (error)
+    if (!xcb_icccm_get_wm_name_reply(conn, cookie, &property, &error))
     {
         free(error);
         return nil;
     }
 
+    // ICCCM defines STRING as ISO Latin-1.  COMPOUND_TEXT without escape
+    // sequences is Latin-1 too (ASCII in GL, the Latin-1 right half in GR);
+    // text switching to other character sets would need an ISO 2022 decoder,
+    // so it is left undecoded rather than shown garbled.
+    XCBAtomService *atoms = [super atomService];
+    NSStringEncoding encoding = 0;
+    if (property.encoding == [atoms atomFromCachedAtomsWithKey:kUTF8StringAtom])
+        encoding = NSUTF8StringEncoding;
+    else if (property.encoding == XCB_ATOM_STRING)
+        encoding = NSISOLatin1StringEncoding;
+    else if (property.encoding == [atoms atomFromCachedAtomsWithKey:kCompoundTextAtom]
+             && memchr(property.name, 0x1b, property.name_len) == NULL)
+        encoding = NSISOLatin1StringEncoding;
+
+    // The value is not NUL-terminated: read as a C string it runs into the
+    // bytes that follow it in the reply buffer and picks up stray characters.
     NSString *name = nil;
-    if (property.name != NULL)
-        name = [NSString stringWithCString:property.name encoding:NSASCIIStringEncoding];
+    if (encoding != 0)
+        name = [[NSString alloc] initWithBytes:property.name
+                                        length:property.name_len
+                                      encoding:encoding];
+    xcb_icccm_get_text_property_reply_wipe(&property);
 
     return name;
 }

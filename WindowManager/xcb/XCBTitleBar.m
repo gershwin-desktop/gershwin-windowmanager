@@ -8,6 +8,27 @@
 
 #import "XCBTitleBar.h"
 #import "URSThemeIntegration.h"
+#import <AppKit/AppKit.h>
+#import <math.h>
+
+// Scale factor mirroring the eau theme's GSWScaleFactor(): reads the
+// GSScaleFraction user default, falls back to the screen's backing scale.
+static inline CGFloat ShadeScaleFactor(void)
+{
+    CGFloat s = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
+    if (s <= 0.0)
+        s = [[NSScreen mainScreen] backingScaleFactor];
+    if (s <= 0.0)
+        s = 1.0;
+    return s;
+}
+
+// Loose typing for the compositor (kept out via NSClassFromString lookup
+// elsewhere in the xcb layer); call sites guard with respondsToSelector.
+@protocol URSCompositorShadeAPI <NSObject>
+- (void)invalidateWindowPixmap:(xcb_window_t)windowId;
+- (void)repairRegionForWindow:(xcb_window_t)windowId;
+@end
 
 @implementation XCBTitleBar
 
@@ -22,6 +43,16 @@
 @synthesize titleBarDownColor;
 @synthesize ewmhService;
 @synthesize titleIsSet;
+@synthesize spinnerPhase;
+@synthesize spinnerGC;
+@synthesize spinnerDrawn;
+@synthesize spinnerRenderFrame;
+@synthesize spinnerAlpha;
+@synthesize spinnerFadeTarget;
+@synthesize spinnerFading;
+@synthesize spinnerFadeTimer;
+@synthesize spinnerPhaseF;
+@synthesize spinnerLastStep;
 
 
 - (id) initWithFrame:(XCBFrame *)aFrame withConnection:(XCBConnection *)aConnection
@@ -67,7 +98,8 @@
     uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
     uint32_t values[2];
     values[0] = [screen screen]->white_pixel;
-    values[1] = XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_BUTTON_PRESS;
+    values[1] = XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_BUTTON_PRESS |
+               XCB_EVENT_MASK_ENTER_WINDOW | XCB_EVENT_MASK_LEAVE_WINDOW;
 
     BOOL shapeExtensionSupported;
 
@@ -306,4 +338,270 @@
     return gsthemeEnabled;
 }
 
-@end
+#pragma mark - Content-Activity Spinner
+
+// Layout constants matching the eau theme titlebar (see AppearanceMetrics.h
+// and URSThemeIntegration's local defines): the theme centers the title
+// between the left orb region and the right button region.
+#define SPINNER_ORB_REGION_WIDTH (68.0 * ShadeScaleFactor())
+#define SPINNER_TITLE_FONT_SIZE (13.0 * ShadeScaleFactor())
+// Spinner fade in/out duration (milliseconds).
+#define SPINNER_FADE_MS 500.0
+// Spinner rotation speed in phases (of 8) per second.
+#define SPINNER_ROTATE_PPS 12.0
+
+// 8 spokes, unit direction vectors in 1/1000 (45 degree steps)
+static const int SPINNER_DIR[8][2] = {
+    {1000, 0}, {707, 707}, {0, 1000}, {-707, 707},
+    {-1000, 0}, {-707, -707}, {0, -1000}, {707, -707}
+};
+
+// X position just after the drawn title text.  Mirrors the eau theme's
+// centered-title layout so the glyph hugs the text end without the theme
+// needing to know about us.
+- (CGFloat)spinnerTargetX
+{
+    CGFloat scale = ShadeScaleFactor();
+    CGFloat tbW = [self windowRect].size.width;
+    CGFloat tbH = [self windowRect].size.height;
+
+    BOOL orbStyle = [URSThemeIntegration isOrbButtonStyle];
+    // Edge layout reserves the square close button (width == bar height) on
+    // the left; orb layout reserves the orb region.
+    CGFloat left = orbStyle ? SPINNER_ORB_REGION_WIDTH : tbH;
+
+    XCBFrame *frame = nil;
+    if ([[self parentWindow] isKindOfClass:[XCBFrame class]])
+        frame = (XCBFrame *)[self parentWindow];
+    XCBWindow *clientWindow = frame ? [frame childWindowForKey:ClientWindow] : nil;
+    BOOL hasMaximize = clientWindow ? [clientWindow canResize] : YES;
+
+    CGFloat rightReserve = orbStyle ? (6.0 * scale)
+                                    : ((hasMaximize ? 2.0 : 1.0) * tbH);
+
+    NSString *title = windowTitle ?: @"";
+    // Measure with the SAME font the theme renders titles with (theme
+    // bundle NSFont/NSFontSize, falling back to system font) - a system-font
+    // estimate runs short and the spinner overlaps the last characters.
+    NSString *themeFontName = @"LuxiSans";
+    CGFloat themeFontSize = 13.0;
+    GSTheme *theme = [URSThemeIntegration currentTheme];
+    if (theme && [theme bundle] && [[theme bundle] infoDictionary]) {
+        NSString *fontName = [[theme bundle] infoDictionary][@"NSFont"];
+        NSString *fontSize = [[theme bundle] infoDictionary][@"NSFontSize"];
+        if (fontName) themeFontName = fontName;
+        if (fontSize) themeFontSize = [fontSize floatValue];
+    }
+    NSFont *titleFont = [NSFont fontWithName:themeFontName
+                                        size:themeFontSize * scale] ?:
+                         [NSFont systemFontOfSize:SPINNER_TITLE_FONT_SIZE];
+    CGFloat textW = [title sizeWithAttributes:
+        @{ NSFontAttributeName: titleFont }].width;
+
+    CGFloat workW = tbW - left - rightReserve;
+    if (workW < 20.0)
+        workW = 20.0;
+
+    CGFloat centeredX = left + workW / 2.0 - textW / 2.0;
+    CGFloat textLeft = MAX(centeredX, left);
+    CGFloat textEnd = MIN(textLeft + textW, tbW - rightReserve);
+
+    CGFloat x = textEnd + 8.0 * scale + 24.0;
+    return MIN(x, tbW - rightReserve - tbH);
+}
+
+// Draw the current spinner phase into the TITLEBAR's own pixmap and blit
+// just the spinner rectangle through the normal drawArea pipeline.  No
+// child window: the themed bar stays the single source of truth and the
+// compositor sees an ordinary titlebar update.
+- (void)drawSpinnerPhase:(int)phase
+{
+    if ([self isGSThemeActive])
+    {
+        // Theme path: let renderGSThemeToWindow overlay the theme spinner
+        // frame (common_ProgressSpinning_N) after the title text.  Blending,
+        // dPixmap sync and compositor notification stay in the existing
+        // render pipeline.
+        self.spinnerRenderFrame = phase % 8;
+        XCBFrame *frame = nil;
+        if ([[self parentWindow] isKindOfClass:[XCBFrame class]])
+            frame = (XCBFrame *)[self parentWindow];
+        if ([[self parentWindow] isKindOfClass:[XCBFrame class]])
+            frame = (XCBFrame *)[self parentWindow];
+        if (frame)
+            [URSThemeIntegration renderGSThemeToWindow:self
+                                                frame:frame
+                                                title:windowTitle
+                                               active:[self isAbove]];
+
+        // renderGSThemeToWindow only refreshes the off-screen pixmap; blit
+        // the bar onto the window so the new spinner frame becomes visible.
+        // The copy_area generates Damage, so the compositor picks the update
+        // up through its normal pipeline.
+        [self drawArea:[self windowRect]];
+        return;
+    }
+
+    // Legacy (non-GSTheme) path: hand-drawn spokes straight into the pixmap.
+    // Always redraw the clean bar first: the spinner is painted over it and
+    // would otherwise accumulate across frames.  (For phase < 0 this is the
+    // final clean state with no spinner.)
+    [self drawTitleBarComponents];
+    xcb_pixmap_t pix = [self isAbove] ? [self pixmap] : [self dPixmap];
+    if (!pix || !self.connection)
+        return;
+
+    xcb_connection_t *conn = [self.connection connection];
+
+    if (self.spinnerGC == 0)
+    {
+        self.spinnerGC = xcb_generate_id(conn);
+        xcb_create_gc(conn, self.spinnerGC, pix, 0, NULL);
+    }
+
+    CGFloat originX = [self spinnerTargetX];
+    CGFloat tbH = [self windowRect].size.height;
+    int16_t rx = (int16_t)originX;
+    CGFloat spinSize = tbH - 6.0;
+    if (spinSize < 8.0) spinSize = 8.0;
+    int16_t ry = (int16_t)((tbH - spinSize) / 2.0);
+    int16_t size = (int16_t)spinSize;
+    int16_t center = size / 2;
+    int16_t rOut = size / 2 - 1;
+    int16_t rIn = rOut - 2;
+    if (rIn < 1) rIn = 1;
+
+    const uint32_t grays[8] = { 0xFF1a1a1a, 0xFF333333, 0xFF4d4d4d, 0xFF666666,
+                                0xFF808080, 0xFF999999, 0xFFb3b3b3, 0xFFd0d0d0 };
+
+    for (int i = 0; i < 8; i++)
+    {
+        int spoke = (phase + i) % 8;
+        int dx = SPINNER_DIR[spoke][0];
+        int dy = SPINNER_DIR[spoke][1];
+
+        xcb_segment_t seg[1] = {{
+            (int16_t)(center + rx + dx * rIn / 1000),
+            (int16_t)(center + ry + dy * rIn / 1000),
+            (int16_t)(center + rx + dx * rOut / 1000),
+            (int16_t)(center + ry + dy * rOut / 1000)
+        }};
+
+         uint32_t fg = grays[i];
+         // Fade: scale the gray toward black by the draw alpha.  The bar is
+         // dark, so this reads as a fade-out and is invisible at alpha 0.
+         CGFloat a = self.spinnerAlpha;
+         uint8_t r8 = (uint8_t)((((fg >> 16) & 0xFF)) * a);
+         uint8_t g8 = (uint8_t)((((fg >> 8) & 0xFF)) * a);
+         uint8_t b8 = (uint8_t)(((fg & 0xFF)) * a);
+         uint32_t fgA = 0xFF000000 | (r8 << 16) | (g8 << 8) | b8;
+         xcb_change_gc(conn, self.spinnerGC, XCB_GC_FOREGROUND, &fgA);
+         xcb_poly_segment(conn, pix, self.spinnerGC, 1, seg);
+    }
+
+    XCBRect blit = XCBMakeRect(XCBMakePoint(rx, ry),
+                               XCBMakeSize((uint16_t)size + 1, (uint16_t)size + 1));
+    [self drawArea:blit];
+
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)])
+    {
+        id<URSCompositorShadeAPI> spinnerCompositor =
+            [compositorClass performSelector:@selector(sharedManager)];
+        if (spinnerCompositor)
+        {
+            xcb_window_t repaintTarget = [[self parentWindow] isKindOfClass:[XCBFrame class]]
+                ? [[self parentWindow] window] : [self window];
+            if ([spinnerCompositor respondsToSelector:@selector(invalidateWindowPixmap:)])
+                [spinnerCompositor invalidateWindowPixmap:repaintTarget];
+            if ([spinnerCompositor respondsToSelector:@selector(repairRegionForWindow:)])
+                [spinnerCompositor repairRegionForWindow:repaintTarget];
+        }
+    }
+
+    xcb_flush(conn);
+}
+
+ - (void)updateSpinnerForActivity:(BOOL)active
+ {
+     if (active)
+     {
+         self.spinnerDrawn = YES;
+         // Start (or keep) the spinner animating: rotation begins immediately
+         // and the fade-in follows, so it is already turning as it appears.
+         [self beginSpinnerAnimTo:1.0];
+     }
+     else if (self.spinnerDrawn || self.spinnerAlpha > 0.001 || self.spinnerFadeTimer)
+     {
+         // Activity window closed: keep rotating while the fade-out plays,
+         // then render the clean bar once alpha reaches 0.
+         self.spinnerDrawn = NO;
+         [self beginSpinnerAnimTo:0.0];
+     }
+ }
+
+ // Single 60fps timer that drives BOTH the rotation (continuously, from just
+ // before the fade-in through the whole fade-out) and the alpha fade.  Runs
+ // whenever the spinner is visible or fading; starting a new animation just
+ // updates the target, so an in-flight fade reverses smoothly.
+ - (void)beginSpinnerAnimTo:(CGFloat)target
+ {
+     self.spinnerFadeTarget = target;
+     if (self.spinnerFadeTimer)
+         return;
+
+     self.spinnerFading = YES;
+     self.spinnerLastStep = [NSDate timeIntervalSinceReferenceDate];
+     __weak XCBTitleBar *weakSelf = self;
+     self.spinnerFadeTimer = [NSTimer timerWithTimeInterval:1.0 / 60.0
+                                                     repeats:YES
+                                                       block:^(NSTimer *stepTimer) {
+         XCBTitleBar *strongSelf = weakSelf;
+         if (!strongSelf) {
+             [stepTimer invalidate];
+             return;
+         }
+         [strongSelf stepSpinnerAnim];
+     }];
+     [[NSRunLoop mainRunLoop] addTimer:self.spinnerFadeTimer
+                               forMode:NSDefaultRunLoopMode];
+ }
+
+ - (void)stepSpinnerAnim
+ {
+     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+     NSTimeInterval dt = now - self.spinnerLastStep;
+     if (dt <= 0.0) dt = 1.0 / 60.0;
+     if (dt > 0.25) dt = 0.25;   // clamp after a stall (e.g. runloop blocked)
+     self.spinnerLastStep = now;
+
+     // Continuous rotation, independent of the 0.1s controller tick so it
+     // stays smooth through the fade.
+     self.spinnerPhaseF += dt * SPINNER_ROTATE_PPS;
+     int ph = (int)self.spinnerPhaseF % 8;
+     if (ph < 0) ph += 8;
+     self.spinnerPhase = ph;
+
+     // Alpha fade toward the target over SPINNER_FADE_MS.
+     CGFloat target = self.spinnerFadeTarget;
+     CGFloat fadePerSec = 1000.0 / SPINNER_FADE_MS;
+     if (target > self.spinnerAlpha)
+         self.spinnerAlpha = MIN(target, self.spinnerAlpha + dt * fadePerSec);
+     else
+         self.spinnerAlpha = MAX(target, self.spinnerAlpha - dt * fadePerSec);
+
+     [self drawSpinnerPhase:self.spinnerPhase];
+
+     // Stop only once fully hidden (fade-out done); while active (target 1)
+     // the timer keeps running so the spinner keeps turning.
+     if (self.spinnerAlpha <= 0.001 && target == 0.0)
+     {
+         self.spinnerAlpha = 0.0;
+         [self.spinnerFadeTimer invalidate];
+         self.spinnerFadeTimer = nil;
+         self.spinnerFading = NO;
+         [self drawSpinnerPhase:-1];   // fully hidden: clean bar
+     }
+ }
+
+ @end

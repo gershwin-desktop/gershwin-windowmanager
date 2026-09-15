@@ -41,13 +41,27 @@ static NSInteger hoveredButtonIndex = -1;  // -1=none, 0=close, 1=mini, 2=zoom
 
 // Edge button metrics: buttons are square, width equals titlebar height (queried at render time)
 // Declared early so they can be used in hover state methods
-static const CGFloat ICON_STROKE = 1.5;               // Subtle icon strokes
-static const CGFloat ICON_INSET = 8.0;                // Icon inset from button edges (matches Eau theme)
+// Multiplied by GSScaleFactor for HiDPI support (lazily computed).
+static CGFloat _wmScaleFactor = 0;
+static CGFloat WMScaleFactor(void) {
+    if (_wmScaleFactor == 0) {
+        _wmScaleFactor = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
+        if (_wmScaleFactor == 0)
+            _wmScaleFactor = [[NSScreen mainScreen] backingScaleFactor];
+        if (_wmScaleFactor == 0) _wmScaleFactor = 1.0;
+    }
+    return _wmScaleFactor;
+}
++ (void)invalidateScaleFactorCache {
+    _wmScaleFactor = 0;
+}
+#define ICON_STROKE (1.5 * WMScaleFactor())     // Subtle icon strokes
+#define ICON_INSET (8.0 * WMScaleFactor())      // Icon inset from button edges (matches Eau theme)
 
 // Orb button metrics (matching Eau theme AppearanceMetrics.h orb constants)
-static const CGFloat ORB_BUTTON_SIZE = 15.0;
-static const CGFloat ORB_PADDING_LEFT = 10.5;
-static const CGFloat ORB_BUTTON_SPACING = 4.0;
+#define ORB_BUTTON_SIZE (15.0 * WMScaleFactor())
+#define ORB_PADDING_LEFT (10.5 * WMScaleFactor())
+#define ORB_BUTTON_SPACING (4.0 * WMScaleFactor())
 
 #pragma mark - Fixed-size window tracking
 
@@ -294,7 +308,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     NSBezierPath *highlight = [NSBezierPath bezierPath];
     [highlight moveToPoint:NSMakePoint(NSMinX(rect), NSMaxY(rect) - 0.5)];
     [highlight lineToPoint:NSMakePoint(NSMaxX(rect), NSMaxY(rect) - 0.5)];
-    [highlight setLineWidth:1.0];
+    [highlight setLineWidth:(1.0 * WMScaleFactor())];
     [highlight stroke];
 }
 
@@ -695,7 +709,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSBezierPath *titleBase = [NSBezierPath bezierPath];
             [titleBase moveToPoint:NSMakePoint(highlightLeft, titlebarSize.height - 0.5)];
             [titleBase lineToPoint:NSMakePoint(highlightRight, titlebarSize.height - 0.5)];
-            [titleBase setLineWidth:1.0];
+            [titleBase setLineWidth:(1.0 * WMScaleFactor())];
             [titleBase stroke];
 
             NSColor *titleHighlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
@@ -703,7 +717,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSBezierPath *titleHighlight = [NSBezierPath bezierPath];
             [titleHighlight moveToPoint:NSMakePoint(0, titlebarSize.height - 0.5)];
             [titleHighlight lineToPoint:NSMakePoint(titlebarSize.width, titlebarSize.height - 0.5)];
-            [titleHighlight setLineWidth:1.0];
+            [titleHighlight setLineWidth:(1.0 * WMScaleFactor())];
             [titleHighlight stroke];
 
             // Button dividers — lightened to blend with inactive gradient
@@ -725,7 +739,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 [dividers moveToPoint:NSMakePoint(titlebarSize.width - titlebarSize.height, 0)];
                 [dividers lineToPoint:NSMakePoint(titlebarSize.width - titlebarSize.height, titlebarSize.height)];
             }
-            [dividers setLineWidth:1.0];
+            [dividers setLineWidth:(1.0 * WMScaleFactor())];
             [dividers stroke];
         }
 
@@ -956,10 +970,58 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     return YES;
 }
 
+// Snapshot the current frame of a real NSProgressIndicator (spinning) into the
+// caller's current graphics context.  Using the actual control - rather than
+// replaying common_ProgressSpinning_N by hand - makes the titlebar activity
+// spinner pixel-identical to every other Eau spinner: drawRect: goes through
+// GSTheme, which resolves the *themed* spinner art (Eau's override), whereas
+// a direct [NSImage imageNamed:] lookup returns the default GNUstep image.
+// Same frame sequence and animation rate as anywhere else.  The indicator is
+// created and started once on the main runloop; each call captures its frame.
++ (void)drawContentActivitySpinnerInRect:(NSRect)rect
+                                     alpha:(CGFloat)alpha {
+    static NSProgressIndicator *spinner = nil;
+    static NSImage *cache = nil;
+    static NSSize cacheSize = {0.0, 0.0};
+    static BOOL started = NO;
+
+    if (spinner == nil) {
+        spinner = [[NSProgressIndicator alloc]
+            initWithFrame:NSMakeRect(0.0, 0.0, 32.0, 32.0)];
+        [spinner setStyle:NSProgressIndicatorSpinningStyle];
+        [spinner setIndeterminate:YES];
+        [spinner setUsesThreadedAnimation:NO];
+    }
+    if (!started) {
+        [spinner startAnimation:nil];
+        started = YES;
+    }
+
+    NSSize s = rect.size;
+    if (cache == nil || !NSEqualSizes(cacheSize, s)) {
+        cache = [[NSImage alloc] initWithSize:s];
+        cacheSize = s;
+    }
+
+    // Snapshot the live spinner frame at full alpha into a cache image, then
+    // composite it into the titlebar with the requested fade alpha.
+    [cache lockFocus];
+    [[NSColor clearColor] set];
+    NSRectFill(NSMakeRect(0.0, 0.0, s.width, s.height));
+    [spinner setFrame:NSMakeRect(0.0, 0.0, s.width, s.height)];
+    [spinner drawRect:NSMakeRect(0.0, 0.0, s.width, s.height)];
+    [cache unlockFocus];
+
+    [cache drawInRect:rect
+             fromRect:NSZeroRect
+            operation:NSCompositeSourceOver
+             fraction:alpha];
+}
+
 + (BOOL)renderGSThemeToWindow:(XCBWindow*)window
-                        frame:(XCBFrame*)frame
-                        title:(NSString*)title
-                       active:(BOOL)isActive {
+                         frame:(XCBFrame*)frame
+                         title:(NSString*)title
+                        active:(BOOL)isActive {
     URS_PROFILE_BEGIN(themeRender);
 
     if (![[URSThemeIntegration sharedInstance] enabled] || !window || !frame) {
@@ -1216,6 +1278,22 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // Restore graphics state
         [gctx restoreGraphicsState];
 
+        // *** CONTENT-ACTIVITY SPINNER OVERLAY ***
+        // Draw a real NSProgressIndicator (spinning) so the titlebar spinner is
+        // pixel-identical to every other Eau spinner: same GSTheme art, same
+        // frame sequence, same animation rate.  The control is animated once on
+        // the main runloop; here we snapshot its current frame.
+        if ([titlebar respondsToSelector:@selector(spinnerRenderFrame)] &&
+            [(XCBTitleBar *)titlebar spinnerRenderFrame] >= 0) {
+            CGFloat side = titlebarSize.height - 6.0;
+            if (side < 8.0) side = 8.0;
+            CGFloat sx = [(XCBTitleBar *)titlebar spinnerTargetX];
+            NSRect spinRect = NSMakeRect(sx, (titlebarSize.height - side) / 2.0, side, side);
+            CGFloat alpha = [(XCBTitleBar *)titlebar spinnerAlpha];
+            [URSThemeIntegration drawContentActivitySpinnerInRect:spinRect
+                                                            alpha:alpha];
+        }
+
         // *** BUTTON DRAWING ***
         CGFloat titlebarWidth = titlebarSize.width;
         CGFloat buttonHeight = titlebarSize.height;
@@ -1367,7 +1445,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSBezierPath *titleBase = [NSBezierPath bezierPath];
             [titleBase moveToPoint:NSMakePoint(highlightLeft, buttonHeight - 0.5)];
             [titleBase lineToPoint:NSMakePoint(highlightRight, buttonHeight - 0.5)];
-            [titleBase setLineWidth:1.0];
+            [titleBase setLineWidth:(1.0 * WMScaleFactor())];
             [titleBase stroke];
 
             NSColor *titleHighlightColor = [NSColor colorWithCalibratedWhite:1.0 alpha:0.35];
@@ -1375,7 +1453,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             NSBezierPath *titleHighlight = [NSBezierPath bezierPath];
             [titleHighlight moveToPoint:NSMakePoint(0, buttonHeight - 0.5)];
             [titleHighlight lineToPoint:NSMakePoint(titlebarWidth, buttonHeight - 0.5)];
-            [titleHighlight setLineWidth:1.0];
+            [titleHighlight setLineWidth:(1.0 * WMScaleFactor())];
             [titleHighlight stroke];
 
             // Button dividers — lightened to blend with inactive gradient
@@ -1397,7 +1475,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 [dividers moveToPoint:NSMakePoint(titlebarWidth - buttonHeight, 0)];
                 [dividers lineToPoint:NSMakePoint(titlebarWidth - buttonHeight, buttonHeight)];
             }
-            [dividers setLineWidth:1.0];
+            [dividers setLineWidth:(1.0 * WMScaleFactor())];
             [dividers stroke];
         }
 

@@ -8,6 +8,7 @@
 
 #import "GSThemeTitleBar.h"
 #import "ICCCMService.h"
+#import "URSImageUpload.h"
 #import "XCBScreen.h"
 #import "URSThemeIntegration.h"
 
@@ -177,12 +178,14 @@
 
     xcb_gcontext_t gc = xcb_generate_id(conn);
     xcb_create_gc(conn, gc, [self pixmap], 0, NULL);
-    xcb_put_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP,
-                  [self pixmap], gc,
-                  (uint16_t)width, (uint16_t)height,
-                  0, 0, 0, depth,
-                  (uint32_t)((size_t)height * (size_t)packedBytesPerRow),
-                  packed);
+    // Banded upload: a titlebar spans the window width, so a full-screen
+    // window on a large display can push this past the maximum request length.
+    URSPutImageBanded(conn, XCB_IMAGE_FORMAT_Z_PIXMAP,
+                      [self pixmap], gc,
+                      (uint16_t)width, (uint16_t)height,
+                      0, 0, 0, depth,
+                      (uint32_t)packedBytesPerRow,
+                      packed);
     free(packed);
     xcb_free_gc(conn, gc);
 

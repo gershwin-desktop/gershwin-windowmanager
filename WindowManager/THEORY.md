@@ -132,6 +132,20 @@ The frame's geometry encompasses both the titlebar and client:
 └─────────────────────────────────────────┘ ← Frame bottom
 ```
 
+### EWMH frame extents
+
+Per EWMH §5.17 the WM MUST publish the decoration sizes on each client window
+as `_NET_FRAME_EXTENTS` (left, right, top, bottom), in pixels.  Workspace
+depends on this to persist a window's **content rect** (client area excluding
+the title bar/borders) in `.DS_Store` and restore the full frame on reopen:
+it reads our extents via `-frameExtentsForWindow:` and adds them to the saved
+content rect, the exact inverse of the save.  The values are set in
+`EWMHService` (`updateNetFrameExtentsForWindow:`) as `{cb, cb, titleHeight,
+cb}`, where `cb` is 0 in compositor mode and the scale factor otherwise.  The
+extents must stay in sync with the actual frame layout above (client at
+`(cb, titleHeight)`, sized `frame - (cb+cb, titleHeight+cb)`), otherwise a
+saved window drifts by a pixel on every open/close cycle.
+
 ---
 
 ## Rendering Pipeline

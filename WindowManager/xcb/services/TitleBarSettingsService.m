@@ -52,6 +52,16 @@
     return height;
 }
 
+- (CGFloat)scaleFactor
+{
+    return _scaleFactor > 0 ? _scaleFactor : 1.0;
+}
+
+- (void)setScaleFactor:(CGFloat)factor
+{
+    _scaleFactor = factor > 0 ? factor : 1.0;
+}
+
 - (uint16_t) defaultHeight
 {
     return defaultHeight;

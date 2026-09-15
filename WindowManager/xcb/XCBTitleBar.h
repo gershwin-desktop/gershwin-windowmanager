@@ -42,6 +42,31 @@ XCB_EVENT_MASK_KEY_PRESS
 @property (strong, nonatomic) EWMHService *ewmhService;
 @property (nonatomic, assign) BOOL titleIsSet;
 
+// Content-activity spinner: small rotating indicator painted into the
+// titlebar pixmap right after the title text whenever the (possibly
+// hidden/shaded) client content changed within the last 2 seconds.
+@property (nonatomic, assign) int spinnerPhase;
+@property (nonatomic, assign) xcb_gcontext_t spinnerGC;
+@property (nonatomic, assign) BOOL spinnerDrawn;
+// >= 0 while the theme render should overlay the spinner frame at
+// spinnerTargetX; -1 renders the clean bar.
+@property (nonatomic, assign) int spinnerRenderFrame;
+// Current draw alpha (0 = hidden, 1 = fully shown).  Driven toward
+// spinnerFadeTarget over SPINNER_FADE_MS by the fade timer so the spinner
+// fades in/out instead of popping.
+@property (nonatomic, assign) CGFloat spinnerAlpha;
+@property (nonatomic, assign) CGFloat spinnerFadeTarget;
+@property (nonatomic, assign) BOOL spinnerFading;
+@property (nonatomic, strong) NSTimer *spinnerFadeTimer;
+// Continuous (sub-frame) rotation accumulator and last-step timestamp so the
+// spinner keeps rotating smoothly across the whole fade, driven by the anim
+// timer rather than the 0.1s controller tick.
+@property (nonatomic, assign) CGFloat spinnerPhaseF;
+@property (nonatomic, assign) NSTimeInterval spinnerLastStep;
+
+- (void) updateSpinnerForActivity:(BOOL)active;
+- (CGFloat) spinnerTargetX;
+
 - (id) initWithFrame:(XCBFrame*) aFrame withConnection:(XCBConnection*) aConnection;
 - (void) drawArcsForColor:(TitleBarColor)aColor;
 
