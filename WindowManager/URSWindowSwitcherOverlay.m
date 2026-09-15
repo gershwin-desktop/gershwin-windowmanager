@@ -5,22 +5,15 @@
 //  Visual overlay showing application icons and names during Alt-Tab cycling
 //  Displays a horizontal strip with rounded rect background, icons, and app name
 //
-//  TRANSPARENCY REQUIREMENTS (X11):
-//  To achieve true transparency with rounded corners on X11, the following are needed:
-//  1. COMPOSITE extension enabled in X server (check with: xdpyinfo | grep Composite)
-//  2. A compositor running (compton/picom) OR window manager handling compositing
-//  3. ARGB visual (32-bit color depth with alpha channel)
-//
-//  This implementation requests ARGB visual and sets appropriate window properties.
-//  Without a compositor, the "transparent" areas will appear as garbage/black.
+//  The rounded corners are only transparent while this window manager's own
+//  compositor runs: the GNUstep backend already gives the window a 32-bit
+//  ARGB visual and the compositor redirects all windows.  Without compositing
+//  the corners are drawn square instead.
 //
 
 #import "URSWindowSwitcherOverlay.h"
 #import "URSCompositingManager.h"
 #import <GNUstepGUI/GSDisplayServer.h>
-#import <X11/Xlib.h>
-#import <X11/Xutil.h>
-#import <X11/extensions/Xcomposite.h>
 
 // Constants for the switcher appearance
 static const CGFloat kIconSize = 48.0;
@@ -214,90 +207,9 @@ static const CGFloat kSelectionPadding = 6.0;
         URSWindowSwitcherOverlayView *contentView = 
             [[URSWindowSwitcherOverlayView alloc] initWithFrame:contentRect];
         [self setContentView:contentView];
-        
-        // Request ARGB visual for true transparency on X11
-        [self configureARGBVisualForX11];
-        
-        //NSLog(@"[WindowSwitcherOverlay] Initialized with ARGB transparency support");
     }
     
     return self;
-}
-
-- (void)configureARGBVisualForX11 {
-    // This method configures the window to use an ARGB visual on X11
-    // which is required for true transparency through the COMPOSITE extension
-    
-#ifdef __linux__
-    @try {
-        // Get the X11 window number from the NSWindow
-        NSInteger windowNumber = [self windowNumber];
-        if (windowNumber <= 0) {
-            //NSLog(@"[WindowSwitcherOverlay] No window number yet, will use default visual");
-            return;
-        }
-        
-        // Open connection to X11
-        Display *display = XOpenDisplay(NULL);
-        if (!display) {
-            NSLog(@"[WindowSwitcherOverlay] Could not open X11 display");
-            return;
-        }
-        
-        Window xwindow = (Window)windowNumber;
-        int screen = DefaultScreen(display);
-        
-        // Check if COMPOSITE extension is available
-        int composite_event_base, composite_error_base;
-        if (!XCompositeQueryExtension(display, &composite_event_base, &composite_error_base)) {
-            NSLog(@"[WindowSwitcherOverlay] WARNING: X COMPOSITE extension not available!");
-            //NSLog(@"[WindowSwitcherOverlay] Rounded corner transparency will NOT work.");
-            //NSLog(@"[WindowSwitcherOverlay] Enable Composite in X server and run a compositor (picom/compton)");
-            XCloseDisplay(display);
-            return;
-        }
-        
-        int composite_major, composite_minor;
-        XCompositeQueryVersion(display, &composite_major, &composite_minor);
-        //NSLog(@"[WindowSwitcherOverlay] X COMPOSITE extension available: v%d.%d", 
-//              composite_major, composite_minor);
-        
-        // Find ARGB visual (32-bit depth with alpha channel)
-        XVisualInfo visual_template;
-        visual_template.screen = screen;
-        visual_template.depth = 32;
-        visual_template.class = TrueColor;
-        
-        int num_visuals = 0;
-        XVisualInfo *visual_info = XGetVisualInfo(display,
-                                                   VisualScreenMask | VisualDepthMask | VisualClassMask,
-                                                   &visual_template,
-                                                   &num_visuals);
-        
-        if (visual_info && num_visuals > 0) {
-            //NSLog(@"[WindowSwitcherOverlay] Found %d ARGB visuals (32-bit with alpha)", num_visuals);
-            
-            // Set window attributes for compositing
-            // Redirect the window for compositing - this tells the X server
-            // that this window should be composited by the compositor
-            XCompositeRedirectWindow(display, xwindow, CompositeRedirectManual);
-            
-            XFree(visual_info);
-            //NSLog(@"[WindowSwitcherOverlay] Successfully configured for ARGB transparency");
-        } else {
-            NSLog(@"[WindowSwitcherOverlay] WARNING: No 32-bit ARGB visual found!");
-            //NSLog(@"[WindowSwitcherOverlay] The X server may not support true transparency.");
-        }
-        
-        XCloseDisplay(display);
-        
-    } @catch (NSException *exception) {
-        NSLog(@"[WindowSwitcherOverlay] Exception configuring ARGB: %@", exception.reason);
-    }
-#else
-    // On non-Linux platforms (macOS, BSD), transparency should work natively
-    //NSLog(@"[WindowSwitcherOverlay] Non-Linux platform, using native transparency");
-#endif
 }
 
 - (void)showCenteredOnScreen {

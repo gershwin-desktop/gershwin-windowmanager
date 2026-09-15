@@ -105,7 +105,7 @@ $(APP_NAME)_HEADER_FILES = \
 
 $(APP_NAME)_GUI_LIBS = \
 		$(shell pkg-config --libs xcb xcb-icccm xcb-xfixes xcb-aux xcb-cursor xcb-shape xcb-randr) \
-		-lxcb-util -lX11 -lXcomposite -lXext \
+		-lxcb-util -lX11 -lXext \
 		-lxcb-composite -lxcb-render -lxcb-damage -lxcb-shm -lxcb-present
 
 ADDITIONAL_OBJCFLAGS = -std=c99 -g -O0 -fobjc-arc -fblocks -Wall -Wno-typedef-redefinition -D_GNU_SOURCE
