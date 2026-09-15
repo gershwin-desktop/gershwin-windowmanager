@@ -122,6 +122,11 @@ typedef void (^dispatch_block_t)(void);
 - (void)setSkipShadowForWindow:(xcb_window_t)windowId;
 - (void)clearSkipShadowForWindow:(xcb_window_t)windowId;
 
+// Corner radius (in pixels) of a window drawn with rounded corners through its
+// alpha channel, so its drop shadow follows the arcs; 0 restores the
+// rectangular shadow.
+- (void)setShadowCornerRadius:(CGFloat)radius forWindow:(xcb_window_t)windowId;
+
 // Fast check used by the event loop to avoid redundant performRepairNow calls
 - (BOOL)hasPendingDamage;
 

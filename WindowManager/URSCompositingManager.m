@@ -95,6 +95,8 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 @property (assign, nonatomic) int16_t shadowOffsetY;
 @property (assign, nonatomic) uint16_t shadowWidth;
 @property (assign, nonatomic) uint16_t shadowHeight;
+// The window's own footprint is cut out of the shadow image (rounded corners)
+@property (assign, nonatomic) BOOL shadowHasCutout;
 // Timestamp set when the window is mapped (NSDate timeIntervalSinceReferenceDate)
 @property (assign, nonatomic) NSTimeInterval mappedAt;
 // Animation state
@@ -260,6 +262,7 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 
 // Windows that should not have drop shadows rendered (e.g. snap preview overlay)
 @property (strong, nonatomic) NSMutableSet<NSNumber *> *noShadowWindows;
+@property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSNumber *> *shadowCornerRadii;
 
 // Animation timer
 @property (strong, nonatomic) NSTimer *animationTimer;
@@ -336,6 +339,7 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
         
         // Initialize no-shadow windows set
         _noShadowWindows = [[NSMutableSet alloc] init];
+        _shadowCornerRadii = [[NSMutableDictionary alloc] init];
 
         // OPTIMIZATION: Initialize MIT-SHM (will be checked during extension query)
         _shmAvailable = NO;
@@ -1561,6 +1565,48 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
     }
 }
 
+- (void)setShadowCornerRadius:(CGFloat)radius forWindow:(xcb_window_t)windowId {
+    if (windowId == XCB_NONE) {
+        return;
+    }
+    NSNumber *key = @(windowId);
+    if ([self.shadowCornerRadii[key] doubleValue] == radius) {
+        return;
+    }
+    if (radius > 0) {
+        self.shadowCornerRadii[key] = @(radius);
+    } else {
+        [self.shadowCornerRadii removeObjectForKey:key];
+    }
+
+    // A shadow built for the previous radius no longer matches the corners.
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (cw && cw.shadowPicture != XCB_NONE) {
+        [self damageWindowArea:cw];
+        [self discardShadowForWindow:cw];
+    }
+}
+
+// Free the drop shadow so paintWindow: rebuilds it for the current geometry.
+// The dimensions are reset too, so windowExtents: falls through to the
+// geometric estimation block.  Otherwise the expansion loop in paintAll: reads
+// stale nonzero shadowWidth/Height and computes a bounding box that doesn't
+// match the new shadow size; the background fill then misses part of the
+// shadow area and leftover pixels darken the shadow.
+- (void)discardShadowForWindow:(URSCompositeWindow *)cw {
+    xcb_connection_t *conn = [self.connection connection];
+    if (cw.shadowPicture != XCB_NONE) {
+        xcb_render_free_picture(conn, cw.shadowPicture);
+        cw.shadowPicture = XCB_NONE;
+    }
+    if (cw.shadowPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, cw.shadowPixmap);
+        cw.shadowPixmap = XCB_NONE;
+    }
+    cw.shadowWidth = 0;
+    cw.shadowHeight = 0;
+}
+
 - (void)registerWindow:(xcb_window_t)window {
     [self addWindow:window];
     [self.parentFrameCache removeAllObjects];
@@ -1994,18 +2040,7 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
                 xcb_render_free_picture(conn, cw.picture);
                 cw.picture = XCB_NONE;
             }
-            if (cw.shadowPicture != XCB_NONE) {
-                xcb_render_free_picture(conn, cw.shadowPicture);
-                cw.shadowPicture = XCB_NONE;
-            }
-            if (cw.shadowPixmap != XCB_NONE) {
-                xcb_free_pixmap(conn, cw.shadowPixmap);
-                cw.shadowPixmap = XCB_NONE;
-            }
-            // Reset dimensions so windowExtents: falls through to the
-            // geometric estimation block rather than using stale values.
-            cw.shadowWidth = 0;
-            cw.shadowHeight = 0;
+            [self discardShadowForWindow:cw];
             // Reset lazy picture flags so picture is recreated
             cw.pictureValid = NO;
             cw.needsPictureCreation = YES;
@@ -3628,6 +3663,18 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     return (uint8_t)(v * opacity * 255.0);
 }
 
+// Anti-aliased coverage of pixel (px, py) by a rounded rectangle, from the
+// signed distance between the pixel centre and the outline.
+static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
+                                     double rw, double rh, double radius) {
+    double r = fmin(radius, fmin(rw, rh) * 0.5);
+    double dx = fabs(px + 0.5 - (rx + rw * 0.5)) - (rw * 0.5 - r);
+    double dy = fabs(py + 0.5 - (ry + rh * 0.5)) - (rh * 0.5 - r);
+    double outside = hypot(fmax(dx, 0.0), fmax(dy, 0.0));
+    double inside = fmin(fmax(dx, dy), 0.0);
+    return URSClampDouble(0.5 - (outside + inside - r), 0.0, 1.0);
+}
+
 // Pre-compute shadow corners and edges for fast lookup
 - (void)presumGaussianMap {
     if (!self.gaussianMap || self.gaussianSize <= 0) return;
@@ -3753,6 +3800,90 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     return data;
 }
 
+// Shadow for a window whose alpha channel rounds its corners: the Gaussian
+// blur of the rounded footprint instead of the rectangle.  Shadows are
+// composited on top of the window, so a rectangular one can only be painted in
+// strips outside the window rect, which leaves the transparent corners outside
+// the arcs unshadowed.  With the window's own footprint (at the offset the
+// shadow is painted with) cut out, this image can be painted whole instead.
+- (uint8_t *)makeRoundedShadowImage:(int)width height:(int)height
+                             radius:(double)radius
+                            offsetX:(int)offsetX offsetY:(int)offsetY
+                        shadowWidth:(int *)swidth shadowHeight:(int *)sheight {
+    int size = self.gaussianSize;
+    int center = size / 2;
+
+    *swidth = width + size;
+    *sheight = height + size;
+
+    if (*swidth < 1 || *sheight < 1 || !self.gaussianMap) return NULL;
+
+    int sw = *swidth;
+    int sh = *sheight;
+    double *kernel = calloc(size, sizeof(double));
+    double *footprint = calloc((size_t)sw * sh, sizeof(double));
+    double *rowBlur = calloc((size_t)sw * sh, sizeof(double));
+    uint8_t *data = calloc((size_t)sw * sh, sizeof(uint8_t));
+    if (!kernel || !footprint || !rowBlur || !data) {
+        free(kernel);
+        free(footprint);
+        free(rowBlur);
+        free(data);
+        return NULL;
+    }
+
+    // The map is a normalized separable 2D Gaussian: its row sums form the
+    // matching 1D kernel, and two 1D passes equal the 2D convolution at a
+    // fraction of the cost.
+    for (int i = 0; i < size; i++) {
+        for (int j = 0; j < size; j++) {
+            kernel[i] += self.gaussianMap[i * size + j];
+        }
+    }
+
+    // Same placement as makeShadowImage: the footprint starts at center.
+    for (int y = 0; y < sh; y++) {
+        for (int x = 0; x < sw; x++) {
+            footprint[y * sw + x] = URSRoundedRectCoverage(x, y, center, center,
+                                                           width, height, radius);
+        }
+    }
+
+    for (int y = 0; y < sh; y++) {
+        for (int x = 0; x < sw; x++) {
+            double v = 0.0;
+            for (int k = 0; k < size; k++) {
+                int sx = x + k - center;
+                if (sx >= 0 && sx < sw) {
+                    v += footprint[y * sw + sx] * kernel[k];
+                }
+            }
+            rowBlur[y * sw + x] = v;
+        }
+    }
+
+    for (int y = 0; y < sh; y++) {
+        for (int x = 0; x < sw; x++) {
+            double v = 0.0;
+            for (int k = 0; k < size; k++) {
+                int sy = y + k - center;
+                if (sy >= 0 && sy < sh) {
+                    v += rowBlur[sy * sw + x] * kernel[k];
+                }
+            }
+            double covered = URSRoundedRectCoverage(x, y, -offsetX, -offsetY,
+                                                    width, height, radius);
+            data[y * sw + x] = (uint8_t)(fmin(v, 1.0) * (1.0 - covered)
+                                         * SHADOW_OPACITY * 255.0);
+        }
+    }
+
+    free(kernel);
+    free(footprint);
+    free(rowBlur);
+    return data;
+}
+
 - (void)createShadowForWindow:(URSCompositeWindow *)cw {
     URS_PROFILE_BEGIN(shadowCreate);
     xcb_connection_t *conn = [self.connection connection];
@@ -3841,10 +3972,22 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     
     // Generate shadow image in memory
     int swidth, sheight;
-    uint8_t *shadow_data = [self makeShadowImage:cw.width + 2 * cw.borderWidth 
-                                          height:cw.height + 2 * cw.borderWidth
-                                     shadowWidth:&swidth 
-                                    shadowHeight:&sheight];
+    uint8_t *shadow_data;
+    double cornerRadius = [self.shadowCornerRadii[@(cw.windowId)] doubleValue];
+    if (cornerRadius > 0) {
+        shadow_data = [self makeRoundedShadowImage:cw.width + 2 * cw.borderWidth
+                                            height:cw.height + 2 * cw.borderWidth
+                                            radius:cornerRadius
+                                           offsetX:SHADOW_OFFSET_X
+                                           offsetY:SHADOW_OFFSET_Y
+                                       shadowWidth:&swidth
+                                      shadowHeight:&sheight];
+    } else {
+        shadow_data = [self makeShadowImage:cw.width + 2 * cw.borderWidth
+                                     height:cw.height + 2 * cw.borderWidth
+                                shadowWidth:&swidth
+                               shadowHeight:&sheight];
+    }
     if (!shadow_data) {
         NSLog(@"[Shadow] Failed to create shadow image");
         return;
@@ -3860,7 +4003,8 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
     cw.shadowHeight = sheight;
     cw.shadowOffsetX = SHADOW_OFFSET_X;
     cw.shadowOffsetY = SHADOW_OFFSET_Y;
-    
+    cw.shadowHasCutout = (cornerRadius > 0);
+
     // Create shadow using ARGB32 format directly
     // Convert 8-bit alpha data to ARGB32 (pre-multiplied black+alpha)
     uint32_t *argb_data = (uint32_t *)malloc(swidth * sheight * sizeof(uint32_t));
@@ -4060,22 +4204,7 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
                                 cw.shadowHeight != expectedShadowHeight);
 
         if (![self.connection resizeState] && shadowSizeStale) {
-            if (cw.shadowPicture != XCB_NONE) {
-                xcb_render_free_picture(conn, cw.shadowPicture);
-                cw.shadowPicture = XCB_NONE;
-            }
-            if (cw.shadowPixmap != XCB_NONE) {
-                xcb_free_pixmap(conn, cw.shadowPixmap);
-                cw.shadowPixmap = XCB_NONE;
-            }
-            // Reset dimensions so windowExtents: falls through to the
-            // geometric estimation block.  Without this, the expansion
-            // loop in paintAll: reads stale nonzero shadowWidth/Height
-            // and computes a bounding box that doesn't match the new
-            // shadow size, causing the background fill to miss part of
-            // the shadow area → leftover pixels darken the shadow.
-            cw.shadowWidth = 0;
-            cw.shadowHeight = 0;
+            [self discardShadowForWindow:cw];
         }
 
         if (cw.shadowPicture == XCB_NONE && ![self.connection resizeState]) {
@@ -4246,13 +4375,24 @@ static uint8_t sum_gaussian(double *map, int map_size, double opacity,
             }
         }
 
-        uint16_t winW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
-        uint16_t winH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
-        [self compositeShadowStrips:cw connection:conn
-                            shadowX:shadowX shadowY:shadowY
-                       shadowWidth:drawShadowWidth shadowHeight:drawShadowHeight
-                             winX:screenX winY:screenY
-                             winW:winW winH:winH];
+        if (cw.shadowHasCutout) {
+            // The window's footprint is already cut out of this shadow, so
+            // painting it whole reaches the transparent corners outside the
+            // arcs without covering the window.
+            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                                 0, 0, 0, 0,
+                                 shadowX, shadowY,
+                                 drawShadowWidth, drawShadowHeight);
+        } else {
+            uint16_t winW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
+            uint16_t winH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
+            [self compositeShadowStrips:cw connection:conn
+                                shadowX:shadowX shadowY:shadowY
+                           shadowWidth:drawShadowWidth shadowHeight:drawShadowHeight
+                                 winX:screenX winY:screenY
+                                 winW:winW winH:winH];
+        }
 
         if (appliedShadowScale) {
             xcb_render_transform_t resetShadow = URSIdentityTransform();

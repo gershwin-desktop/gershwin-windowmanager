@@ -17,6 +17,7 @@
 
 #import "URSWindowSwitcherOverlay.h"
 #import "URSCompositingManager.h"
+#import <GNUstepGUI/GSDisplayServer.h>
 #import <X11/Xlib.h>
 #import <X11/Xutil.h>
 #import <X11/extensions/Xcomposite.h>
@@ -381,7 +382,16 @@ static const CGFloat kSelectionPadding = 6.0;
     // Import the compositing manager header at the top if needed
     URSCompositingManager *compositor = [URSCompositingManager sharedManager];
     view.useRoundedCorners = [compositor compositingActive];
-    
+    if (view.useRoundedCorners) {
+        // A rectangular drop shadow leaves unshadowed square notches around
+        // the arcs, so the compositor has to know the radius.  -windowNumber
+        // is the backend's window tag, not the X window id.
+        xcb_window_t xid = (xcb_window_t)(uintptr_t)
+            [GSCurrentServer() windowDevice:[self windowNumber]];
+        [compositor setShadowCornerRadius:kCornerRadius * [self userSpaceScaleFactor]
+                                forWindow:xid];
+    }
+
     [view setNeedsDisplay:YES];
     // Force synchronous redraw so the highlight updates immediately.
     // On GNUstep/X11 with the hybrid event loop, -setNeedsDisplay: is
