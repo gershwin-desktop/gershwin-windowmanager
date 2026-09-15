@@ -195,6 +195,8 @@ static void killOtherInstances(void) {
     xcb_timestamp_t _lastTitlebarClickTime;
     xcb_window_t _lastTitlebarClickWindow;
 }
+- (NSSet *)dockOwnerLeaders;
+- (BOOL)isDockPopup:(XCBWindow *)aWindow forDockOwnerLeaders:(NSSet *)dockOwnerLeaders;
 @end
 
 @implementation XCBConnection
@@ -416,6 +418,43 @@ static XCBConnection *sharedInstance;
     key = nil;
 }
 
+// The application owning a dock is identified by its ICCCM group leader, not
+// by _NET_WM_PID: GNUstep only sets the PID when it saw the WM's EWMH support
+// at startup, which an application launched together with the WM can miss.
+- (NSSet *)dockOwnerLeaders
+{
+    NSString *dockType = [[EWMHService sharedInstanceWithConnection:self] EWMHWMWindowTypeDock];
+    NSMutableSet *leaders = [NSMutableSet set];
+
+    for (XCBWindow *aWindow in [windowsMap allValues])
+    {
+        xcb_window_t leader = [[aWindow leaderWindow] window];
+
+        if (leader != XCB_NONE && [[aWindow windowType] isEqualToString:dockType])
+            [leaders addObject:[NSNumber numberWithUnsignedInt:leader]];
+    }
+    return leaders;
+}
+
+// A dock never becomes the focused window, so the context menus and tooltips
+// its own application opens from it never qualify for the focused-application
+// raise and would end up beneath the very dock they belong to.  They only
+// exist while the user interacts with the dock, so keeping them above it
+// cannot cover the window the user is working with.
+- (BOOL)isDockPopup:(XCBWindow *)aWindow forDockOwnerLeaders:(NSSet *)dockOwnerLeaders
+{
+    if ([aWindow decorated] || [aWindow isKindOfClass:[XCBFrame class]])
+        return NO;
+    if (![dockOwnerLeaders containsObject:
+            [NSNumber numberWithUnsignedInt:[[aWindow leaderWindow] window]]])
+        return NO;
+
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    NSString *type = [aWindow windowType];
+    return !([type isEqualToString:[ewmhService EWMHWMWindowTypeDock]] ||
+             [type isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]]);
+}
+
 - (void)restackDockWindowsAbove
 {
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
@@ -481,6 +520,23 @@ static XCBConnection *sharedInstance;
                 {
                     [compositor markStackingOrderDirtyForWindow:[aWindow window]];
                 }
+            }
+        }
+    }
+
+    // The docks were just raised above their own popups; put those back on top.
+    {
+        NSSet *dockOwnerLeaders = [self dockOwnerLeaders];
+
+        for (XCBWindow *aWindow in [windowsMap allValues])
+        {
+            if (![aWindow isMapped] ||
+                ![self isDockPopup:aWindow forDockOwnerLeaders:dockOwnerLeaders])
+                continue;
+            [aWindow stackAbove];
+            if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+            {
+                [compositor markStackingOrderDirtyForWindow:[aWindow window]];
             }
         }
     }
@@ -1622,6 +1678,11 @@ static XCBConnection *sharedInstance;
 
             // No frame, just map the window
             [self mapWindow:window];
+
+            // A reused popup keeps the stacking position it had when it was
+            // hidden, which is beneath the dock that has been raised since.
+            if ([self isDockPopup:window forDockOwnerLeaders:[self dockOwnerLeaders]])
+                [window stackAbove];
         }
 
         window = nil;
@@ -1937,6 +1998,10 @@ static XCBConnection *sharedInstance;
                 // This is needed for _NET_ACTIVE_WINDOW to be updated when clicking
                 [window grabButton];
                 //NSLog(@"[MapRequest] Grabbed button on undecorated window %u for focus tracking", [window window]);
+
+                if (!self.adoptingExistingWindows &&
+                    [self isDockPopup:window forDockOwnerLeaders:[self dockOwnerLeaders]])
+                    [window stackAbove];
 
                 window = nil;
                 ewmhService = nil;
