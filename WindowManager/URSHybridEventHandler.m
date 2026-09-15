@@ -2629,80 +2629,6 @@ static CGFloat WMLastScaleFactor = 1.0;
 
 #pragma mark - Window Title Updates
 
-- (NSString *)readUTF8Property:(NSString *)propertyName forWindow:(XCBWindow *)window
-{
-    if (!propertyName || !window) {
-        return nil;
-    }
-
-    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-
-    xcb_atom_t propertyAtom = [atomService atomFromCachedAtomsWithKey:propertyName];
-    if (propertyAtom == XCB_ATOM_NONE) {
-        propertyAtom = [atomService cacheAtom:propertyName];
-    }
-
-    xcb_atom_t utf8Atom = [atomService atomFromCachedAtomsWithKey:[ewmhService UTF8_STRING]];
-    if (utf8Atom == XCB_ATOM_NONE) {
-        utf8Atom = [atomService cacheAtom:[ewmhService UTF8_STRING]];
-    }
-
-    xcb_get_property_cookie_t cookie = xcb_get_property([connection connection],
-                                                         0,
-                                                         [window window],
-                                                         propertyAtom,
-                                                         utf8Atom,
-                                                         0,
-                                                         1024);
-    xcb_generic_error_t *propError = NULL;
-    xcb_get_property_reply_t *reply = xcb_get_property_reply([connection connection], cookie, &propError);
-    if (propError)
-    {
-        free(propError);
-        return nil;
-    }
-    if (!reply) {
-        return nil;
-    }
-
-    int length = xcb_get_property_value_length(reply);
-    if (length <= 0) {
-        free(reply);
-        return nil;
-    }
-
-    const char *bytes = (const char *)xcb_get_property_value(reply);
-    NSString *value = [[NSString alloc] initWithBytes:bytes length:(NSUInteger)length encoding:NSUTF8StringEncoding];
-    free(reply);
-    return value;
-}
-
-- (NSString *)titleForClientWindow:(XCBWindow *)clientWindow
-{
-    if (!clientWindow) {
-        return @"";
-    }
-
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-
-    NSString *title = [self readUTF8Property:[ewmhService EWMHWMVisibleName] forWindow:clientWindow];
-    if (!title || [title length] == 0) {
-        title = [self readUTF8Property:[ewmhService EWMHWMName] forWindow:clientWindow];
-    }
-
-    if (!title || [title length] == 0) {
-        ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-        title = [icccmService getWmNameForWindow:clientWindow];
-    }
-
-    if (!title) {
-        title = @"";
-    }
-
-    return title;
-}
-
 // The _GERSHWIN_CONTENT_ACTIVITY property is set by apps (gershwin-terminal)
 // to report that their window content changed.  Unlike X Damage it fires
 // regardless of visibility - crucial for WindowShaded windows, whose client is
@@ -2816,7 +2742,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         return;
     }
 
-    NSString *newTitle = [self titleForClientWindow:(clientWindow ? clientWindow : eventWindow)];
+    NSString *newTitle = [(clientWindow ? clientWindow : eventWindow) title];
 
     [titlebar setInternalTitle:newTitle];
 

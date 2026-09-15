@@ -191,6 +191,9 @@
                 delete:(BOOL)deleteProperty
                 length:(uint32_t)len;
 
+// Value of a UTF8_STRING property, or nil if it is absent or of another type.
+- (NSString *) utf8StringProperty:(NSString *)aPropertyName forWindow:(XCBWindow *)aWindow;
+
 - (void) updateNetFrameExtentsForWindow:(XCBWindow*)aWindow;
 - (void) updateNetFrameExtentsForWindow:(XCBWindow*)aWindow andExtents:(uint32_t[])extents;
 - (void) updateNetWmWindowTypeDockForWindow:(XCBWindow*)aWindow;

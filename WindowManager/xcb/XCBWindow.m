@@ -490,6 +490,19 @@
     return stringId;
 }
 
+- (NSString *)title
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+
+    NSString *title = [ewmhService utf8StringProperty:[ewmhService EWMHWMVisibleName] forWindow:self];
+    if ([title length] == 0)
+        title = [ewmhService utf8StringProperty:[ewmhService EWMHWMName] forWindow:self];
+    if ([title length] == 0)
+        title = [[ICCCMService sharedInstanceWithConnection:connection] getWmNameForWindow:self];
+
+    return title ? title : @"";
+}
+
 - (XCBWindow *)parentWindow
 {
     return parentWindow;
@@ -897,29 +910,7 @@
         }
     }
 
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-    NSString *windowTitle = nil;
-
-    xcb_get_property_reply_t *reply = [ewmhService getProperty:[ewmhService EWMHWMName]
-                                                  propertyType:XCB_GET_PROPERTY_TYPE_ANY
-                                                     forWindow:self
-                                                        delete:NO
-                                                        length:UINT32_MAX];
-    if (reply)
-    {
-        char *value = xcb_get_property_value(reply);
-        int len = xcb_get_property_value_length(reply);
-        if (len > 0)
-            windowTitle = [[NSString alloc] initWithBytes:value length:len encoding:NSUTF8StringEncoding];
-        free(reply);
-    }
-
-    if ([windowTitle length] == 0)
-    {
-        ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-        windowTitle = [icccmService getWmNameForWindow:self];
-    }
-
+    NSString *windowTitle = [self title];
     if ([windowTitle length] == 0)
         windowTitle = [NSString stringWithFormat:@"0x%x", window];
 

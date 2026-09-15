@@ -135,6 +135,10 @@ typedef NS_ENUM(NSInteger, WindowState)
 - (void) setWindow:(xcb_window_t) aWindow;
 - (NSString*) windowIdStringValue;
 
+// Title of this client window: the EWMH UTF-8 names, else ICCCM WM_NAME.
+// Empty if none can be read; never nil.
+- (NSString*) title;
+
 - (id) initWithXCBWindow:(xcb_window_t) aWindow
            andConnection:(XCBConnection*)aConnection;
 

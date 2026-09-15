@@ -343,36 +343,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     [self addChildWindow:titleBar withKey:TitleBar];
 
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-
-    xcb_get_property_reply_t* reply = [ewmhService getProperty:[ewmhService EWMHWMName]
-                              propertyType:XCB_GET_PROPERTY_TYPE_ANY
-                                 forWindow:clientWindow
-                                    delete:NO
-                                    length:UINT32_MAX];
-
-    NSString* windowTitle;
-    if (reply)
-    {
-        char *value = xcb_get_property_value(reply);
-        int len = xcb_get_property_value_length(reply);
-            //NSLog(@"Window title: %s, len: %d", value, len);
-        windowTitle = [NSString stringWithCString:value length:len];
-    }
-
-    // for now if it is nil just set an empty string
-
-    if (windowTitle == nil)
-    {
-        ICCCMService* icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-
-        windowTitle = [icccmService getWmNameForWindow:clientWindow];
-
-        if (windowTitle == nil)
-            windowTitle = @"";
-
-        icccmService = nil;
-    }
+    NSString *windowTitle = [clientWindow title];
 
     [titleBar onScreen];
     [titleBar updateAttributes];
@@ -451,13 +422,10 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     titleBar = nil;
     clientWindow = nil;
-    ewmhService = nil;
     windowTitle = nil;
     scr = nil;
     rootVisual = nil;
     settings = nil;
-
-    free(reply);
 }
 
 - (void)createResizeHandle

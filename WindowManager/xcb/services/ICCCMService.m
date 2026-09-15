@@ -8,6 +8,10 @@
 
 #import "ICCCMService.h"
 
+// Text property types WM_NAME may carry besides STRING
+static NSString * const kUTF8StringAtom = @"UTF8_STRING";
+static NSString * const kCompoundTextAtom = @"COMPOUND_TEXT";
+
 @implementation ICCCMService
 
 @synthesize WMDeleteWindow;
@@ -54,7 +58,9 @@
         WMState,
         WMHints,
         WMChangeState,
-        WMClass
+        WMClass,
+        kUTF8StringAtom,
+        kCompoundTextAtom
     };
     
     atomsArray = [NSArray arrayWithObjects:icccmAtoms count:sizeof(icccmAtoms)/sizeof(NSString*)];
@@ -169,11 +175,27 @@
         return nil;
     }
 
+    // ICCCM defines STRING as ISO Latin-1.  COMPOUND_TEXT without escape
+    // sequences is Latin-1 too (ASCII in GL, the Latin-1 right half in GR);
+    // text switching to other character sets would need an ISO 2022 decoder,
+    // so it is left undecoded rather than shown garbled.
+    XCBAtomService *atoms = [super atomService];
+    NSStringEncoding encoding = 0;
+    if (property.encoding == [atoms atomFromCachedAtomsWithKey:kUTF8StringAtom])
+        encoding = NSUTF8StringEncoding;
+    else if (property.encoding == XCB_ATOM_STRING)
+        encoding = NSISOLatin1StringEncoding;
+    else if (property.encoding == [atoms atomFromCachedAtomsWithKey:kCompoundTextAtom]
+             && memchr(property.name, 0x1b, property.name_len) == NULL)
+        encoding = NSISOLatin1StringEncoding;
+
     // The value is not NUL-terminated: read as a C string it runs into the
     // bytes that follow it in the reply buffer and picks up stray characters.
-    NSString *name = [[NSString alloc] initWithBytes:property.name
-                                              length:property.name_len
-                                            encoding:NSASCIIStringEncoding];
+    NSString *name = nil;
+    if (encoding != 0)
+        name = [[NSString alloc] initWithBytes:property.name
+                                        length:property.name_len
+                                      encoding:encoding];
     xcb_icccm_get_text_property_reply_wipe(&property);
 
     return name;

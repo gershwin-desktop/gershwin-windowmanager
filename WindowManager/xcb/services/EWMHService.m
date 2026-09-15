@@ -636,6 +636,29 @@
     return reply;
 }
 
+- (NSString *) utf8StringProperty:(NSString *)aPropertyName forWindow:(XCBWindow *)aWindow
+{
+    // Asking for type UTF8_STRING makes the server return no value when the
+    // property has another type, so only real UTF-8 gets decoded as UTF-8.
+    xcb_get_property_reply_t *reply =
+        [self getProperty:aPropertyName
+             propertyType:[atomService atomFromCachedAtomsWithKey:UTF8_STRING]
+                forWindow:aWindow
+                   delete:NO
+                   length:UINT32_MAX];
+    if (!reply)
+        return nil;
+
+    NSString *value = nil;
+    int length = xcb_get_property_value_length(reply);
+    if (length > 0)
+        value = [[NSString alloc] initWithBytes:xcb_get_property_value(reply)
+                                         length:length
+                                       encoding:NSUTF8StringEncoding];
+    free(reply);
+    return value;
+}
+
 - (void) updateNetFrameExtentsForWindow:(XCBWindow *)aWindow
 {
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
