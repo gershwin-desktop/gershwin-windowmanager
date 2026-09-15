@@ -950,6 +950,31 @@ static XCBConnection *sharedInstance;
     window = nil;
 }
 
+/* Struts (EWMH _NET_WM_STRUT) reserve screen edges for docks such as the
+ * menu bar, so no frame may cover them - not even one whose position the
+ * application chose.  A frame larger than the workarea keeps its top-left
+ * corner inside it so the titlebar stays reachable. */
+- (XCBPoint)frameOriginConstrainedToWorkarea:(XCBPoint)origin size:(XCBSize)size
+{
+    EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self];
+    int32_t waX, waY;
+    uint32_t waW, waH;
+    // No _NET_WORKAREA means no strut is registered, so nothing is reserved.
+    if (![ewmh readWorkareaForRootWindow:[self rootWindowForScreenNumber:0]
+                                       x:&waX y:&waY width:&waW height:&waH])
+        return origin;
+
+    int32_t x = origin.x;
+    int32_t y = origin.y;
+    int32_t maxX = waX + (int32_t)waW - (int32_t)size.width;
+    int32_t maxY = waY + (int32_t)waH - (int32_t)size.height;
+    if (x > maxX) x = maxX;
+    if (y > maxY) y = maxY;
+    if (x < waX) x = waX;
+    if (y < waY) y = waY;
+    return XCBMakePoint(x, y);
+}
+
 /* Find the first free cascade position by scanning existing managed windows.
  * Classic HIG: start at workarea origin + (22, 48), step 24px diagonally.
  * Returns the first position that doesn't overlap any existing managed
@@ -2124,7 +2149,16 @@ static XCBConnection *sharedInstance;
             xPos = pos.x;
             yPos = pos.y;
         }
+    }
 
+    if (![window fullScreen]) {
+        XCBPoint origin = [self frameOriginConstrainedToWorkarea:XCBMakePoint(xPos, yPos)
+                                                             size:XCBMakeSize(winWidth, winHeight)];
+        xPos = origin.x;
+        yPos = origin.y;
+    }
+
+    if (shouldReposition || xPos != reqX || yPos != reqY) {
         // Keep the client rect in root coordinates while frame uses xPos/yPos.
         XCBRect newRect = [window windowRect];
         newRect.position.x = xPos + cb;

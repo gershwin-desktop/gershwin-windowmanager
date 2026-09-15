@@ -1223,6 +1223,27 @@
         }
     }
 
+    /* Struts stay reserved for docks such as the menu bar even when the
+       client moves its own window there. */
+    if ((anEvent->value_mask & (XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y)) && ![self fullScreen])
+    {
+        XCBPoint origin = [connection frameOriginConstrainedToWorkarea:frameRect.position
+                                                                  size:frameRect.size];
+        /* X and Y are the two lowest value-mask bits, so their values lead
+           the frame value list. */
+        unsigned short v = 0;
+        if (anEvent->value_mask & XCB_CONFIG_WINDOW_X)
+        {
+            config_frame_vals[v++] = origin.x;
+            frameRect.position.x = origin.x;
+        }
+        if (anEvent->value_mask & XCB_CONFIG_WINDOW_Y)
+        {
+            config_frame_vals[v++] = origin.y;
+            frameRect.position.y = origin.y;
+        }
+    }
+
     if (anEvent->value_mask & XCB_CONFIG_WINDOW_BORDER_WIDTH)
     {
         config_frame_mask |= XCB_CONFIG_WINDOW_BORDER_WIDTH;

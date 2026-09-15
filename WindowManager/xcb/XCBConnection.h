@@ -168,6 +168,7 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void) setCurrentTime:(xcb_timestamp_t)time;
 - (XCBWindow*) rootWindowForScreenNumber:(int)number;
 - (xcb_window_t*) clientList;
+- (XCBPoint) frameOriginConstrainedToWorkarea:(XCBPoint)origin size:(XCBSize)size;
 
 /*** WINDOW TILING ***/
 

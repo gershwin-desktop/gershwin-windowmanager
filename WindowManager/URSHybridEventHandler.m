@@ -1811,8 +1811,8 @@ static CGFloat WMLastScaleFactor = 1.0;
                 }
                 // Same rule as ICCCMService -windowSpecifiesPosition: an
                 // app-set screen position (USPosition, or PPosition away
-                // from the origin) is honored verbatim — no WM default
-                // placement and no strut nudging on top of it.
+                // from the origin) gets no WM default placement; XCBConnection
+                // only keeps its frame out of struts.
                 if (sizeHints.flags & XCB_ICCCM_SIZE_HINT_US_POSITION) {
                     appSpecifiedPosition = YES;
                 } else if ((sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_POSITION) &&
@@ -1932,7 +1932,7 @@ static CGFloat WMLastScaleFactor = 1.0;
                        geom_reply->y < waY) {
                 // WM-placed window overlaps top strut (e.g. menu bar).
                 // Push it down so the title bar is accessible.  App-positioned
-                // windows are left exactly where the application put them.
+                // windows are kept out of struts when their frame is created.
                 uint32_t configValues[] = {(uint32_t)geom_reply->x, waY};
                 xcb_configure_window([connection connection],
                                      clientWindowId,
