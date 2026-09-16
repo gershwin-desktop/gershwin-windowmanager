@@ -23,6 +23,7 @@
 #import <xcb/xcb.h>
 #import <xcb/xcb_icccm.h>
 #import "URSThemeIntegration.h"
+#import "TitleBarSettingsService.h"
 
 #pragma mark - Class Extension
 
@@ -800,12 +801,14 @@
         
         uint32_t *bestData = NULL;
         int bestWidth = 0, bestHeight = 0, bestDiff = INT_MAX;
+        // The icon is drawn 48 points wide, which is 48 * GSScaleFactor pixels.
+        int wantedPixels = (int)lround(48.0 * [[TitleBarSettingsService sharedInstance] scaleFactor]);
         uint32_t *p = data;
         while (end - p >= 2) {
             uint32_t w = p[0], h = p[1];
             uint64_t npix = (uint64_t)w * h;
             if (w < 1 || h < 1 || npix > (uint64_t)(end - p) - 2) break;
-            int diff = abs((int)w - 48) + abs((int)h - 48);
+            int diff = abs((int)w - wantedPixels) + abs((int)h - wantedPixels);
             if (diff < bestDiff) {
                 bestDiff = diff;
                 bestWidth = (int)w;
@@ -871,18 +874,25 @@
                         }
                         
                         // Search icon theme paths more thoroughly
-                        NSArray *iconPaths = @[
-                            [NSString stringWithFormat:@"/usr/share/pixmaps/%@.png", iconName],
-                            [NSString stringWithFormat:@"/usr/share/pixmaps/%@.xpm", iconName],
-                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/48x48/apps/%@.png", iconName],
-                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/32x32/apps/%@.png", iconName],
-                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/64x64/apps/%@.png", iconName],
-                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/128x128/apps/%@.png", iconName],
-                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/256x256/apps/%@.png", iconName],
-                            [NSString stringWithFormat:@"/usr/share/icons/hicolor/scalable/apps/%@.svg", iconName],
-                            [NSString stringWithFormat:@"/usr/share/icons/gnome/48x48/apps/%@.png", iconName],
-                            [NSString stringWithFormat:@"/usr/share/icons/gnome/scalable/apps/%@.svg", iconName]
-                        ];
+                        // Themed icons are searched from the size the switcher
+                        // actually draws (48 points * GSScaleFactor) upwards, so a
+                        // HiDPI screen does not end up magnifying a 48px bitmap.
+                        NSArray *sizeDirs = ([[TitleBarSettingsService sharedInstance] scaleFactor] > 1.5)
+                            ? @[@"128x128", @"256x256", @"64x64", @"48x48", @"32x32"]
+                            : @[@"48x48", @"64x64", @"32x32", @"128x128", @"256x256"];
+                        NSMutableArray *iconPaths = [NSMutableArray array];
+                        [iconPaths addObject:[NSString stringWithFormat:@"/usr/share/pixmaps/%@.png", iconName]];
+                        [iconPaths addObject:[NSString stringWithFormat:@"/usr/share/pixmaps/%@.xpm", iconName]];
+                        for (NSString *sizeDir in sizeDirs) {
+                            [iconPaths addObject:[NSString stringWithFormat:
+                                @"/usr/share/icons/hicolor/%@/apps/%@.png", sizeDir, iconName]];
+                        }
+                        [iconPaths addObject:[NSString stringWithFormat:@"/usr/share/icons/hicolor/scalable/apps/%@.svg", iconName]];
+                        for (NSString *sizeDir in sizeDirs) {
+                            [iconPaths addObject:[NSString stringWithFormat:
+                                @"/usr/share/icons/gnome/%@/apps/%@.png", sizeDir, iconName]];
+                        }
+                        [iconPaths addObject:[NSString stringWithFormat:@"/usr/share/icons/gnome/scalable/apps/%@.svg", iconName]];
                         for (NSString *iconPath in iconPaths) {
                             if ([[NSFileManager defaultManager] fileExistsAtPath:iconPath]) {
                                 return iconPath;

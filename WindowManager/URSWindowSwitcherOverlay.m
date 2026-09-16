@@ -212,30 +212,36 @@ static const CGFloat kSelectionPadding = 6.0;
     return self;
 }
 
-- (void)showCenteredOnScreen {
-    // Get main screen bounds
+// Where the panel of the given size belongs, in the device pixels window
+// frames use.  Derived from the screen every time and never from the panel's
+// current frame: whenever something else moves the window - the window manager
+// keeping it out of a strut, for instance - folding that position back into
+// the next one would let the offset accumulate and walk the panel across the
+// screen.
+- (NSRect)frameForSize:(NSSize)size {
     NSScreen *mainScreen = [NSScreen mainScreen];
     if (!mainScreen) {
         mainScreen = [[NSScreen screens] firstObject];
     }
-    
     if (!mainScreen) {
-        //NSLog(@"[WindowSwitcherOverlay] No screen available");
-        return;
+        return NSMakeRect(0, 0, size.width, size.height);
     }
-    
+
     NSRect screenFrame = [mainScreen frame];
-    NSRect windowFrame = [self frame];
-    
+
     // Center horizontally
-    CGFloat x = screenFrame.origin.x + (screenFrame.size.width - windowFrame.size.width) / 2;
-    
+    CGFloat x = screenFrame.origin.x + (screenFrame.size.width - size.width) / 2;
+
     // Position at golden ratio (flipped) - more space at TOP than bottom
     // Golden ratio: 1 / phi ≈ 0.618, so place at 1 - 0.618 = 0.382 from top
     // This leaves ~38.2% space above, ~61.8% below
-    CGFloat goldenRatioY = screenFrame.origin.y + (screenFrame.size.height * 0.382) - (windowFrame.size.height / 2);
-    
-    [self setFrameOrigin:NSMakePoint(x, goldenRatioY)];
+    CGFloat goldenRatioY = screenFrame.origin.y + (screenFrame.size.height * 0.382) - (size.height / 2);
+
+    return NSMakeRect(x, goldenRatioY, size.width, size.height);
+}
+
+- (void)showCenteredOnScreen {
+    [self setFrame:[self frameForSize:[self frame].size] display:NO];
     
     // Force the window to the absolute front, above all other windows
     [self makeKeyAndOrderFront:nil];
@@ -257,31 +263,36 @@ static const CGFloat kSelectionPadding = 6.0;
     }
     
     NSInteger count = [titles count];
+
+    // Window frames are in device pixels while the view draws in points, so at
+    // GSScaleFactor 2 this layout needs a window twice its size - otherwise the
+    // panel is half as large as its contents and clips them.
+    CGFloat scale = [self userSpaceScaleFactor];
     
     // Calculate required window size
     CGFloat totalIconWidth = count * kIconSize + (count - 1) * kIconSpacing;
     CGFloat windowWidth = totalIconWidth + 2 * kPadding + 2 * kSelectionPadding;
     CGFloat windowHeight = kPadding * 2 + kIconSize + kTitleHeight + kSelectionPadding * 2 + 8;
     
-    // Limit to reasonable max width
-    if (windowWidth > 800) {
-        windowWidth = 800;
+    // Limit to reasonable max width.  The screen frame is in device pixels, so
+    // it has to be brought back to points before it can bound this layout.
+    NSScreen *screen = [NSScreen mainScreen] ?: [[NSScreen screens] firstObject];
+    CGFloat maxWidth = 800;
+    if (screen) {
+        CGFloat screenWidthInPoints = [screen frame].size.width / scale;
+        maxWidth = MIN(maxWidth, screenWidthInPoints - 2 * kPadding);
+    }
+    if (windowWidth > maxWidth) {
+        windowWidth = maxWidth;
     }
     if (windowWidth < 400) {
         windowWidth = 400;
     }
     
-    // Update window frame, keeping centered
-    NSRect currentFrame = [self frame];
-    CGFloat centerX = currentFrame.origin.x + currentFrame.size.width / 2;
-    CGFloat centerY = currentFrame.origin.y + currentFrame.size.height / 2;
-    
-    NSRect newFrame = NSMakeRect(centerX - windowWidth / 2,
-                                  centerY - windowHeight / 2,
-                                  windowWidth,
-                                  windowHeight);
-    
-    [self setFrame:newFrame display:NO];
+    // Re-place the panel for its new size
+    [self setFrame:[self frameForSize:NSMakeSize(windowWidth * scale,
+                                                 windowHeight * scale)]
+           display:NO];
     
     // Update content view frame
     URSWindowSwitcherOverlayView *view = (URSWindowSwitcherOverlayView *)[self contentView];
@@ -300,7 +311,7 @@ static const CGFloat kSelectionPadding = 6.0;
         // is the backend's window tag, not the X window id.
         xcb_window_t xid = (xcb_window_t)(uintptr_t)
             [GSCurrentServer() windowDevice:[self windowNumber]];
-        [compositor setShadowCornerRadius:kCornerRadius * [self userSpaceScaleFactor]
+        [compositor setShadowCornerRadius:kCornerRadius * scale
                                 forWindow:xid];
     }
 
