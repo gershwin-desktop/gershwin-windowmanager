@@ -93,6 +93,10 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void) registerWindow:(XCBWindow*) aWindow;
 - (void) unregisterWindow:(XCBWindow *) aWindow;
 - (void) restackDockWindowsAbove;
+- (void) lowerNormalWindowBeneathAllPeers:(XCBWindow *)aWindow;
+- (void) lowerNormalWindowAboveDesktop:(XCBWindow *)aWindow;
+- (void) noteClientContentDamage:(xcb_window_t)windowId
+                          area:(xcb_rectangle_t)area;
 - (NSMutableDictionary *) windowsMap;
 - (void) setWindowsMap:(NSMutableDictionary *)aWindowsMap;
 - (void) closeConnection;
@@ -164,6 +168,7 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void) setCurrentTime:(xcb_timestamp_t)time;
 - (XCBWindow*) rootWindowForScreenNumber:(int)number;
 - (xcb_window_t*) clientList;
+- (XCBPoint) frameOriginConstrainedToWorkarea:(XCBPoint)origin size:(XCBSize)size;
 
 /*** WINDOW TILING ***/
 

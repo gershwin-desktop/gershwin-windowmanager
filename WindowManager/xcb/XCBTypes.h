@@ -39,37 +39,49 @@ typedef struct _XCBColor
 
 static const XCBRect XCBInvalidRect = {{0xffff, 0xffff}, {0xffff, 0xffff}};
 
-// MARK: - GSWorkspace Window Birth Protocol
-// Used by the GNUstep Workspace to communicate window birth animation
-// parameters to the Window Manager via X11 properties.
-// See PRD.md section 8 for the protocol specification.
+// MARK: - Window Birth Protocol
+// Used by Gershwin apps (e.g. Workspace) to communicate window birth
+// animation parameters to the Window Manager via X11 properties.
+//
+// The atom name is intentionally generic (no vendor prefix) so the
+// protocol could be standardized across desktops.
 
-#define GSWORKSPACE_WINDOW_BIRTH_ATOM "_GSWORKSPACE_WINDOW_BIRTH"
-#define GSWORKSPACE_WINDOW_BIRTH_NUM_INTS 9
-#define GSWORKSPACE_WINDOW_BIRTH_BYTE_LEN (GSWORKSPACE_WINDOW_BIRTH_NUM_INTS * 4)
+#define WINDOW_BIRTH_ATOM "_WINDOW_BIRTH_ANIMATION"
+#define WINDOW_BIRTH_NUM_INTS 9
+#define WINDOW_BIRTH_BYTE_LEN (WINDOW_BIRTH_NUM_INTS * 4)
 
 // Animation type values for the birth protocol
-typedef NS_ENUM(int32_t, GSWindowBirthAnimationType) {
-    GSWindowBirthAnimationOpen       = 0,  // Standard folder-open birth animation
-    GSWindowBirthAnimationNoAnimation = 1,  // Suppress animation (Reduce Motion)
+typedef NS_ENUM(int32_t, WindowBirthAnimationType) {
+    WindowBirthAnimationOpen       = 0,  // Standard folder-open birth animation
+    WindowBirthAnimationNoAnimation = 1,  // Suppress animation (Reduce Motion)
 };
 
-// Layout of the 9 int32 values written to the _GSWORKSPACE_WINDOW_BIRTH property:
+// Layout of the 9 int32 values written to the _WINDOW_BIRTH_ANIMATION property:
 //   [0] = sourceX      [1] = sourceY      [2] = sourceWidth    [3] = sourceHeight
 //   [4] = targetX      [5] = targetY      [6] = targetWidth    [7] = targetHeight
 //   [8] = animationType
 //
 // All coordinates are in root-window (X11 absolute) coordinates
 // with origin at top-left.
-#define GSWORKSPACE_BIRTH_IDX_SRC_X 0
-#define GSWORKSPACE_BIRTH_IDX_SRC_Y 1
-#define GSWORKSPACE_BIRTH_IDX_SRC_W 2
-#define GSWORKSPACE_BIRTH_IDX_SRC_H 3
-#define GSWORKSPACE_BIRTH_IDX_DST_X 4
-#define GSWORKSPACE_BIRTH_IDX_DST_Y 5
-#define GSWORKSPACE_BIRTH_IDX_DST_W 6
-#define GSWORKSPACE_BIRTH_IDX_DST_H 7
-#define GSWORKSPACE_BIRTH_IDX_ANIM_TYPE 8
+#define WINDOW_BIRTH_IDX_SRC_X 0
+#define WINDOW_BIRTH_IDX_SRC_Y 1
+#define WINDOW_BIRTH_IDX_SRC_W 2
+#define WINDOW_BIRTH_IDX_SRC_H 3
+#define WINDOW_BIRTH_IDX_DST_X 4
+#define WINDOW_BIRTH_IDX_DST_Y 5
+#define WINDOW_BIRTH_IDX_DST_W 6
+#define WINDOW_BIRTH_IDX_DST_H 7
+#define WINDOW_BIRTH_IDX_ANIM_TYPE 8
+
+// Close animation protocol: the Workspace sends a _WINDOW_CLOSE_ANIMATION
+// client message (data32: [0]=animationType, [1..4]=target x,y,w,h in X11
+// root coords) while the window is still mapped.  The WM captures a snapshot,
+// then the client's UnmapNotify triggers the shrink/fade toward the target.
+typedef NS_ENUM(int32_t, WindowCloseAnimationType) {
+    WindowCloseAnimationShrinkToIcon = 0,  // Shrink+fade toward the folder icon
+    WindowCloseAnimationNoAnimation  = 1,  // Suppress animation (Reduce Motion)
+    WindowCloseAnimationFade         = 2,  // No target - plain fade
+};
 
 /*** Utility functions ***/
 

@@ -8,7 +8,6 @@
 
 #include <unistd.h>
 #include <signal.h>
-#import <dispatch/dispatch.h>
 
 #import "XCBWindow.h"
 #import "XCBConnection.h"
@@ -18,6 +17,7 @@
 #import "EIcccm.h"
 #import "Transformers.h"
 #import "TitleBarSettingsService.h"
+#import "XCBFrame.h"
 #import <AppKit/NSAlert.h>
 
 #define BUTTONMASK  (XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE)
@@ -490,6 +490,19 @@
     return stringId;
 }
 
+- (NSString *)title
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+
+    NSString *title = [ewmhService utf8StringProperty:[ewmhService EWMHWMVisibleName] forWindow:self];
+    if ([title length] == 0)
+        title = [ewmhService utf8StringProperty:[ewmhService EWMHWMName] forWindow:self];
+    if ([title length] == 0)
+        title = [[ICCCMService sharedInstanceWithConnection:connection] getWmNameForWindow:self];
+
+    return title ? title : @"";
+}
+
 - (XCBWindow *)parentWindow
 {
     return parentWindow;
@@ -726,9 +739,14 @@
     XCBWindow *rootWindow = [[self onScreen] rootWindow];
     XCBFrame *frame;
 
-    // oldRect is only valid if it was saved during maximize.  Minimize never
-    // saves to oldRect, so fall back to the current windowRect when invalid.
-    if (!FnCheckXCBRectIsValid(oldRect)) {
+    // The window's own rect (windowRect) is preserved through minimize; it is
+    // the maximized rect when the window was maximized before minimizing, or
+    // the normal rect otherwise.  oldRect is the PRE-maximize rect saved only
+    // by maximizeToSize:, so it must not be used here: restoring a maximized
+    // window from its icon would shrink it back to the pre-maximize size.
+    // Minimize never saves to oldRect, so oldRect may even be invalid.
+    if (!FnCheckXCBRectIsValid(windowRect) ||
+        windowRect.size.width == 0 || windowRect.size.height == 0) {
         [self setNormalState];
         return;
     }
@@ -736,10 +754,8 @@
     if ([[frame parentWindow] window] != [rootWindow window])
     {
         frame = (XCBFrame*)self;
-        [connection reparentWindow:frame toWindow:rootWindow position:oldRect.position];
+        [connection reparentWindow:frame toWindow:rootWindow position:windowRect.position];
     }
-
-    windowRect = oldRect;
 
     XCBPoint position = windowRect.position;
     XCBSize size = windowRect.size;
@@ -758,8 +774,8 @@
         XCBTitleBar *titleBar = (XCBTitleBar *) [frame childWindowForKey:TitleBar];
         XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
 
-        [titleBar setWindowRect:[titleBar oldRect]];
-        [clientWindow setWindowRect:[clientWindow oldRect]];
+        [titleBar setWindowRect:[titleBar windowRect]];
+        [clientWindow setWindowRect:[clientWindow windowRect]];
         [connection mapWindow:titleBar];
 
         [titleBar drawTitleBarComponents];
@@ -894,29 +910,7 @@
         }
     }
 
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-    NSString *windowTitle = nil;
-
-    xcb_get_property_reply_t *reply = [ewmhService getProperty:[ewmhService EWMHWMName]
-                                                  propertyType:XCB_GET_PROPERTY_TYPE_ANY
-                                                     forWindow:self
-                                                        delete:NO
-                                                        length:UINT32_MAX];
-    if (reply)
-    {
-        char *value = xcb_get_property_value(reply);
-        int len = xcb_get_property_value_length(reply);
-        if (len > 0)
-            windowTitle = [[NSString alloc] initWithBytes:value length:len encoding:NSUTF8StringEncoding];
-        free(reply);
-    }
-
-    if ([windowTitle length] == 0)
-    {
-        ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-        windowTitle = [icccmService getWmNameForWindow:self];
-    }
-
+    NSString *windowTitle = [self title];
     if ([windowTitle length] == 0)
         windowTitle = [NSString stringWithFormat:@"0x%x", window];
 
@@ -941,12 +935,21 @@
 
 - (void)stackAbove
 {
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    if ([[self windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]]) {
+        return;
+    }
+
     uint32_t values[1] = {XCB_STACK_MODE_ABOVE};
     xcb_configure_window([connection connection], window, XCB_CONFIG_WINDOW_STACK_MODE, &values);
-    isAbove = YES;
-    isBelow = NO;
 
-    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    // Deliberately does NOT touch isAbove/isBelow: those flag the EWMH
+    // keep-above / keep-below state and must only change through explicit
+    // _NET_WM_STATE handling.  Ordinary raises (click-to-focus, map,
+    // unminimize) happen constantly and would otherwise corrupt the state
+    // reported to pagers.  Active-look is driven separately via setIsAbove:
+    // on titlebars from the focus code.
+
     [ewmhService updateNetClientList];
     ewmhService = nil;
 }
@@ -955,8 +958,6 @@
 {
     uint32_t values[1] = {XCB_STACK_MODE_BELOW};
     xcb_configure_window([connection connection], window, XCB_CONFIG_WINDOW_STACK_MODE, &values);
-    isAbove = NO;
-    isBelow = YES;
 
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
     [ewmhService updateNetClientList];
@@ -1213,6 +1214,27 @@
         }
     }
 
+    /* Struts stay reserved for docks such as the menu bar even when the
+       client moves its own window there. */
+    if ((anEvent->value_mask & (XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y)) && ![self fullScreen])
+    {
+        XCBPoint origin = [connection frameOriginConstrainedToWorkarea:frameRect.position
+                                                                  size:frameRect.size];
+        /* X and Y are the two lowest value-mask bits, so their values lead
+           the frame value list. */
+        unsigned short v = 0;
+        if (anEvent->value_mask & XCB_CONFIG_WINDOW_X)
+        {
+            config_frame_vals[v++] = origin.x;
+            frameRect.position.x = origin.x;
+        }
+        if (anEvent->value_mask & XCB_CONFIG_WINDOW_Y)
+        {
+            config_frame_vals[v++] = origin.y;
+            frameRect.position.y = origin.y;
+        }
+    }
+
     if (anEvent->value_mask & XCB_CONFIG_WINDOW_BORDER_WIDTH)
     {
         config_frame_mask |= XCB_CONFIG_WINDOW_BORDER_WIDTH;
@@ -1237,9 +1259,7 @@
         }
 
         config_win_mask |= XCB_CONFIG_WINDOW_STACK_MODE;
-        config_frame_mask |= XCB_CONFIG_WINDOW_STACK_MODE;
         config_win_vals[win_i++] = stack_mode;
-        config_frame_vals[frame_i++] = stack_mode;
         ewmhService = nil;
     }
 
@@ -1272,6 +1292,69 @@
     oldRect = windowRect;
     windowRect = rect;
     originalRect = rect;
+}
+
+/* Re-apply the frame geometry after a GSScaleFactor change: resize the frame
+ * and titlebar to the new titlebar height and re-position the client. */
+- (void)reframeForScaleChange
+{
+    /* Only decorated client windows live in a frame; titlebars and frames
+     * (also in the windows map) must be skipped. */
+    if (!decorated)
+        return;
+    if (![parentWindow isKindOfClass:[XCBFrame class]])
+        return;
+
+    XCBFrame *frame = (XCBFrame *)parentWindow;
+    XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+    int titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    int cb = [frame clientBorder];
+
+    /* Keep the frame's cached titlebar height in sync with the service so
+     * later interactive resizes (which read frame.titleHeight) place the
+     * client correctly below the titlebar at the new scale. */
+    [frame setTitleHeight:(uint16_t)titleHeight];
+
+    XCBGeometryReply *geo = [self geometries];
+    if (geo == nil)
+        return;
+    uint16_t cw = (uint16_t)geo.rect.size.width;
+    uint16_t ch = (uint16_t)geo.rect.size.height;
+
+    uint16_t nw = cw + 2 * cb;
+    uint16_t nh = ch + titleHeight + cb;
+
+    uint32_t fvals[] = { nw, nh };
+    xcb_configure_window([connection connection], [frame window],
+                         XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, fvals);
+
+    uint32_t cvals[] = { (uint32_t)cb, (uint32_t)titleHeight, cw, ch };
+    xcb_configure_window([connection connection], window,
+                         XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
+                         XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, cvals);
+
+    if (titleBar != nil)
+    {
+        uint32_t tvals[] = { nw, (uint32_t)titleHeight };
+        xcb_configure_window([connection connection], [titleBar window],
+                             XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, tvals);
+
+        /* Keep the titlebar's internal rect and pixmap in sync with the new
+         * size so the GSTheme re-render draws at the new scale. */
+        XCBRect tbRect = [titleBar windowRect];
+        tbRect.size.width = nw;
+        tbRect.size.height = titleHeight;
+        [titleBar setWindowRect: tbRect];
+        [titleBar createPixmap];
+    }
+
+    xcb_flush([connection connection]);
+
+    XCBRect frameRect = [frame windowRect];
+    frameRect.size.width = nw;
+    frameRect.size.height = nh;
+    [frame setWindowRect:frameRect];
 }
 
 - (XCBVisual*) visual
@@ -1333,11 +1416,6 @@
     }
 
     icccmService = nil;
-}
-
-- (void) shade
-{
-    [connection unmapWindow:self];
 }
 
 - (void) putWindowBackgroundWithPixmap:(xcb_pixmap_t)aPixmap
@@ -1402,6 +1480,12 @@
 
     if (graphicContextId != 0)
         xcb_free_gc([connection connection], graphicContextId);
+
+    if (_contentSnapshot)
+    {
+        free(_contentSnapshot);
+        _contentSnapshot = NULL;
+    }
 }
 
 @end

@@ -5,21 +5,15 @@
 //  Visual overlay showing application icons and names during Alt-Tab cycling
 //  Displays a horizontal strip with rounded rect background, icons, and app name
 //
-//  TRANSPARENCY REQUIREMENTS (X11):
-//  To achieve true transparency with rounded corners on X11, the following are needed:
-//  1. COMPOSITE extension enabled in X server (check with: xdpyinfo | grep Composite)
-//  2. A compositor running (compton/picom) OR window manager handling compositing
-//  3. ARGB visual (32-bit color depth with alpha channel)
-//
-//  This implementation requests ARGB visual and sets appropriate window properties.
-//  Without a compositor, the "transparent" areas will appear as garbage/black.
+//  The rounded corners are only transparent while this window manager's own
+//  compositor runs: the GNUstep backend already gives the window a 32-bit
+//  ARGB visual and the compositor redirects all windows.  Without compositing
+//  the corners are drawn square instead.
 //
 
 #import "URSWindowSwitcherOverlay.h"
 #import "URSCompositingManager.h"
-#import <X11/Xlib.h>
-#import <X11/Xutil.h>
-#import <X11/extensions/Xcomposite.h>
+#import <GNUstepGUI/GSDisplayServer.h>
 
 // Constants for the switcher appearance
 static const CGFloat kIconSize = 48.0;
@@ -213,116 +207,41 @@ static const CGFloat kSelectionPadding = 6.0;
         URSWindowSwitcherOverlayView *contentView = 
             [[URSWindowSwitcherOverlayView alloc] initWithFrame:contentRect];
         [self setContentView:contentView];
-        
-        // Request ARGB visual for true transparency on X11
-        [self configureARGBVisualForX11];
-        
-        //NSLog(@"[WindowSwitcherOverlay] Initialized with ARGB transparency support");
     }
     
     return self;
 }
 
-- (void)configureARGBVisualForX11 {
-    // This method configures the window to use an ARGB visual on X11
-    // which is required for true transparency through the COMPOSITE extension
-    
-#ifdef __linux__
-    @try {
-        // Get the X11 window number from the NSWindow
-        NSInteger windowNumber = [self windowNumber];
-        if (windowNumber <= 0) {
-            //NSLog(@"[WindowSwitcherOverlay] No window number yet, will use default visual");
-            return;
-        }
-        
-        // Open connection to X11
-        Display *display = XOpenDisplay(NULL);
-        if (!display) {
-            NSLog(@"[WindowSwitcherOverlay] Could not open X11 display");
-            return;
-        }
-        
-        Window xwindow = (Window)windowNumber;
-        int screen = DefaultScreen(display);
-        
-        // Check if COMPOSITE extension is available
-        int composite_event_base, composite_error_base;
-        if (!XCompositeQueryExtension(display, &composite_event_base, &composite_error_base)) {
-            NSLog(@"[WindowSwitcherOverlay] WARNING: X COMPOSITE extension not available!");
-            //NSLog(@"[WindowSwitcherOverlay] Rounded corner transparency will NOT work.");
-            //NSLog(@"[WindowSwitcherOverlay] Enable Composite in X server and run a compositor (picom/compton)");
-            XCloseDisplay(display);
-            return;
-        }
-        
-        int composite_major, composite_minor;
-        XCompositeQueryVersion(display, &composite_major, &composite_minor);
-        //NSLog(@"[WindowSwitcherOverlay] X COMPOSITE extension available: v%d.%d", 
-//              composite_major, composite_minor);
-        
-        // Find ARGB visual (32-bit depth with alpha channel)
-        XVisualInfo visual_template;
-        visual_template.screen = screen;
-        visual_template.depth = 32;
-        visual_template.class = TrueColor;
-        
-        int num_visuals = 0;
-        XVisualInfo *visual_info = XGetVisualInfo(display,
-                                                   VisualScreenMask | VisualDepthMask | VisualClassMask,
-                                                   &visual_template,
-                                                   &num_visuals);
-        
-        if (visual_info && num_visuals > 0) {
-            //NSLog(@"[WindowSwitcherOverlay] Found %d ARGB visuals (32-bit with alpha)", num_visuals);
-            
-            // Set window attributes for compositing
-            // Redirect the window for compositing - this tells the X server
-            // that this window should be composited by the compositor
-            XCompositeRedirectWindow(display, xwindow, CompositeRedirectManual);
-            
-            XFree(visual_info);
-            //NSLog(@"[WindowSwitcherOverlay] Successfully configured for ARGB transparency");
-        } else {
-            NSLog(@"[WindowSwitcherOverlay] WARNING: No 32-bit ARGB visual found!");
-            //NSLog(@"[WindowSwitcherOverlay] The X server may not support true transparency.");
-        }
-        
-        XCloseDisplay(display);
-        
-    } @catch (NSException *exception) {
-        NSLog(@"[WindowSwitcherOverlay] Exception configuring ARGB: %@", exception.reason);
-    }
-#else
-    // On non-Linux platforms (macOS, BSD), transparency should work natively
-    //NSLog(@"[WindowSwitcherOverlay] Non-Linux platform, using native transparency");
-#endif
-}
-
-- (void)showCenteredOnScreen {
-    // Get main screen bounds
+// Where the panel of the given size belongs, in the device pixels window
+// frames use.  Derived from the screen every time and never from the panel's
+// current frame: whenever something else moves the window - the window manager
+// keeping it out of a strut, for instance - folding that position back into
+// the next one would let the offset accumulate and walk the panel across the
+// screen.
+- (NSRect)frameForSize:(NSSize)size {
     NSScreen *mainScreen = [NSScreen mainScreen];
     if (!mainScreen) {
         mainScreen = [[NSScreen screens] firstObject];
     }
-    
     if (!mainScreen) {
-        //NSLog(@"[WindowSwitcherOverlay] No screen available");
-        return;
+        return NSMakeRect(0, 0, size.width, size.height);
     }
-    
+
     NSRect screenFrame = [mainScreen frame];
-    NSRect windowFrame = [self frame];
-    
+
     // Center horizontally
-    CGFloat x = screenFrame.origin.x + (screenFrame.size.width - windowFrame.size.width) / 2;
-    
+    CGFloat x = screenFrame.origin.x + (screenFrame.size.width - size.width) / 2;
+
     // Position at golden ratio (flipped) - more space at TOP than bottom
     // Golden ratio: 1 / phi ≈ 0.618, so place at 1 - 0.618 = 0.382 from top
     // This leaves ~38.2% space above, ~61.8% below
-    CGFloat goldenRatioY = screenFrame.origin.y + (screenFrame.size.height * 0.382) - (windowFrame.size.height / 2);
-    
-    [self setFrameOrigin:NSMakePoint(x, goldenRatioY)];
+    CGFloat goldenRatioY = screenFrame.origin.y + (screenFrame.size.height * 0.382) - (size.height / 2);
+
+    return NSMakeRect(x, goldenRatioY, size.width, size.height);
+}
+
+- (void)showCenteredOnScreen {
+    [self setFrame:[self frameForSize:[self frame].size] display:NO];
     
     // Force the window to the absolute front, above all other windows
     [self makeKeyAndOrderFront:nil];
@@ -344,31 +263,36 @@ static const CGFloat kSelectionPadding = 6.0;
     }
     
     NSInteger count = [titles count];
+
+    // Window frames are in device pixels while the view draws in points, so at
+    // GSScaleFactor 2 this layout needs a window twice its size - otherwise the
+    // panel is half as large as its contents and clips them.
+    CGFloat scale = [self userSpaceScaleFactor];
     
     // Calculate required window size
     CGFloat totalIconWidth = count * kIconSize + (count - 1) * kIconSpacing;
     CGFloat windowWidth = totalIconWidth + 2 * kPadding + 2 * kSelectionPadding;
     CGFloat windowHeight = kPadding * 2 + kIconSize + kTitleHeight + kSelectionPadding * 2 + 8;
     
-    // Limit to reasonable max width
-    if (windowWidth > 800) {
-        windowWidth = 800;
+    // Limit to reasonable max width.  The screen frame is in device pixels, so
+    // it has to be brought back to points before it can bound this layout.
+    NSScreen *screen = [NSScreen mainScreen] ?: [[NSScreen screens] firstObject];
+    CGFloat maxWidth = 800;
+    if (screen) {
+        CGFloat screenWidthInPoints = [screen frame].size.width / scale;
+        maxWidth = MIN(maxWidth, screenWidthInPoints - 2 * kPadding);
+    }
+    if (windowWidth > maxWidth) {
+        windowWidth = maxWidth;
     }
     if (windowWidth < 400) {
         windowWidth = 400;
     }
     
-    // Update window frame, keeping centered
-    NSRect currentFrame = [self frame];
-    CGFloat centerX = currentFrame.origin.x + currentFrame.size.width / 2;
-    CGFloat centerY = currentFrame.origin.y + currentFrame.size.height / 2;
-    
-    NSRect newFrame = NSMakeRect(centerX - windowWidth / 2,
-                                  centerY - windowHeight / 2,
-                                  windowWidth,
-                                  windowHeight);
-    
-    [self setFrame:newFrame display:NO];
+    // Re-place the panel for its new size
+    [self setFrame:[self frameForSize:NSMakeSize(windowWidth * scale,
+                                                 windowHeight * scale)]
+           display:NO];
     
     // Update content view frame
     URSWindowSwitcherOverlayView *view = (URSWindowSwitcherOverlayView *)[self contentView];
@@ -381,7 +305,16 @@ static const CGFloat kSelectionPadding = 6.0;
     // Import the compositing manager header at the top if needed
     URSCompositingManager *compositor = [URSCompositingManager sharedManager];
     view.useRoundedCorners = [compositor compositingActive];
-    
+    if (view.useRoundedCorners) {
+        // A rectangular drop shadow leaves unshadowed square notches around
+        // the arcs, so the compositor has to know the radius.  -windowNumber
+        // is the backend's window tag, not the X window id.
+        xcb_window_t xid = (xcb_window_t)(uintptr_t)
+            [GSCurrentServer() windowDevice:[self windowNumber]];
+        [compositor setShadowCornerRadius:kCornerRadius * scale
+                                forWindow:xid];
+    }
+
     [view setNeedsDisplay:YES];
     // Force synchronous redraw so the highlight updates immediately.
     // On GNUstep/X11 with the hybrid event loop, -setNeedsDisplay: is

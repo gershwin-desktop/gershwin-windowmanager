@@ -1,5 +1,7 @@
 PACKAGE_NAME = KillTest
 include $(GNUSTEP_MAKEFILES)/common.make
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
 APP_NAME = KillTest
 $(APP_NAME)_OBJC_FILES = main.m
 include $(GNUSTEP_MAKEFILES)/application.make
+
