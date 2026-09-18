@@ -340,10 +340,8 @@ static inline CGFloat ShadeScaleFactor(void)
 
 #pragma mark - Content-Activity Spinner
 
-// Layout constants matching the eau theme titlebar (see AppearanceMetrics.h
-// and URSThemeIntegration's local defines): the theme centers the title
-// between the left orb region and the right button region.
-#define SPINNER_ORB_REGION_WIDTH (68.0 * ShadeScaleFactor())
+// The theme centers the title between the buttons on the left and those on
+// the right.
 #define SPINNER_TITLE_FONT_SIZE (13.0 * ShadeScaleFactor())
 // Spinner fade in/out duration (milliseconds).
 #define SPINNER_FADE_MS 500.0
@@ -365,19 +363,36 @@ static const int SPINNER_DIR[8][2] = {
     CGFloat tbW = [self windowRect].size.width;
     CGFloat tbH = [self windowRect].size.height;
 
-    BOOL orbStyle = [URSThemeIntegration isOrbButtonStyle];
-    // Edge layout reserves the square close button (width == bar height) on
-    // the left; orb layout reserves the orb region.
-    CGFloat left = orbStyle ? SPINNER_ORB_REGION_WIDTH : tbH;
-
     XCBFrame *frame = nil;
     if ([[self parentWindow] isKindOfClass:[XCBFrame class]])
         frame = (XCBFrame *)[self parentWindow];
-    XCBWindow *clientWindow = frame ? [frame childWindowForKey:ClientWindow] : nil;
-    BOOL hasMaximize = clientWindow ? [clientWindow canResize] : YES;
 
-    CGFloat rightReserve = orbStyle ? (6.0 * scale)
-                                    : ((hasMaximize ? 2.0 : 1.0) * tbH);
+    CGFloat left = 0;
+    CGFloat rightReserve = 0;
+    if ([URSThemeIntegration themeDrawsTitlebarButtons]) {
+        // Reserve whatever the theme's buttons occupy on either side.
+        NSUInteger styleMask = frame ? [URSThemeIntegration buttonStyleMaskForFrame:frame]
+                                     : NSTitledWindowMask;
+        NSInteger i;
+        for (i = 0; i <= 2; i++) {
+            NSRect r = [URSThemeIntegration themeButtonRect:i
+                                               titlebarSize:NSMakeSize(tbW, tbH)
+                                                  styleMask:styleMask];
+            if (NSIsEmptyRect(r))
+                continue;
+            if (NSMidX(r) < tbW / 2.0)
+                left = MAX(left, NSMaxX(r));
+            else
+                rightReserve = MAX(rightReserve, tbW - NSMinX(r));
+        }
+    } else {
+        // Edge layout reserves the square close button (width == bar height)
+        // on the left and one or two square buttons on the right.
+        XCBWindow *clientWindow = frame ? [frame childWindowForKey:ClientWindow] : nil;
+        BOOL hasMaximize = clientWindow ? [clientWindow canResize] : YES;
+        left = tbH;
+        rightReserve = (hasMaximize ? 2.0 : 1.0) * tbH;
+    }
 
     NSString *title = windowTitle ?: @"";
     // Measure with the SAME font the theme renders titles with (theme

@@ -14,9 +14,11 @@
 #import "xcb/services/TitleBarSettingsService.h"
 #import <GNUstepGUI/GSTheme.h>
 
-/* Eau theme's live scale-factor cache reset (implemented by the theme). */
+/* Eau theme's live scale-factor cache reset (implemented by the theme), and
+ * the titlebar height it wants at the current scale. */
 @interface GSTheme (EauScaleFactor)
 - (void)invalidateScaleFactorCache;
+- (float)titlebarHeight;
 @end
 
 /* Class extension for private ivars */
@@ -99,14 +101,9 @@ static CGFloat WMLastScaleFactor = 1.0;
 - (void)applyScaleFactor:(CGFloat)factor
 {
   TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-  [settings setScaleFactor:factor];
-  [settings setHeight:(uint16_t)(22 * factor)];
+  GSTheme *theme = [GSTheme theme];
 
-  /* Keep the root _GNUSTEP_FRAME_OFFSETS in sync with the new titlebar
-   * height so the GNUstep backend positions content flush below it. */
-  XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
-  EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
-  [ewmh updateGNUStepFrameOffsetsForRootWindow:rootWin];
+  [settings setScaleFactor:factor];
 
   /* Titlebar drawing constants cache the scale factor; invalidate so the
    * next render uses the new value. */
@@ -114,8 +111,21 @@ static CGFloat WMLastScaleFactor = 1.0;
 
   /* The Eau theme's own decoration metrics (buttons, corners) cache the
    * factor too; reset them so the re-render below uses the new scale. */
-  if ([[GSTheme theme] respondsToSelector: @selector(invalidateScaleFactorCache)])
-    [[GSTheme theme] invalidateScaleFactorCache];
+  if ([theme respondsToSelector: @selector(invalidateScaleFactorCache)])
+    [theme invalidateScaleFactorCache];
+
+  /* The theme owns the titlebar height, and it need not be the factor times
+   * the base height: a title bar drawn as pixel art keeps its rows whole
+   * instead of following a fractional factor. */
+  [settings setHeight:[theme respondsToSelector: @selector(titlebarHeight)]
+                      ? (uint16_t)[theme titlebarHeight]
+                      : (uint16_t)(22 * factor)];
+
+  /* Keep the root _GNUSTEP_FRAME_OFFSETS in sync with the new titlebar
+   * height so the GNUstep backend positions content flush below it. */
+  XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
+  EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+  [ewmh updateGNUStepFrameOffsetsForRootWindow:rootWin];
 
   /* Re-frame every managed window so its titlebar height follows the factor.
    * reframeForScaleChange self-guards (only acts on frame-parented windows). */

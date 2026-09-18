@@ -251,38 +251,17 @@
 
 // Edge buttons are square: width == titlebarRect.size.height (queried at hit-test time)
 
-// Orb button metrics
-static const CGFloat TB_ORB_SIZE = 15.0;
-static const CGFloat TB_ORB_PAD_LEFT = 10.5;
-static const CGFloat TB_ORB_SPACING = 4.0;
-
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point {
     XCBRect titlebarRect = [self windowRect];
     CGFloat titlebarWidth = titlebarRect.size.width;
     CGFloat titlebarHeight = titlebarRect.size.height;
     NSUInteger styleMask = [self windowStyleMask];
 
-    if ([URSThemeIntegration isOrbButtonStyle]) {
-        // Orb layout: all buttons on left, 15x15, vertically centered
-        CGFloat buttonY = (titlebarHeight - TB_ORB_SIZE) / 2.0;
-        CGFloat closeX = TB_ORB_PAD_LEFT;
-        CGFloat miniX = closeX + TB_ORB_SIZE + TB_ORB_SPACING;
-        CGFloat zoomX = miniX + TB_ORB_SIZE + TB_ORB_SPACING;
-
-        NSRect closeRect = NSMakeRect(closeX, buttonY, TB_ORB_SIZE, TB_ORB_SIZE);
-        NSRect miniRect = NSMakeRect(miniX, buttonY, TB_ORB_SIZE, TB_ORB_SIZE);
-        NSRect zoomRect = NSMakeRect(zoomX, buttonY, TB_ORB_SIZE, TB_ORB_SIZE);
-
-        if ((styleMask & NSClosableWindowMask) && NSPointInRect(point, closeRect)) {
-            return GSThemeTitleBarButtonClose;
-        }
-        if ((styleMask & NSMiniaturizableWindowMask) && NSPointInRect(point, miniRect)) {
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-        if ((styleMask & NSResizableWindowMask) && NSPointInRect(point, zoomRect)) {
-            return GSThemeTitleBarButtonZoom;
-        }
-        return GSThemeTitleBarButtonNone;
+    if ([URSThemeIntegration themeDrawsTitlebarButtons]) {
+        NSInteger index = [URSThemeIntegration buttonIndexAtPoint:point
+                                                     titlebarSize:NSMakeSize(titlebarWidth, titlebarHeight)
+                                                        styleMask:styleMask];
+        return GSThemeTitleBarButtonForIndex(index);
     }
 
     // Edge layout - buttons are square

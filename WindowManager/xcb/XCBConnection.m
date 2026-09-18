@@ -18,6 +18,7 @@
 #import <enums/EIcccm.h>
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
+#import "URSThemeIntegration.h"
 #import <GNUstepGUI/GSTheme.h>
 #import <AppKit/NSColor.h>
 #import <AppKit/NSGraphics.h>
@@ -404,6 +405,9 @@ static XCBConnection *sharedInstance;
     //    NSLog(@"[XCBConnection] Removing the window %u from the windowsMap", win);
     NSNumber *key = [[NSNumber alloc] initWithInt:win];
     [windowsMap removeObjectForKey:key];
+
+    // Whatever was kept for this window's border goes with it.
+    [URSThemeIntegration forgetFrameBorder:aWindow];
     
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
     
@@ -4200,6 +4204,12 @@ static XCBConnection *sharedInstance;
         area = XCBMakeRect(position, size);
         [window drawArea:area];
     }*/
+
+    if ([window isKindOfClass:[XCBFrame class]])
+    {
+        // The window border belongs to the frame; X just cleared it.
+        [URSThemeIntegration repaintFrameBorder:(XCBFrame *)window];
+    }
 
     if ([window isMaximizeButton])
     {

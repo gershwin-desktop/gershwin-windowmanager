@@ -63,13 +63,36 @@
 + (void)setHoveredTitlebar:(xcb_window_t)titlebarId buttonIndex:(NSInteger)buttonIdx;
 + (void)clearHoverState;
 
-// Determine which button (if any) is at a given coordinate
-// Returns: 0=close, 1=mini, 2=zoom, -1=none
-// Side-by-side layout: Close (X) on left | title | Minimize (-) | Maximize (+) on right
-+ (NSInteger)buttonIndexAtX:(CGFloat)x forWidth:(CGFloat)width hasMaximize:(BOOL)hasMax;
-+ (NSInteger)buttonIndexAtX:(CGFloat)x y:(CGFloat)y forWidth:(CGFloat)width height:(CGFloat)height hasMaximize:(BOOL)hasMax;
+// Buttons a frame's titlebar shows, as an NSWindow style mask
++ (NSUInteger)buttonStyleMaskForFrame:(XCBFrame *)frame;
 
-// Orb button style detection (reads EauTitleBarButtonStyle preference)
-+ (BOOL)isOrbButtonStyle;
+// Determine which button (if any) is at a point in titlebar coordinates
+// (X11, origin top left). Returns: 0=close, 1=mini, 2=zoom, -1=none
++ (NSInteger)buttonIndexAtPoint:(NSPoint)point
+                   titlebarSize:(NSSize)size
+                      styleMask:(NSUInteger)styleMask;
+// Same, for the titlebar of frame (which may be nil)
++ (NSInteger)buttonIndexAtPoint:(NSPoint)point
+                   titlebarSize:(NSSize)size
+                          frame:(XCBFrame *)frame;
+
+// YES when the theme draws the titlebar buttons itself, so the window manager
+// must not overlay its edge buttons
++ (BOOL)themeDrawsTitlebarButtons;
+
+// Width of the window border the theme draws around the client, 0 for none
++ (CGFloat)frameBorderWidth;
+// Paint that border on the frame window, and repaint it with the state last
+// painted (after the frame was cleared, e.g. on expose or resize)
++ (void)paintFrameBorder:(XCBFrame *)frame active:(BOOL)active;
++ (void)repaintFrameBorder:(XCBFrame *)frame;
+// Let go of what was kept for a frame's border once the frame is gone
++ (void)forgetFrameBorder:(XCBWindow *)window;
+
+// Slot of a theme-drawn button in theme drawing coordinates (origin bottom
+// left); NSZeroRect when styleMask has no such button
++ (NSRect)themeButtonRect:(NSInteger)buttonIndex
+             titlebarSize:(NSSize)size
+                styleMask:(NSUInteger)styleMask;
 
 @end

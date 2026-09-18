@@ -12,6 +12,7 @@
 #import "TitleBarSettingsService.h"
 #import "EWMHService.h"
 #import "XCBTypes.h"
+#import "URSThemeIntegration.h"
 
 // Loose typing for the compositor, mirroring the NSClassFromString lookup
 // the xcb layer uses everywhere; keeps URSCompositingManager.h out of here.
@@ -178,6 +179,10 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
             if ([manager respondsToSelector:@selector(compositingActive)])
                 cb = [manager compositingActive] ? 0 : (int)sf;
         }
+        // A theme that draws its own window frame decides how much room it
+        // needs around the client.
+        if ([URSThemeIntegration frameBorderWidth] > 0)
+            cb = (int)[URSThemeIntegration frameBorderWidth];
         self.clientBorder = cb;
     }
 
@@ -272,6 +277,8 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     {
         CGFloat sf = [[TitleBarSettingsService sharedInstance] scaleFactor];
         self.clientBorder = compositorActive ? 0 : (int)sf;
+        if ([URSThemeIntegration frameBorderWidth] > 0)
+            self.clientBorder = (int)[URSThemeIntegration frameBorderWidth];
     }
 
     uint32_t values[4];  // May need up to 4 values for ARGB (back_pixel, colormap, border_pixel, event_mask)
@@ -1491,10 +1498,12 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     // Calculate child window dimensions (same as manual resize functions)
     XCBRect titleBarRect = XCBMakeRect(XCBMakePoint(0, 0),
                                         XCBMakeSize(targetRect.size.width, titleHgt));
-    // Client fills frame below titlebar with 1px border on left, right, and bottom
-    XCBRect clientRect = XCBMakeRect(XCBMakePoint(1, titleHgt),
-                                      XCBMakeSize(targetRect.size.width - 2,
-                                                   targetRect.size.height - titleHgt - 1));
+    // Client fills the frame below the titlebar, inset by the border the
+    // theme asks for on left, right and bottom.
+    int cb = self.clientBorder;
+    XCBRect clientRect = XCBMakeRect(XCBMakePoint(cb, titleHgt),
+                                      XCBMakeSize(targetRect.size.width - 2 * cb,
+                                                   targetRect.size.height - titleHgt - cb));
 
     // Configure frame window (position + size)
     uint32_t frameValues[4] = {(uint32_t)targetRect.position.x, (uint32_t)targetRect.position.y,

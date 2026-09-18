@@ -112,71 +112,18 @@
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point
                           forTitlebar:(XCBTitleBar *)titlebar
 {
-    static const CGFloat ORB_SIZE = 15.0;
-    static const CGFloat ORB_PAD_LEFT = 10.5;
-    static const CGFloat ORB_SPACING = 4.0;
-
     XCBRect titlebarRect = [titlebar windowRect];
-    CGFloat titlebarWidth = titlebarRect.size.width;
-    CGFloat titlebarHeight = titlebarRect.size.height;
 
     XCBFrame *frame = nil;
     if ([[titlebar parentWindow] isKindOfClass:[XCBFrame class]]) {
         frame = (XCBFrame *)[titlebar parentWindow];
     }
 
-    XCBWindow *clientWindow = frame ? [frame childWindowForKey:ClientWindow] : nil;
-    xcb_window_t clientWindowId = clientWindow ? [clientWindow window] : 0;
-    BOOL isFixedSize = clientWindowId &&
-        [URSThemeIntegration isFixedSizeWindow:clientWindowId];
-    BOOL hasMaximize = !isFixedSize;
-
-    if ([URSThemeIntegration isOrbButtonStyle]) {
-        CGFloat buttonY = (titlebarHeight - ORB_SIZE) / 2.0;
-        CGFloat closeX = ORB_PAD_LEFT;
-        CGFloat miniX = closeX + ORB_SIZE + ORB_SPACING;
-        CGFloat zoomX = miniX + ORB_SIZE + ORB_SPACING;
-
-        if (NSPointInRect(point, NSMakeRect(closeX, buttonY, ORB_SIZE, ORB_SIZE))) {
-            return GSThemeTitleBarButtonClose;
-        }
-        if (NSPointInRect(point, NSMakeRect(miniX, buttonY, ORB_SIZE, ORB_SIZE))) {
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-        if (hasMaximize &&
-            NSPointInRect(point, NSMakeRect(zoomX, buttonY, ORB_SIZE, ORB_SIZE))) {
-            return GSThemeTitleBarButtonZoom;
-        }
-
-        return GSThemeTitleBarButtonNone;
-    }
-
-    // Edge layout: Close at left | title | Minimize | Maximize at right
-    if (NSPointInRect(point, NSMakeRect(0, 0, titlebarHeight, titlebarHeight))) {
-        return GSThemeTitleBarButtonClose;
-    }
-
-    if (hasMaximize) {
-        NSRect miniRect = NSMakeRect(titlebarWidth - 2 * titlebarHeight, 0,
-                                     titlebarHeight, titlebarHeight);
-        if (NSPointInRect(point, miniRect)) {
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-
-        NSRect zoomRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
-                                     titlebarHeight, titlebarHeight);
-        if (NSPointInRect(point, zoomRect)) {
-            return GSThemeTitleBarButtonZoom;
-        }
-    } else {
-        NSRect miniRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
-                                     titlebarHeight, titlebarHeight);
-        if (NSPointInRect(point, miniRect)) {
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-    }
-
-    return GSThemeTitleBarButtonNone;
+    NSInteger index = [URSThemeIntegration buttonIndexAtPoint:point
+                                                 titlebarSize:NSMakeSize(titlebarRect.size.width,
+                                                                         titlebarRect.size.height)
+                                                        frame:frame];
+    return GSThemeTitleBarButtonForIndex(index);
 }
 
 #pragma mark - Double-Click Detection
@@ -443,22 +390,13 @@
 
         XCBRect frameRect = [frame windowRect];
         XCBRect titlebarRect = [titlebar windowRect];
-        CGFloat titlebarWidth = frameRect.size.width;
-        CGFloat titlebarHeight = titlebarRect.size.height;
+        NSSize titlebarSize = NSMakeSize(frameRect.size.width, titlebarRect.size.height);
 
-        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-        xcb_window_t clientWindowId = clientWindow ? [clientWindow window] : 0;
-        BOOL hasMaximize = clientWindowId ?
-            ![URSThemeIntegration isFixedSizeWindow:clientWindowId] : YES;
-
-        CGFloat mouseX = motionEvent->event_x;
-        CGFloat mouseY = motionEvent->event_y;
         NSInteger newButtonIndex =
-            [URSThemeIntegration buttonIndexAtX:mouseX
-                                              y:mouseY
-                                       forWidth:titlebarWidth
-                                         height:titlebarHeight
-                                    hasMaximize:hasMaximize];
+            [URSThemeIntegration buttonIndexAtPoint:NSMakePoint(motionEvent->event_x,
+                                                                motionEvent->event_y)
+                                       titlebarSize:titlebarSize
+                                              frame:frame];
 
         xcb_window_t prevTitlebar = [URSThemeIntegration hoveredTitlebarWindow];
         NSInteger prevButtonIndex = [URSThemeIntegration hoveredButtonIndex];

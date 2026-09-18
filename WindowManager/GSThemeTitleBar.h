@@ -19,6 +19,17 @@ typedef NS_ENUM(NSInteger, GSThemeTitleBarButton) {
     GSThemeTitleBarButtonZoom
 };
 
+// Maps URSThemeIntegration button indices (0=close, 1=mini, 2=zoom, -1=none)
+static inline GSThemeTitleBarButton GSThemeTitleBarButtonForIndex(NSInteger index)
+{
+    switch (index) {
+        case 0: return GSThemeTitleBarButtonClose;
+        case 1: return GSThemeTitleBarButtonMiniaturize;
+        case 2: return GSThemeTitleBarButtonZoom;
+        default: return GSThemeTitleBarButtonNone;
+    }
+}
+
 @interface GSThemeTitleBar : XCBTitleBar
 
 // Override XCBTitleBar drawing methods to use GSTheme

@@ -11,6 +11,7 @@
 #import "EEwmh.h"
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
+#import "URSThemeIntegration.h"
 #import <unistd.h>
 
 @protocol URSCompositingManaging <NSObject>
@@ -679,6 +680,11 @@
     CGFloat sf = [settings scaleFactor];
     uint32_t cb = compositorActive ? 0 : (uint32_t)sf;
     uint32_t extents[4];
+
+    // A theme with its own window frame (Aaron's Platinum border) sets the
+    // inset, and the client must know about it.
+    if ([URSThemeIntegration frameBorderWidth] > 0)
+        cb = (uint32_t)[URSThemeIntegration frameBorderWidth];
     extents[0] = cb;              // left border
     extents[1] = cb;              // right border
     extents[2] = titleHeight;     // top (titlebar)

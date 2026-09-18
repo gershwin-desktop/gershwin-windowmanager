@@ -17,6 +17,9 @@
 #import "GSThemeTitleBar.h"
 #import "ICCCMService.h"
 
+// From libs-back: the flag telling that _GNUSTEP_WM_ATTR carries a style mask.
+#define GSWindowStyleAttr (1 << 0)
+
 // Category to expose private GSTheme methods for theme-agnostic titlebar rendering
 // These methods exist in GSTheme but aren't in the public header
 @interface GSTheme (URSPrivateMethods)
@@ -28,6 +31,34 @@
 
 @interface GSTheme (URSThemeCornerRadius)
 - (CGFloat)titlebarCornerRadius;
+@end
+
+// Implemented by themes that draw and lay out their own titlebar buttons (Eau)
+@interface GSTheme (URSThemeTitlebarButtons)
+- (BOOL)drawsTitlebarButtons;
+- (NSRect)titlebarButtonRectForButton:(NSInteger)button
+                        titlebarWidth:(CGFloat)width
+                            styleMask:(NSUInteger)styleMask;
+@end
+
+// Implemented by themes that draw their own window border
+@interface GSTheme (URSThemeWindowFrame)
+- (CGFloat)windowFrameBorderWidth;
+- (NSColor *)windowFrameBorderColorAtDepth:(NSInteger)depth
+                                      edge:(NSInteger)edge
+                                    active:(BOOL)active;
+@end
+
+// What the border of one frame needs between paints: the state it was last
+// painted with, so an expose can repeat it without asking who has focus, and
+// the graphics context it is painted through, which belongs to the frame
+// because a frame may be an ARGB window while another is not.
+@interface URSFrameBorder : NSObject
+@property (nonatomic, assign) BOOL active;
+@property (nonatomic, assign) xcb_gcontext_t gc;
+@end
+
+@implementation URSFrameBorder
 @end
 
 @implementation URSThemeIntegration
@@ -57,11 +88,6 @@ static CGFloat WMScaleFactor(void) {
 }
 #define ICON_STROKE (1.5 * WMScaleFactor())     // Subtle icon strokes
 #define ICON_INSET (8.0 * WMScaleFactor())      // Icon inset from button edges (matches Eau theme)
-
-// Orb button metrics (matching Eau theme AppearanceMetrics.h orb constants)
-#define ORB_BUTTON_SIZE (15.0 * WMScaleFactor())
-#define ORB_PADDING_LEFT (10.5 * WMScaleFactor())
-#define ORB_BUTTON_SPACING (4.0 * WMScaleFactor())
 
 #pragma mark - Fixed-size window tracking
 
@@ -169,49 +195,223 @@ static CGFloat WMScaleFactor(void) {
     hoveredButtonIndex = -1;
 }
 
-+ (BOOL)isOrbButtonStyle {
-    static BOOL checked = NO;
-    static BOOL isOrb = NO;
-    if (!checked) {
-        NSString *style = [[NSUserDefaults standardUserDefaults]
-                           stringForKey:@"EauTitleBarButtonStyle"];
-        isOrb = [style isEqualToString:@"orb"];
-        checked = YES;
++ (BOOL)themeDrawsTitlebarButtons {
+    GSTheme *theme = [self currentTheme];
+    return [theme respondsToSelector:@selector(drawsTitlebarButtons)] &&
+           [theme drawsTitlebarButtons];
+}
+
++ (NSRect)themeButtonRect:(NSInteger)buttonIndex
+             titlebarSize:(NSSize)size
+                styleMask:(NSUInteger)styleMask {
+    GSTheme *theme = [self currentTheme];
+    if (![theme respondsToSelector:@selector(titlebarButtonRectForButton:titlebarWidth:styleMask:)]) {
+        return NSZeroRect;
     }
-    return isOrb;
+    return [theme titlebarButtonRectForButton:buttonIndex
+                                titlebarWidth:size.width
+                                    styleMask:styleMask];
 }
 
-// Determine which button (if any) is at a given x coordinate
-// Returns: 0=close, 1=mini, 2=zoom, -1=none
-// Convenience method that delegates to buttonIndexAtX:y:forWidth:height:hasMaximize:
-+ (NSInteger)buttonIndexAtX:(CGFloat)x forWidth:(CGFloat)width hasMaximize:(BOOL)hasMax {
-    // Delegate to the full method with y at middle of titlebar
-    GSTheme *t = [GSTheme theme];
-    CGFloat tbH = [t respondsToSelector:@selector(titlebarHeight)] ? [t titlebarHeight] : 22.0;
-    return [self buttonIndexAtX:x y:tbH / 2.0 forWidth:width height:tbH hasMaximize:hasMax];
++ (CGFloat)frameBorderWidth {
+    GSTheme *theme = [self currentTheme];
+    if (![theme respondsToSelector:@selector(windowFrameBorderWidth)]) {
+        return 0.0;
+    }
+    return [theme windowFrameBorderWidth];
 }
 
-// Determine which button (if any) is at a given x,y coordinate
-// Returns: 0=close, 1=mini, 2=zoom, -1=none
-+ (NSInteger)buttonIndexAtX:(CGFloat)x y:(CGFloat)y forWidth:(CGFloat)width height:(CGFloat)height hasMaximize:(BOOL)hasMax {
-    if ([self isOrbButtonStyle]) {
-        // Orb layout: all 3 buttons on left, 15x15, vertically centered
-        CGFloat buttonY = (height - ORB_BUTTON_SIZE) / 2.0;
-        CGFloat closeX = ORB_PADDING_LEFT;
-        CGFloat miniX = closeX + ORB_BUTTON_SIZE + ORB_BUTTON_SPACING;
-        CGFloat zoomX = miniX + ORB_BUTTON_SIZE + ORB_BUTTON_SPACING;
+static NSMutableDictionary *frameBorders = nil;
 
-        if (x >= closeX && x < closeX + ORB_BUTTON_SIZE &&
-            y >= buttonY && y < buttonY + ORB_BUTTON_SIZE) {
-            return 0;  // Close
++ (URSFrameBorder *)borderRecordForWindow:(xcb_window_t)window create:(BOOL)create
+{
+    NSNumber *key = [NSNumber numberWithUnsignedInt:window];
+    URSFrameBorder *record = [frameBorders objectForKey:key];
+
+    if (record == nil && create) {
+        if (frameBorders == nil) {
+            frameBorders = [[NSMutableDictionary alloc] init];
         }
-        if (x >= miniX && x < miniX + ORB_BUTTON_SIZE &&
-            y >= buttonY && y < buttonY + ORB_BUTTON_SIZE) {
-            return 1;  // Minimize
+        record = [[URSFrameBorder alloc] init];
+        [frameBorders setObject:record forKey:key];
+    }
+    return record;
+}
+
++ (void)forgetFrameBorder:(XCBWindow *)window
+{
+    NSNumber *key = [NSNumber numberWithUnsignedInt:[window window]];
+    URSFrameBorder *record = [frameBorders objectForKey:key];
+
+    if (record == nil) {
+        return;
+    }
+    if ([record gc] != 0) {
+        xcb_free_gc([[window connection] connection], [record gc]);
+    }
+    [frameBorders removeObjectForKey:key];
+}
+
++ (void)paintFrameBorder:(XCBFrame *)frame active:(BOOL)active {
+    CGFloat border = [self frameBorderWidth];
+    GSTheme *theme = [self currentTheme];
+    XCBWindow *titlebar;
+    xcb_connection_t *conn;
+    URSFrameBorder *record;
+    xcb_gcontext_t gc;
+    XCBRect frameRect;
+    uint16_t width, height, top;
+    NSInteger depth, edge;
+
+    if (frame == nil || border <= 0.0) {
+        return;
+    }
+    if (![theme respondsToSelector:@selector(windowFrameBorderColorAtDepth:edge:active:)]) {
+        return;
+    }
+    record = [self borderRecordForWindow:[frame window] create:YES];
+    [record setActive:active];
+
+    frameRect = [frame windowRect];
+    width = frameRect.size.width;
+    height = frameRect.size.height;
+    titlebar = [frame childWindowForKey:TitleBar];
+    top = titlebar ? [titlebar windowRect].size.height : 0;
+    if (height <= top || width == 0) {
+        return;
+    }
+
+    conn = [[frame connection] connection];
+    gc = [record gc];
+    if (gc == 0) {
+        // The border is repainted on every expose and every change of focus,
+        // so the context is kept until the frame goes away.
+        gc = xcb_generate_id(conn);
+        xcb_create_gc(conn, gc, [frame window], 0, NULL);
+        [record setGc:gc];
+    }
+    for (depth = 0; depth < (NSInteger)border; depth++) {
+        for (edge = 0; edge <= 2; edge++) {
+            NSColor *color = [[theme windowFrameBorderColorAtDepth:depth
+                                                              edge:edge
+                                                            active:active]
+                               colorUsingColorSpaceName:NSDeviceRGBColorSpace];
+            // The frame is an ARGB window when the compositor is running, so
+            // the border has to be painted opaque or it composites away.
+            uint32_t pixel = 0xFF000000u
+                           | ((uint32_t)([color redComponent] * 255.0) << 16)
+                           | ((uint32_t)([color greenComponent] * 255.0) << 8)
+                           | (uint32_t)([color blueComponent] * 255.0);
+            xcb_rectangle_t rect;
+
+            xcb_change_gc(conn, gc, XCB_GC_FOREGROUND, &pixel);
+            switch (edge) {
+                case 0:   // left
+                    rect = (xcb_rectangle_t){(int16_t)depth, (int16_t)top,
+                                             1, (uint16_t)(height - top)};
+                    break;
+                case 1:   // right
+                    rect = (xcb_rectangle_t){(int16_t)(width - 1 - depth), (int16_t)top,
+                                             1, (uint16_t)(height - top)};
+                    break;
+                default:  // bottom
+                    rect = (xcb_rectangle_t){0, (int16_t)(height - 1 - depth),
+                                             width, 1};
+                    break;
+            }
+            xcb_poly_fill_rectangle(conn, [frame window], gc, 1, &rect);
         }
-        if (hasMax && x >= zoomX && x < zoomX + ORB_BUTTON_SIZE &&
-            y >= buttonY && y < buttonY + ORB_BUTTON_SIZE) {
-            return 2;  // Zoom
+    }
+    xcb_flush(conn);
+}
+
++ (void)repaintFrameBorder:(XCBFrame *)frame {
+    URSFrameBorder *record = [self borderRecordForWindow:[frame window]
+                                                  create:NO];
+
+    [self paintFrameBorder:frame active:record ? [record active] : NO];
+}
+
+// GNUstep publishes the window's real style mask in _GNUSTEP_WM_ATTR whether
+// or not the toolkit found EWMH support, so this is what tells a utility panel
+// from a document window. Returns 0 for windows of other toolkits.
++ (NSUInteger)gnustepStyleMaskForWindow:(XCBWindow *)clientWindow {
+    EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:[clientWindow connection]];
+    // flags, window_style, window_level, reserved, four pixmaps, extra_flags
+    xcb_get_property_reply_t *reply = [ewmh getProperty:[ewmh GNUStepWmAttr]
+                                          propertyType:XCB_GET_PROPERTY_TYPE_ANY
+                                             forWindow:clientWindow
+                                                delete:NO
+                                                length:9];
+    NSUInteger styleMask = 0;
+
+    if (reply == NULL) {
+        return 0;
+    }
+    if (reply->format == 32 && xcb_get_property_value_length(reply) >= 8) {
+        uint32_t *attributes = (uint32_t *)xcb_get_property_value(reply);
+
+        if (attributes[0] & GSWindowStyleAttr) {
+            styleMask = attributes[1];
+        }
+    }
+    free(reply);
+    return styleMask;
+}
+
++ (NSUInteger)buttonStyleMaskForFrame:(XCBFrame *)frame {
+    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+    NSUInteger styleMask = NSTitledWindowMask;
+
+    // Panels are titled differently (Platinum gives them a windoid bar), and
+    // the theme tells them apart by this bit.
+    if (clientWindow) {
+        EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:[frame connection]];
+
+        if (([self gnustepStyleMaskForWindow:clientWindow] & NSUtilityWindowMask)
+            || [[clientWindow windowType] isEqualToString:[ewmh EWMHWMWindowTypeUtility]]) {
+            styleMask |= NSUtilityWindowMask;
+        }
+    }
+
+    // Require both canClose and WM_DELETE_WINDOW (ICCCM WMProtocols) to
+    // consider close functional; without it the titlebar gets no buttons.
+    if (!clientWindow || ![clientWindow canClose]) {
+        return styleMask;
+    }
+    ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[frame connection]];
+    if (![icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow]) {
+        return styleMask;
+    }
+
+    styleMask |= NSClosableWindowMask;
+    if (![self isFixedSizeWindow:[clientWindow window]]) {
+        styleMask |= NSResizableWindowMask;
+    }
+    if ([clientWindow respondsToSelector:@selector(canMinimize)] && [clientWindow canMinimize]) {
+        styleMask |= NSMiniaturizableWindowMask;
+    }
+    return styleMask;
+}
+
++ (NSInteger)buttonIndexAtPoint:(NSPoint)point
+                   titlebarSize:(NSSize)size
+                      styleMask:(NSUInteger)styleMask {
+    CGFloat x = point.x;
+    CGFloat width = size.width;
+    CGFloat height = size.height;
+    BOOL hasMax = (styleMask & NSResizableWindowMask) != 0;
+
+    if ([self themeDrawsTitlebarButtons]) {
+        NSInteger i;
+        for (i = 0; i <= 2; i++) {
+            NSRect r = [self themeButtonRect:i titlebarSize:size styleMask:styleMask];
+            // Themes lay buttons out from the bottom left, X11 events count
+            // from the top left.
+            r.origin.y = height - NSMaxY(r);
+            if (NSPointInRect(point, r)) {
+                return i;
+            }
         }
         return -1;
     }
@@ -239,6 +439,24 @@ static CGFloat WMScaleFactor(void) {
     }
 
     return -1;  // Not over any button
+}
+
++ (NSInteger)buttonIndexAtPoint:(NSPoint)point
+                   titlebarSize:(NSSize)size
+                          frame:(XCBFrame *)frame {
+    NSUInteger styleMask;
+
+    if ([self themeDrawsTitlebarButtons]) {
+        // Theme layouts depend on exactly which buttons the titlebar shows.
+        styleMask = [self buttonStyleMaskForFrame:frame];
+    } else {
+        // Edge hit areas only depend on resizability; this runs on every
+        // pointer motion, so skip the WM_PROTOCOLS round trip.
+        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+        BOOL isFixedSize = clientWindow && [self isFixedSizeWindow:[clientWindow window]];
+        styleMask = isFixedSize ? 0 : NSResizableWindowMask;
+    }
+    return [self buttonIndexAtPoint:point titlebarSize:size styleMask:styleMask];
 }
 
 // Button position enum for side-by-side titlebar buttons
@@ -619,9 +837,9 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                           state:state
                        andTitle:title ?: @""];
 
-        // In orb mode, the theme's drawWindowBorder already draws everything
-        // (orb buttons, background, title text). Skip the WM's edge button overlay.
-        if (![self isOrbButtonStyle]) {
+        // Themes that draw their own buttons already drew everything in
+        // drawWindowBorder. Skip the WM's edge button overlay.
+        if (![self themeDrawsTitlebarButtons]) {
             // Draw buttons: Close (X) on left | title | Minimize (-) | Maximize (+) on right
             // Icons show on active windows always, and on inactive windows when hovered.
             xcb_window_t tbId = [titlebar window];
@@ -1050,8 +1268,8 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
         uint16_t targetWidth;
         int16_t targetX;
-        if ([URSThemeIntegration isOrbButtonStyle]) {
-            // Orb buttons don't extend to edges; use exact frame width
+        if ([URSThemeIntegration themeDrawsTitlebarButtons]) {
+            // Theme-drawn buttons don't extend to the edges; use exact frame width
             targetWidth = frameRect.size.width;
             targetX = 0;
         } else {
@@ -1120,41 +1338,12 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
         // Use GSTheme to draw titlebar decoration
 
-        // Check if this is a fixed-size window (hide resize but show minimize when supported)
-        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-        xcb_window_t clientWindowId = clientWindow ? [clientWindow window] : 0;
-        BOOL isFixedSize = clientWindowId && [URSThemeIntegration isFixedSizeWindow:clientWindowId];
-
-        // Base style: title only
-        NSUInteger styleMask = NSTitledWindowMask;
-
-        // Determine whether control buttons should be shown. Require both canClose
-        // and presence of WM_DELETE_WINDOW (ICCCM WMProtocols) to consider close functional.
-        BOOL showControls = NO;
-        if (clientWindow && [clientWindow canClose]) {
-            ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[frame connection]];
-            if ([icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow]) {
-                showControls = YES;
-            }
-        }
-
-        if (showControls) {
-            styleMask |= NSClosableWindowMask;
-
-            // If not fixed-size, include resize button
-            if (!isFixedSize) {
-                styleMask |= NSResizableWindowMask;
-            }
-
-            // If the client supports minimization, include miniaturize button
-            if ([clientWindow respondsToSelector:@selector(canMinimize)] && [clientWindow canMinimize]) {
-                styleMask |= NSMiniaturizableWindowMask;
-            }
-        }
+        // Hit testing uses the same mask, so the buttons stay where they are drawn
+        NSUInteger styleMask = [URSThemeIntegration buttonStyleMaskForFrame:frame];
 
         GSThemeControlState state = isActive ? GSThemeNormalState : GSThemeSelectedState;
 
-        NSDebugLog(@"Drawing standalone GSTheme titlebar with styleMask: 0x%lx, state: %d (fixedSize=%d, mini=%d)", (unsigned long)styleMask, (int)state, (int)isFixedSize, clientWindow ? (int)[clientWindow canMinimize] : 0);
+        NSDebugLog(@"Drawing standalone GSTheme titlebar with styleMask: 0x%lx, state: %d", (unsigned long)styleMask, (int)state);
 
         // Log GSTheme padding and size values to verify Eau theme values
         if ([theme respondsToSelector:@selector(titlebarPaddingLeft)]) {
@@ -1305,45 +1494,24 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         BOOL isTitlebarHovered = (titlebarId == hoveredTitlebarWindow);
         NSInteger hoverIdx = isTitlebarHovered ? hoveredButtonIndex : -1;
 
-        if ([self isOrbButtonStyle]) {
-            // Orb mode: theme's drawtitleRect already drew base orbs.
-            // Redraw individual hovered buttons with highlighted state via theme.
-            if (hoverIdx >= 0) {
-                SEL closeSel = @selector(drawCloseButtonInRect:state:active:);
-                SEL miniSel = @selector(drawMinimizeButtonInRect:state:active:);
-                SEL zoomSel = @selector(drawMaximizeButtonInRect:state:active:);
+        if ([self themeDrawsTitlebarButtons]) {
+            // The theme already drew its buttons in drawtitleRect; redraw the
+            // hovered one in its highlighted state.
+            if (hoverIdx >= 0 && hoverIdx <= 2) {
+                SEL hoverSelectors[] = {
+                    @selector(drawCloseButtonInRect:state:active:),
+                    @selector(drawMinimizeButtonInRect:state:active:),
+                    @selector(drawMaximizeButtonInRect:state:active:)
+                };
+                SEL sel = hoverSelectors[hoverIdx];
+                NSRect r = [self themeButtonRect:hoverIdx
+                                    titlebarSize:titlebarSize
+                                       styleMask:styleMask];
 
-                CGFloat orbY = (buttonHeight - ORB_BUTTON_SIZE) / 2.0;
-                CGFloat closeX = ORB_PADDING_LEFT;
-                CGFloat miniX = closeX + ORB_BUTTON_SIZE + ORB_BUTTON_SPACING;
-                CGFloat zoomX = miniX + ORB_BUTTON_SIZE + ORB_BUTTON_SPACING;
-
-                GSThemeControlState hState = GSThemeHighlightedState;
-
-                if (hoverIdx == 0 && (styleMask & NSClosableWindowMask) && [theme respondsToSelector:closeSel]) {
-                    NSRect r = NSMakeRect(closeX, orbY, ORB_BUTTON_SIZE, ORB_BUTTON_SIZE);
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[theme methodSignatureForSelector:closeSel]];
-                    [inv setSelector:closeSel];
-                    [inv setTarget:theme];
-                    [inv setArgument:&r atIndex:2];
-                    [inv setArgument:&hState atIndex:3];
-                    [inv setArgument:&isActive atIndex:4];
-                    [inv invoke];
-                }
-                if (hoverIdx == 1 && hasMinimize && [theme respondsToSelector:miniSel]) {
-                    NSRect r = NSMakeRect(miniX, orbY, ORB_BUTTON_SIZE, ORB_BUTTON_SIZE);
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[theme methodSignatureForSelector:miniSel]];
-                    [inv setSelector:miniSel];
-                    [inv setTarget:theme];
-                    [inv setArgument:&r atIndex:2];
-                    [inv setArgument:&hState atIndex:3];
-                    [inv setArgument:&isActive atIndex:4];
-                    [inv invoke];
-                }
-                if (hoverIdx == 2 && hasMaximize && [theme respondsToSelector:zoomSel]) {
-                    NSRect r = NSMakeRect(zoomX, orbY, ORB_BUTTON_SIZE, ORB_BUTTON_SIZE);
-                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[theme methodSignatureForSelector:zoomSel]];
-                    [inv setSelector:zoomSel];
+                if (!NSIsEmptyRect(r) && [theme respondsToSelector:sel]) {
+                    GSThemeControlState hState = GSThemeHighlightedState;
+                    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:[theme methodSignatureForSelector:sel]];
+                    [inv setSelector:sel];
                     [inv setTarget:theme];
                     [inv setArgument:&r atIndex:2];
                     [inv setArgument:&hState atIndex:3];
@@ -1501,6 +1669,10 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         } else {
             NSLog(@"Failed to transfer standalone GSTheme titlebar for: %@", title);
         }
+
+        // The window border shares the frame with the titlebar and changes
+        // with the same active state.
+        [self paintFrameBorder:frame active:isActive];
 
         URS_PROFILE_END(themeRender);
         return success;
