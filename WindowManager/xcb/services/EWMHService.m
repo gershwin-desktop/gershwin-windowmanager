@@ -405,6 +405,64 @@
 }
 
 
+static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        if (list[i] == atom) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+/* Other clients add their own atoms to _NET_SUPPORTED (Menu advertises its
+   global-menu atoms there, which apps check before exporting their menus).
+   Replacing the list on every reassertion would wipe those, so keep foreign
+   entries and write only when one of ours is missing: an unconditional write
+   also wakes every client watching the root window each time. */
+- (void) mergeSupportedAtoms:(const xcb_atom_t *)ownAtoms
+                       count:(uint32_t)count
+                onRootWindow:(xcb_window_t)root
+{
+    xcb_connection_t *conn = [connection connection];
+    xcb_atom_t supportedAtom = [[[atomService cachedAtoms] objectForKey:EWMHSupported] unsignedIntValue];
+
+    xcb_get_property_cookie_t cookie = xcb_get_property(conn, 0, root, supportedAtom,
+                                                        XCB_ATOM_ATOM, 0, UINT32_MAX / 4);
+    xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, cookie, NULL);
+
+    const xcb_atom_t *existing = NULL;
+    uint32_t existingCount = 0;
+    if (reply && reply->format == 32 && reply->type == XCB_ATOM_ATOM) {
+        existing = (const xcb_atom_t *)xcb_get_property_value(reply);
+        existingCount = (uint32_t)xcb_get_property_value_length(reply) / sizeof(xcb_atom_t);
+    }
+
+    xcb_atom_t *merged = malloc((count + existingCount) * sizeof(xcb_atom_t));
+    if (!merged) {
+        free(reply);
+        return;
+    }
+    memcpy(merged, ownAtoms, count * sizeof(xcb_atom_t));
+    uint32_t total = count;
+    for (uint32_t i = 0; i < existingCount; i++) {
+        if (!atomInList(existing[i], ownAtoms, count)) {
+            merged[total++] = existing[i];
+        }
+    }
+    BOOL ownMissing = NO;
+    for (uint32_t j = 0; j < count && !ownMissing; j++) {
+        ownMissing = !atomInList(ownAtoms[j], existing, existingCount);
+    }
+    free(reply);
+
+    if (ownMissing) {
+        xcb_change_property(conn, XCB_PROP_MODE_REPLACE, root, supportedAtom,
+                            XCB_ATOM_ATOM, 32, total, merged);
+    }
+    free(merged);
+}
+
 - (void) putPropertiesForRootWindow:(XCBWindow *)rootWindow andWmWindow:(XCBWindow *)wmWindow
 {
     // Standard EWMH atoms the WM supports - only include atoms defined in EWMH spec
@@ -514,15 +572,9 @@
     xcb_atom_t atomsTransformed[[rootAtoms count]];
     FnFromNSArrayAtomsToXcbAtomTArray(rootAtoms, atomsTransformed, atomService);
 
-    // Set _NET_SUPPORTED on root window
-    xcb_change_property([connection connection],
-                        XCB_PROP_MODE_REPLACE,
-                        [rootWindow window],
-                        [[[atomService cachedAtoms] objectForKey:EWMHSupported] unsignedIntValue],
-                        XCB_ATOM_ATOM,
-                        32,
-                        (uint32_t)[rootAtoms count],
-                        &atomsTransformed);
+    [self mergeSupportedAtoms:atomsTransformed
+                        count:(uint32_t)[rootAtoms count]
+                 onRootWindow:[rootWindow window]];
 
     xcb_window_t wmXcbWindow = [wmWindow window];
 
