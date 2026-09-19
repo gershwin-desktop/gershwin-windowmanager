@@ -1368,19 +1368,25 @@
     return visual;
 }
 
+// _NET_WM_STATE_HIDDEN goes along with WM_STATE, as EWMH asks, and before
+// it: GNUstep takes a window for miniaturized only when both say so as it
+// sees WM_STATE change, and only then tells it that it came back, which
+// views drawn outside the window's backing store (OpenGL) need to redraw.
 - (void) setIconicState
 {
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_ICONIC];
     isMinimized = YES;
+    [[EWMHService sharedInstanceWithConnection:connection] updateNetWmState:self];
+    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_ICONIC];
     icccmService = nil;
 }
 
 - (void) setNormalState
 {
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_NORMAL];
     isMinimized = NO;
+    [[EWMHService sharedInstanceWithConnection:connection] updateNetWmState:self];
+    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_NORMAL];
     icccmService = nil;
 }
 
