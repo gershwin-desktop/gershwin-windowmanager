@@ -72,11 +72,9 @@ for example when it goes full screen. Replacing it takes effect at once.
 - The outline goes along when the compositor bends or scales the window
   (wobbly windows while it is dragged, open and close animations).
 - The part of the window outside the outline takes no clicks.
-- If the outline leaves the bottom right corner (where the resize grip is),
-  the window manager's grip area moves up to where the outline ends at the
-  right side. The app's theme should draw its grip there too: the Eau theme
-  asks the window for `-resizeIndicatorBottomInset` (points), see
-  `EauGrowBoxView.h`.
+- The resize grip area stays in the bottom right corner; where the outline
+  cuts the corner away, that part of it takes no clicks either, just like
+  the part of the grip drawing that is cut off.
 
 Only the client area is outlined; the app draws its content as usual and
 whatever lies outside the outline is simply not shown.

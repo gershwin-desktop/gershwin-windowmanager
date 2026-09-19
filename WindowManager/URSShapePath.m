@@ -291,17 +291,3 @@ NSData *URSShapeRectsGrown(NSData *rects, int margin, int width, int height)
     }
     return grown;
 }
-
-int URSShapeRightInset(NSData *coverage, int width, int height, unsigned threshold)
-{
-    const uint8_t *c = [coverage bytes];
-    if (width <= 0 || [coverage length] < (NSUInteger)width * height) {
-        return 0;
-    }
-    for (int y = height - 1; y >= 0; y--) {
-        if (c[(long)y * width + width - 1] >= threshold) {
-            return height - 1 - y;
-        }
-    }
-    return height;
-}

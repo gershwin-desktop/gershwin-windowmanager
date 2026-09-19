@@ -52,9 +52,6 @@
 @property (nonatomic, strong) URSShapePath *clientShapePath;
 // The frame's shape was last cut to the client's
 @property (nonatomic, assign) BOOL clientShapeApplied;
-// How far above its bottom an outlined client ends at its right edge; the
-// grow box goes there, inside the outline
-@property (nonatomic, assign) uint16_t clientShapeRightInset;
 @end
 
 @interface NSObject (GSThemeResizeZones)
@@ -636,7 +633,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
         XCBRect frameRect = [self windowRect];
         int16_t handleX = frameRect.size.width - handleSize;
-        int16_t handleY = frameRect.size.height - handleSize - self.clientShapeRightInset;
+        int16_t handleY = frameRect.size.height - handleSize;
 
         // Update position and ensure handle stays above siblings in one call
         uint32_t values[3] = {handleX, handleY, XCB_STACK_MODE_ABOVE};
@@ -848,9 +845,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         if ([theme respondsToSelector:@selector(resizeZoneGrowBoxSize)]) {
             growBoxSize = [theme resizeZoneGrowBoxSize];
         }
-        [self updateResizeZone:ResizeZoneGrowBox toX:w - growBoxSize
-                             y:h - growBoxSize - self.clientShapeRightInset
-                         width:growBoxSize height:growBoxSize];
+        [self updateResizeZone:ResizeZoneGrowBox toX:w - growBoxSize y:h - growBoxSize width:growBoxSize height:growBoxSize];
     }
 }
 
@@ -942,13 +937,11 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 {
     XCBWindow *client = [self childWindowForKey:ClientWindow];
     self.clientShapePath = client ? [self readShapePathOfClient:client] : nil;
-    self.clientShapeRightInset = 0;
     [[self activeCompositor] setShapePath:self.clientShapePath
                             clientOriginX:(int16_t)self.clientBorder
                                         y:(int16_t)titleHeight
                                 forWindow:window];
     [self applyRoundedCornersShapeMask];
-    [self updateAllResizeZonePositions];
 }
 
 - (URSShapePath *)readShapePathOfClient:(XCBWindow *)client
@@ -1039,8 +1032,6 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
                                  (int16_t)cb, clientTop,
                                  (uint32_t)([rects length] / sizeof(URSShapeRect)),
                                  (const xcb_rectangle_t *)[rects bytes]);
-            self.clientShapeRightInset =
-                (uint16_t)URSShapeRightInset(coverage, clientWidth, clientHeight, 128);
         }
     }
     self.clientShapeApplied = YES;

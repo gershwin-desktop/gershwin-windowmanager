@@ -61,6 +61,3 @@ NSData *URSShapeRects(NSData *coverage, int width, int height, unsigned threshol
 /// The rectangles grown by `margin` on every side, kept within the window.
 NSData *URSShapeRectsGrown(NSData *rects, int margin, int width, int height);
 
-/// How far above the bottom the covered part (at least `threshold`) ends in
-/// the rightmost column.
-int URSShapeRightInset(NSData *coverage, int width, int height, unsigned threshold);

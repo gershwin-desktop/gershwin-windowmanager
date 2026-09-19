@@ -105,8 +105,6 @@ int main(void)
     for (NSUInteger i = 0; i < [inner length] / sizeof(URSShapeRect); i++)
       innerArea += (long)in[i].width * in[i].height;
     PASS(innerArea < area, "fully covered pixels are fewer than touched ones");
-    PASS(URSShapeRightInset(c, 400, 300, 128) == 8,
-         "at the right side the edge ends 8 pixels up");
     NSData *grown = URSShapeRectsGrown(outer, 2, 400, 300);
     const URSShapeRect *g = [grown bytes];
     const URSShapeRect *last = &o[no - 1];
