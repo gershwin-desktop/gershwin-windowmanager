@@ -2924,6 +2924,10 @@ static inline double URSEaseOutCubic(double t) {
     return 1.0 - (oneMinusT * oneMinusT * oneMinusT);
 }
 
+// Returned by fadeMaskForWindow: for a window faded out completely.  No
+// picture id the server hands out has all bits set.
+static const xcb_render_picture_t URSFadedAway = UINT32_MAX;
+
 static inline xcb_render_transform_t URSIdentityTransform(void) {
     xcb_render_transform_t transform;
     transform.matrix11 = 1 << 16;
@@ -3614,6 +3618,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
                  shadowWidth:(uint16_t)shadowWidth shadowHeight:(uint16_t)shadowHeight
                        winX:(int16_t)winX winY:(int16_t)winY
                        winW:(uint16_t)winW winH:(uint16_t)winH
+                       mask:(xcb_render_picture_t)mask
 {
     int16_t topH = winY - shadowY;
     int16_t botH = (shadowY + shadowHeight) - (winY + winH);
@@ -3622,7 +3627,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
 
     if (topH > 0) {
         xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             cw.shadowPicture, mask, self.rootBuffer,
                              0, 0, 0, 0,
                              shadowX, shadowY,
                              shadowWidth, (uint16_t)topH);
@@ -3631,7 +3636,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     if (botH > 0) {
         uint16_t botSrcY = shadowHeight - (uint16_t)botH;
         xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             cw.shadowPicture, mask, self.rootBuffer,
                              0, botSrcY, 0, 0,
                              shadowX, winY + winH,
                              shadowWidth, (uint16_t)botH);
@@ -3639,7 +3644,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
 
     if (leftW > 0 && winH > 0) {
         xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             cw.shadowPicture, mask, self.rootBuffer,
                              0, (uint16_t)topH, 0, 0,
                              shadowX, winY,
                              (uint16_t)leftW, winH);
@@ -3648,7 +3653,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     if (rightW > 0 && winH > 0) {
         uint16_t rightSrcX = shadowWidth - (uint16_t)rightW;
         xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             cw.shadowPicture, mask, self.rootBuffer,
                              rightSrcX, (uint16_t)topH, 0, 0,
                              winX + winW, winY,
                              (uint16_t)rightW, winH);
@@ -3666,13 +3671,40 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     if (cw.shadowPicture == XCB_NONE) return;
     if (!cw.damaged) return;
 
+    xcb_render_picture_t mask = [self fadeMaskForWindow:cw];
+    if (mask == URSFadedAway) return;
     [self compositeShadowStrips:cw connection:conn
                         shadowX:cw.x + cw.shadowOffsetX
                         shadowY:cw.y + cw.shadowOffsetY
                    shadowWidth:cw.shadowWidth shadowHeight:cw.shadowHeight
                          winX:cw.x winY:cw.y
                          winW:cw.width + 2 * cw.borderWidth
-                         winH:cw.height + 2 * cw.borderWidth];
+                         winH:cw.height + 2 * cw.borderWidth
+                         mask:mask];
+    if (mask != XCB_NONE) {
+        xcb_render_free_picture(conn, mask);
+    }
+}
+
+// How opaque the installed presentation wants a window it does not move.
+- (double)presentationOpacityForWindow:(URSCompositeWindow *)cw {
+    if (!self.presentation) {
+        return 1.0;
+    }
+    return URSClampDouble([self.presentation opacityForWindow:cw.windowId], 0.0, 1.0);
+}
+
+// Mask that fades a window's shadow with it: XCB_NONE when it is not faded,
+// URSFadedAway when there is nothing left to paint.  The caller frees it.
+- (xcb_render_picture_t)fadeMaskForWindow:(URSCompositeWindow *)cw {
+    double opacity = [self presentationOpacityForWindow:cw];
+    if (opacity <= 0.001) {
+        return URSFadedAway;
+    }
+    if (opacity >= 0.999 || self.argbFormat == XCB_NONE) {
+        return XCB_NONE;
+    }
+    return [self createSolidPicture:0.0 g:0.0 b:0.0 a:opacity];
 }
 
 - (void)paintAll:(xcb_xfixes_region_t)region {
@@ -4542,6 +4574,10 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
                       scaled:(BOOL)scaled
                   clipRegion:(xcb_xfixes_region_t)clipRegion {
     xcb_connection_t *conn = [self.connection connection];
+    xcb_render_picture_t mask = [self fadeMaskForWindow:cw];
+    if (mask == URSFadedAway) {
+        return;
+    }
     xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
     int16_t winX = (int16_t)llround(NSMinX(rect));
     int16_t winY = (int16_t)llround(NSMinY(rect));
@@ -4580,7 +4616,7 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
         // painting it whole reaches the transparent corners outside the
         // arcs without covering the window.
         xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             cw.shadowPicture, mask, self.rootBuffer,
                              0, 0, 0, 0,
                              shadowX, shadowY,
                              drawShadowWidth, drawShadowHeight);
@@ -4589,12 +4625,16 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
                             shadowX:shadowX shadowY:shadowY
                        shadowWidth:drawShadowWidth shadowHeight:drawShadowHeight
                              winX:winX winY:winY
-                             winW:winW winH:winH];
+                             winW:winW winH:winH
+                             mask:mask];
     }
 
     if (appliedShadowScale) {
         xcb_render_transform_t resetShadow = URSIdentityTransform();
         xcb_render_set_picture_transform(conn, cw.shadowPicture, resetShadow);
+    }
+    if (mask != XCB_NONE) {
+        xcb_render_free_picture(conn, mask);
     }
 }
 
@@ -4609,6 +4649,12 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
     xcb_connection_t *conn = [self.connection connection];
     BOOL presented = presentedRect != NULL;
     BOOL animating = cw.animating && !presented;
+    // Hover-peek translucency and a presentation fading the window out.
+    double opacity = cw.opacity * [self presentationOpacityForWindow:cw];
+    if (opacity <= 0.001) {
+        URS_PROFILE_END(paintWindow);
+        return NO;
+    }
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     double destX = screenX;
     double destY = screenY;
@@ -4868,17 +4914,17 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
             xcb_render_set_picture_transform(conn, cw.picture, transform);
 
             if (animating && cw.animatingFade && alpha < 0.999 && self.argbFormat != XCB_NONE) {
-                alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha * cw.opacity];
+                alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha * opacity];
             }
         }
 
         // Persistent opacity (hover-peek): keep the window translucent even
         // when no animation is running.  Skipped for close-animation snapshots
         // (they are frozen and never peeked).
-        if (alphaMask == XCB_NONE && cw.opacity < 0.999 && !cw.closeAnimating &&
+        if (alphaMask == XCB_NONE && opacity < 0.999 && !cw.closeAnimating &&
             self.argbFormat != XCB_NONE)
         {
-            alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:cw.opacity];
+            alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:opacity];
         }
 
         // Paint the window - IncludeInferiors captures all child content

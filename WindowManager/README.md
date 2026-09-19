@@ -67,7 +67,9 @@ defaults write WindowManager URSWobblyWindows YES
 The overview settings take effect when the window manager starts.
 
 - `URSOverviewEnabled` (default `YES`): F9 shows every window on the
-  screen side by side, shrunk, over a darkened desktop. Click a window,
+  screen side by side, shrunk, over a darkened desktop; the menu bar, the
+  Dock and any other window of type `_NET_WM_WINDOW_TYPE_DOCK` fade out
+  meanwhile. Click a window,
   or pick one with the arrow keys and Return, to bring it to the front;
   Escape, F9 or a click beside the windows goes back. Needs compositing.
 - `URSOverviewKey` (default `F9`): the X key name of the key that opens

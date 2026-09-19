@@ -196,7 +196,6 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
     self.overviewController = [[URSOverviewController alloc] initWithConnection:connection
                                                                     focusManager:self.focusManager
-                                                                 workareaManager:self.workareaManager
                                                                   windowSwitcher:self.windowSwitcher];
 
     // Check if compositing was requested via command-line

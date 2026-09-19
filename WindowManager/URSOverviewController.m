@@ -9,7 +9,6 @@
 #import "URSOverviewTitleLabel.h"
 #import "URSCompositingManager.h"
 #import "URSFocusManager.h"
-#import "URSWorkareaManager.h"
 #import "URSWindowSwitcher.h"
 #import "XCBConnection.h"
 #import "XCBScreen.h"
@@ -58,7 +57,6 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 @interface URSOverviewController ()
 @property (weak, nonatomic) XCBConnection *connection;
 @property (weak, nonatomic) URSFocusManager *focusManager;
-@property (weak, nonatomic) URSWorkareaManager *workareaManager;
 @property (weak, nonatomic) URSWindowSwitcher *windowSwitcher;
 @property (assign, nonatomic) xcb_window_t root;
 @property (assign, nonatomic) xcb_keycode_t toggleKeycode;
@@ -68,6 +66,8 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 @property (assign, nonatomic) BOOL hotCornerArmed;
 // Items by frame id while the overview is open or closing, else nil.
 @property (strong, nonatomic) NSDictionary *items;
+// Menu bar, Dock and other dock-type windows, faded out while it is open.
+@property (strong, nonatomic) NSSet *dockWindows;
 @property (strong, nonatomic) URSOverviewItem *selectedItem;
 @property (assign, nonatomic) BOOL open;
 @property (assign, nonatomic) double fromProgress;
@@ -91,13 +91,11 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 
 - (instancetype)initWithConnection:(XCBConnection *)connection
                       focusManager:(URSFocusManager *)focusManager
-                   workareaManager:(URSWorkareaManager *)workareaManager
                     windowSwitcher:(URSWindowSwitcher *)windowSwitcher {
     self = [super init];
     if (self) {
         _connection = connection;
         _focusManager = focusManager;
-        _workareaManager = workareaManager;
         _windowSwitcher = windowSwitcher;
         _root = [[[[connection screens] objectAtIndex:0] rootWindow] window];
         _hotCornerArmed = YES;
@@ -262,8 +260,60 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     return items;
 }
 
+// The Menu bar and the Dock fade out, so the whole screen is free.
+- (xcb_atom_t)atomNamed:(const char *)name {
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_intern_atom_reply_t *reply =
+        xcb_intern_atom_reply(conn, xcb_intern_atom(conn, 1, strlen(name), name), NULL);
+    xcb_atom_t atom = reply ? reply->atom : XCB_NONE;
+    free(reply);
+    return atom;
+}
+
+// Top-level windows typed _NET_WM_WINDOW_TYPE_DOCK: the Menu bar and the
+// Dock both are.  Found by their type rather than by name so any panel of
+// that kind gets out of the way.
+- (NSSet *)collectDockWindows {
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_atom_t typeAtom = [self atomNamed:"_NET_WM_WINDOW_TYPE"];
+    xcb_atom_t dockAtom = [self atomNamed:"_NET_WM_WINDOW_TYPE_DOCK"];
+    NSMutableSet *docks = [NSMutableSet set];
+    if (typeAtom == XCB_NONE || dockAtom == XCB_NONE) {
+        return docks;
+    }
+    xcb_query_tree_reply_t *tree = xcb_query_tree_reply(conn, xcb_query_tree(conn, self.root), NULL);
+    if (!tree) {
+        return docks;
+    }
+    xcb_window_t *children = xcb_query_tree_children(tree);
+    int count = xcb_query_tree_children_length(tree);
+    xcb_get_property_cookie_t *cookies = malloc(sizeof(xcb_get_property_cookie_t) * MAX(count, 1));
+    for (int i = 0; i < count; i++) {
+        cookies[i] = xcb_get_property(conn, 0, children[i], typeAtom, XCB_ATOM_ATOM, 0, 16);
+    }
+    for (int i = 0; i < count; i++) {
+        xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, cookies[i], NULL);
+        if (!reply) {
+            continue;
+        }
+        xcb_atom_t *types = xcb_get_property_value(reply);
+        int typeCount = xcb_get_property_value_length(reply) / (int)sizeof(xcb_atom_t);
+        for (int j = 0; j < typeCount; j++) {
+            if (types[j] == dockAtom) {
+                [docks addObject:@(children[i])];
+                break;
+            }
+        }
+        free(reply);
+    }
+    free(cookies);
+    free(tree);
+    return docks;
+}
+
 - (void)layOutItems:(NSArray *)items {
-    NSRect area = [self.workareaManager currentWorkarea];
+    XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
+    NSRect area = NSMakeRect(0, 0, [screen width], [screen height]);
     // Room around the windows scales with the screen, like the windows do.
     CGFloat shortSide = MIN(NSWidth(area), NSHeight(area));
     CGFloat margin = round(shortSide * 0.04);
@@ -338,6 +388,7 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
         byFrame[@([item.frame window])] = item;
     }
     self.items = byFrame;
+    self.dockWindows = [self collectDockWindows];
     self.selectedItem = nil;
     self.open = YES;
     self.fromProgress = 0.0;
@@ -391,6 +442,7 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
         return;
     }
     self.items = nil;
+    self.dockWindows = nil;
     self.selectedItem = nil;
     [self.compositingManager setPresentation:nil];
 }
@@ -406,6 +458,10 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     }
     *paintRect = URSInterpolateRect(windowRect, item.slot, [self progress]);
     return YES;
+}
+
+- (double)opacityForWindow:(xcb_window_t)windowId {
+    return [self.dockWindows containsObject:@(windowId)] ? 1.0 - [self progress] : 1.0;
 }
 
 - (double)backdropDimming {

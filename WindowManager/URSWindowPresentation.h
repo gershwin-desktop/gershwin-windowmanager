@@ -23,6 +23,10 @@
 // presentation shows.
 - (double)backdropDimming;
 
+// How opaque (0..1) to paint a window the presentation does not move, its
+// shadow included; 1 leaves it as it is, 0 hides it.
+- (double)opacityForWindow:(xcb_window_t)windowId;
+
 // While YES the compositor repaints every frame.
 - (BOOL)isAnimating;
 
