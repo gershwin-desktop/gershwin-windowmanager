@@ -385,6 +385,9 @@ static const int SPINNER_DIR[8][2] = {
             else
                 rightReserve = MAX(rightReserve, tbW - NSMinX(r));
         }
+        // A bar with every button on one side still keeps the title off the
+        // other edge, the way the orb layout always did.
+        rightReserve = MAX(rightReserve, 6.0 * scale);
     } else {
         // Edge layout reserves the square close button (width == bar height)
         // on the left and one or two square buttons on the right.
