@@ -150,6 +150,10 @@ typedef void (^dispatch_block_t)(void);
 
 // Extension event base access (for event routing)
 - (uint8_t)damageEventBase;
+- (uint8_t)shapeEventBase;
+
+// A window's bounding shape changed
+- (void)handleShapeNotify:(xcb_window_t)window;
 - (uint8_t)presentEventBase;
 - (uint8_t)randrEventBase;
 

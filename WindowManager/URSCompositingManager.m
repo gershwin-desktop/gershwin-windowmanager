@@ -22,6 +22,7 @@
 #import <xcb/present.h>
 #import <xcb/shm.h>
 #import <xcb/randr.h>
+#import <xcb/shape.h>
 #import <AppKit/NSImage.h>
 #import "XCBFrame.h"
 #import "EWMHService.h"
@@ -55,7 +56,11 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 @property (assign, nonatomic) xcb_damage_damage_t clientDamage;
 
 @property (assign, nonatomic) xcb_render_picture_t picture;
+/* The part of the window its bounding shape shows, relative to the
+ * window's outer top left corner, and the size it was worked out for. */
 @property (assign, nonatomic) xcb_xfixes_region_t borderSize;
+@property (assign, nonatomic) uint16_t borderSizeWidth;
+@property (assign, nonatomic) uint16_t borderSizeHeight;
 @property (assign, nonatomic) xcb_xfixes_region_t extents;
 @property (assign, nonatomic) BOOL damaged;
 @property (assign, nonatomic) BOOL viewable;
@@ -198,6 +203,7 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 @property (assign, nonatomic) uint8_t compositeOpcode;
 @property (assign, nonatomic) uint8_t renderOpcode;
 @property (assign, nonatomic) uint8_t damageEventBase;
+@property (assign, nonatomic) uint8_t shapeEventBase;
 @property (assign, nonatomic) uint8_t fixesOpcode;
 @property (assign, nonatomic) uint8_t randrEventBase;
 
@@ -597,6 +603,15 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
             }
         } else {
             //NSLog(@"[CompositingManager] MIT-SHM not available (using standard transfers)");
+        }
+
+        // SHAPE: a window may show only part of its rectangle - a drag
+        // image, rounded frame corners.  Its pixmap holds no picture outside
+        // that part, so the compositor must know the shape to leave it out.
+        const xcb_query_extension_reply_t *shape_ext =
+            xcb_get_extension_data(conn, &xcb_shape_id);
+        if (shape_ext && shape_ext->present) {
+            self.shapeEventBase = shape_ext->first_event;
         }
 
         // Check X Present extension (vblank-synced compositing)
@@ -1398,6 +1413,12 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
     }
 
     self.cwindows[@(windowId)] = cw;
+
+    /* Told when the window's shape changes, so the part of it that is
+     * painted changes along. */
+    if (self.shapeEventBase > 0) {
+        xcb_shape_select_input(conn, windowId, 1);
+    }
     
     // OPTIMIZATION: Mark stacking order dirty (will be rebuilt on next paint)
     self.stackingOrderDirty = YES;
@@ -3459,9 +3480,21 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
             // the damage sub-rectangle, leaving the rest of the window stale and
             // the frame's grey back_pixel bleeding through.  A region clip made
             // from the same rect always replaces the damage-region clip.
+            /* Only the part of the window its shape shows: outside it the
+             * window's pixmap holds whatever was left there, and a shaped
+             * window - a drag image - was painted as a rectangle of it.  The
+             * clip is made relative to the window and put in place through
+             * its origin: the window can have moved by any of several paths
+             * since its shape was fetched. */
+            xcb_rectangle_t winLocal = { 0, 0, winRect.width, winRect.height };
             xcb_xfixes_region_t winClip = xcb_generate_id(conn);
-            xcb_xfixes_create_region(conn, winClip, 1, &winRect);
-            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, winClip, 0, 0);
+            xcb_xfixes_create_region(conn, winClip, 1, &winLocal);
+            xcb_xfixes_region_t shown = [self shapeRegionForWindow:cw];
+            if (shown != XCB_NONE) {
+                xcb_xfixes_intersect_region(conn, winClip, shown, winClip);
+            }
+            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, winClip,
+                                               winRect.x, winRect.y);
             xcb_xfixes_destroy_region(conn, winClip);
 
             [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion];
@@ -4660,6 +4693,62 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
 
 - (uint8_t)damageEventBase {
     return _damageEventBase;
+}
+
+- (uint8_t)shapeEventBase {
+    return _shapeEventBase;
+}
+
+/* The part of the window its bounding shape shows, relative to the
+ * window's outer top left corner; for an unshaped window its whole
+ * rectangle.  Independent of where the window is, it is fetched again only
+ * when the window's size or shape changes. */
+- (xcb_xfixes_region_t)shapeRegionForWindow:(URSCompositeWindow *)cw {
+    if (self.shapeEventBase == 0) {
+        return XCB_NONE;
+    }
+
+    xcb_connection_t *conn = [self.connection connection];
+    uint16_t w = cw.width + 2 * cw.borderWidth;
+    uint16_t h = cw.height + 2 * cw.borderWidth;
+
+    if (cw.borderSize != XCB_NONE
+        && (cw.borderSizeWidth != w || cw.borderSizeHeight != h)) {
+        xcb_xfixes_destroy_region(conn, cw.borderSize);
+        cw.borderSize = XCB_NONE;
+    }
+    if (cw.borderSize == XCB_NONE) {
+        xcb_xfixes_region_t region = xcb_generate_id(conn);
+
+        xcb_xfixes_create_region_from_window(conn, region, cw.windowId,
+                                             XCB_SHAPE_SK_BOUNDING);
+        /* Fetched relative to the inside of the window's border. */
+        xcb_xfixes_translate_region(conn, region, cw.borderWidth, cw.borderWidth);
+        cw.borderSize = region;
+        cw.borderSizeWidth = w;
+        cw.borderSizeHeight = h;
+    }
+    return cw.borderSize;
+}
+
+- (void)handleShapeNotify:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw) {
+        return;
+    }
+
+    xcb_connection_t *conn = [self.connection connection];
+    if (cw.borderSize != XCB_NONE) {
+        xcb_xfixes_destroy_region(conn, cw.borderSize);
+        cw.borderSize = XCB_NONE;
+    }
+
+    /* What the old shape showed and the new one hides has to be painted
+     * over with what lies beneath. */
+    xcb_xfixes_region_t extents = [self windowExtents:cw];
+    if (extents != XCB_NONE) {
+        [self addDamage:extents];
+    }
 }
 
 - (uint8_t)presentEventBase {

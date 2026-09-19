@@ -31,6 +31,7 @@
 #import "XCBQueryTreeReply.h"
 #import "XCBAttributesReply.h"
 #import <xcb/xcb.h>
+#import <xcb/shape.h>
 #import <xcb/xcb_icccm.h>
 #import <xcb/xcb_aux.h>
 #import <xcb/damage.h>
@@ -1348,6 +1349,15 @@ static CGFloat WMLastScaleFactor = 1.0;
     }
     if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_IDLE_NOTIFY) {
         [self.compositingManager handlePresentIdle];
+        return;
+    }
+
+    uint8_t shapeEventBase = [self.compositingManager shapeEventBase];
+    if (shapeEventBase > 0 && responseType == shapeEventBase + XCB_SHAPE_NOTIFY) {
+        xcb_shape_notify_event_t *shapeEvent = (xcb_shape_notify_event_t *)event;
+        if (shapeEvent->shape_kind == XCB_SHAPE_SK_BOUNDING) {
+            [self.compositingManager handleShapeNotify:shapeEvent->affected_window];
+        }
         return;
     }
 
