@@ -1107,6 +1107,12 @@
                     if (![titleBar isGSThemeActive]) {
                         [titleBar drawTitleBarComponents];
                         [self.connection drawAllTitleBarsExcept:titleBar];
+                    } else {
+                        // The raised window must not show up with its old
+                        // inactive titlebar until the client has taken focus
+                        // and its FocusIn arrives, a few frames later.
+                        [URSThemeIntegration showTitlebarsWithActiveFrame:entry.frame
+                                                               connection:self.connection];
                     }
                 }
                 

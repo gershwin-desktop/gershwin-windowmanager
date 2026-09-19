@@ -224,6 +224,20 @@ static CGFloat WMScaleFactor(void) {
 static NSMutableDictionary *frameBorders = nil;
 // Frame window id -> the button rects last put on its titlebar
 static NSMutableDictionary *publishedButtonRects = nil;
+// Frame window id -> NSNumber BOOL: whether its titlebar was last drawn active.
+static NSMutableDictionary *drawnActiveStates = nil;
+
++ (void)noteFrame:(XCBWindow *)frame drawnActive:(BOOL)active
+{
+    if (frame == nil) {
+        return;
+    }
+    if (drawnActiveStates == nil) {
+        drawnActiveStates = [[NSMutableDictionary alloc] init];
+    }
+    [drawnActiveStates setObject:[NSNumber numberWithBool:active]
+                          forKey:[NSNumber numberWithUnsignedInt:[frame window]]];
+}
 
 + (URSFrameBorder *)borderRecordForWindow:(xcb_window_t)window create:(BOOL)create
 {
@@ -246,6 +260,7 @@ static NSMutableDictionary *publishedButtonRects = nil;
     URSFrameBorder *record = [frameBorders objectForKey:key];
 
     [publishedButtonRects removeObjectForKey:key];
+    [drawnActiveStates removeObjectForKey:key];
 
     if (record == nil) {
         return;
@@ -1039,6 +1054,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         BOOL success = [self transferBitmap:bitmap toPixmap:[titlebar pixmap] onTitlebar:titlebar];
 
         if (success) {
+            [self noteFrame:[titlebar parentWindow] drawnActive:isActive];
             NSDebugLog(@"GSTheme titlebar rendered successfully for: %@", title);
         } else {
             NSLog(@"Failed to transfer GSTheme titlebar for: %@", title);
@@ -1730,6 +1746,9 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // The window border shares the frame with the titlebar and changes
         // with the same active state.
         [self paintFrameBorder:frame active:isActive];
+        if (success) {
+            [self noteFrame:frame drawnActive:isActive];
+        }
 
         URS_PROFILE_END(themeRender);
         return success;
@@ -1765,6 +1784,56 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 
     //NSLog(@"Refreshed %lu titlebars with GSTheme decorations", (unsigned long)[integration.managedTitlebars count]);
+}
+
++ (void)showTitlebarsWithActiveFrame:(XCBFrame *)activeFrame
+                          connection:(XCBConnection *)connection {
+    NSDictionary *allWindows = [connection windowsMap];
+    NSMutableArray *redrawn = [NSMutableArray array];
+    for (NSString *wid in allWindows) {
+        XCBWindow *window = [allWindows objectForKey:wid];
+        if (![window isKindOfClass:[XCBFrame class]]) {
+            continue;
+        }
+        XCBFrame *frame = (XCBFrame *)window;
+        XCBTitleBar *titlebar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+        if (!titlebar) {
+            continue;
+        }
+        BOOL active = (frame == activeFrame);
+        [frame setIsAbove:active];
+        [titlebar setIsAbove:active];
+        // Every focus change came here twice (when the WM moves focus and
+        // again at the FocusIn) and drew all titlebars each time; only the
+        // two whose state changes need drawing, which keeps a switch fast
+        // however many windows are open.
+        NSNumber *drawn = [drawnActiveStates objectForKey:
+                              [NSNumber numberWithUnsignedInt:[frame window]]];
+        if (drawn != nil && [drawn boolValue] == active) {
+            continue;
+        }
+        [self renderGSThemeToWindow:frame
+                              frame:frame
+                              title:[titlebar windowTitle]
+                             active:active];
+        [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+        [titlebar drawArea:[titlebar windowRect]];
+        [redrawn addObject:frame];
+    }
+    if ([redrawn count] == 0) {
+        return;
+    }
+    [connection flush];
+
+    // Window pictures are live views of their drawables, so the redrawn
+    // frames only need repainting, all in the same pass.
+    URSCompositingManager *compositor = [URSCompositingManager sharedManager];
+    if ([compositor compositingActive]) {
+        for (XCBFrame *frame in redrawn) {
+            [compositor invalidateWindowPixmap:[frame window]];
+        }
+        [compositor performRepairNow];
+    }
 }
 
 #pragma mark - Event Handlers

@@ -40,6 +40,11 @@
 // to determine which titlebar should appear active.
 + (void)refreshAllTitlebarsWithFocusedWindow:(xcb_window_t)focusedClientId;
 
+// Draw activeFrame's titlebar active and every other frame's inactive, and
+// have the compositor show them in its next paint.
++ (void)showTitlebarsWithActiveFrame:(XCBFrame *)activeFrame
+                          connection:(XCBConnection *)connection;
+
 // Reset the cached GSScaleFactor used for titlebar drawing constants, so the
 // next render picks up a live scale-factor change.
 + (void)invalidateScaleFactorCache;

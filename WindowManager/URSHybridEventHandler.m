@@ -833,7 +833,15 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_FOCUS_IN: {
             xcb_focus_in_event_t *focusInEvent = (xcb_focus_in_event_t *)event;
             [connection handleFocusIn:focusInEvent];
-            [self handleFocusChange:focusInEvent->event isActive:YES];
+            // Focus events caused by a keyboard grab starting or ending say
+            // nothing about which window has focus.  Alt-Tab releases its
+            // grab while the old window is still focused, and the Ungrab
+            // FocusIn that follows drew that window active again for a few
+            // frames after the switch had drawn the new one active.
+            if (focusInEvent->mode == XCB_NOTIFY_MODE_NORMAL ||
+                focusInEvent->mode == XCB_NOTIFY_MODE_WHILE_GRABBED) {
+                [self handleFocusChange:focusInEvent->event isActive:YES];
+            }
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 // A raise/lower only changes pixels inside the affected
                 // window's extents — damage those instead of the screen.
@@ -1512,29 +1520,12 @@ static CGFloat WMLastScaleFactor = 1.0;
             }
         }
 
-        // Force every other window to the inactive state so only the focused
-        // window shows active decorations.  This runs for the activate case only.
+        // Every other window goes to the inactive state so only the focused
+        // window shows active decorations.
         if (isActive) {
-            NSDictionary *allWindows = [connection windowsMap];
-            for (NSString *wid in allWindows) {
-                XCBWindow *other = [allWindows objectForKey:wid];
-                if (![other isKindOfClass:[XCBFrame class]] || other == frame) {
-                    continue;
-                }
-                XCBFrame *otherFrame = (XCBFrame *)other;
-                XCBTitleBar *otherTB = (XCBTitleBar *)[otherFrame childWindowForKey:TitleBar];
-                if (!otherTB) {
-                    continue;
-                }
-                [otherFrame setIsAbove:NO];
-                [otherTB setIsAbove:NO];
-                [URSThemeIntegration renderGSThemeToWindow:otherFrame
-                                                     frame:otherFrame
-                                                     title:[otherTB windowTitle]
-                                                    active:NO];
-                [otherTB putWindowBackgroundWithPixmap:[otherTB pixmap]];
-                [otherTB drawArea:[otherTB windowRect]];
-            }
+            [URSThemeIntegration showTitlebarsWithActiveFrame:frame
+                                                   connection:connection];
+            return;
         }
 
         // Re-render this titlebar with GSTheme using the correct active/inactive state
