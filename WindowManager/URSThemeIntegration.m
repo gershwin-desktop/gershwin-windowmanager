@@ -762,6 +762,34 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
 #pragma mark - GSTheme Titlebar Rendering
 
+// The image a titlebar is rendered into before its pixels go to the X
+// pixmap.  Every -lockFocus on a new NSImage makes the backend create a
+// hidden X window for the image's cache (GNUstep cannot draw into a bitmap),
+// so a new image per render created and destroyed hundreds of windows while
+// the window manager started.  One image per size is reused instead; both
+// render paths fill the whole image with NSCompositeCopy first, so nothing
+// of the previous render shows through.
++ (NSImage *)renderImageOfSize:(NSSize)size {
+    static NSMutableDictionary<NSString *, NSImage *> *images = nil;
+    // Windows come in few widths; the limit only keeps resizes from
+    // piling up one image per width.
+    static const NSUInteger maxImages = 16;
+
+    if (images == nil) {
+        images = [[NSMutableDictionary alloc] init];
+    }
+    NSString *key = NSStringFromSize(size);
+    NSImage *image = images[key];
+    if (image == nil) {
+        if ([images count] >= maxImages) {
+            [images removeAllObjects];
+        }
+        image = [[NSImage alloc] initWithSize:size];
+        images[key] = image;
+    }
+    return image;
+}
+
 + (BOOL)renderGSThemeTitlebar:(XCBTitleBar*)titlebar
                         title:(NSString*)title
                        active:(BOOL)isActive {
@@ -809,8 +837,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         }
         NSSize titlebarSize = NSMakeSize(titlebarWidth, xcbRect.size.height);
 
-        // Create NSImage for GSTheme to render into
-        NSImage *titlebarImage = [[NSImage alloc] initWithSize:titlebarSize];
+        NSImage *titlebarImage = [self renderImageOfSize:titlebarSize];
 
         [titlebarImage lockFocus];
 
@@ -1001,10 +1028,15 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             [dividers stroke];
         }
 
+        // Read the pixels while the image is focused: -TIFFRepresentation
+        // would add the bitmap to the reused image and serve that stale
+        // bitmap on every later render.
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithFocusedViewRect:
+                                       NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height)];
         [titlebarImage unlockFocus];
 
         // Convert NSImage to pixel buffer and apply to titlebar
-        BOOL success = [self transferImage:titlebarImage toPixmap:[titlebar pixmap] onTitlebar:titlebar];
+        BOOL success = [self transferBitmap:bitmap toPixmap:[titlebar pixmap] onTitlebar:titlebar];
 
         if (success) {
             NSDebugLog(@"GSTheme titlebar rendered successfully for: %@", title);
@@ -1048,29 +1080,9 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 }
 
 // Transfer rendered image to a specific pixmap (pixmap or dPixmap)
-+ (BOOL)transferImage:(NSImage*)image toPixmap:(xcb_pixmap_t)targetPixmap onTitlebar:(XCBTitleBar*)titlebar {
-    // Convert NSImage to bitmap representation
-    NSBitmapImageRep *bitmap = nil;
-    for (NSImageRep *rep in [image representations]) {
-        if ([rep isKindOfClass:[NSBitmapImageRep class]]) {
-            bitmap = (NSBitmapImageRep*)rep;
-            break;
-        }
-    }
-
++ (BOOL)transferBitmap:(NSBitmapImageRep*)bitmap toPixmap:(xcb_pixmap_t)targetPixmap onTitlebar:(XCBTitleBar*)titlebar {
     if (!bitmap) {
-        // GNUstep: Use TIFF encode/decode which is more reliable than direct
-        // bitmap context rendering (graphicsContextWithBitmapImageRep may not work)
-        NSData *imageData = [image TIFFRepresentation];
-        if (!imageData) {
-            NSLog(@"Failed to create TIFF representation for titlebar transfer");
-            return NO;
-        }
-        bitmap = [NSBitmapImageRep imageRepWithData:imageData];
-    }
-
-    if (!bitmap) {
-        NSLog(@"Failed to create bitmap from NSImage for titlebar transfer");
+        NSLog(@"Failed to read the rendered titlebar for transfer");
         return NO;
     }
 
@@ -1368,8 +1380,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
               (int)titlebarSize.width, (int)titlebarSize.height,
               (int)frameRect.size.width, (int)frameRect.size.height, [window window]);
 
-        // Create NSImage for GSTheme to render into
-        NSImage *titlebarImage = [[NSImage alloc] initWithSize:titlebarSize];
+        NSImage *titlebarImage = [self renderImageOfSize:titlebarSize];
 
         [titlebarImage lockFocus];
         
@@ -1688,10 +1699,15 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             [dividers stroke];
         }
 
+        // Read the pixels while the image is focused: -TIFFRepresentation
+        // would add the bitmap to the reused image and serve that stale
+        // bitmap on every later render.
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithFocusedViewRect:
+                                       NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height)];
         [titlebarImage unlockFocus];
 
         // Transfer the image to the titlebar
-        BOOL success = [self transferImage:titlebarImage toPixmap:[titlebar pixmap] onTitlebar:titlebar];
+        BOOL success = [self transferBitmap:bitmap toPixmap:[titlebar pixmap] onTitlebar:titlebar];
 
         if (success) {
             // Keep dPixmap in sync so drawArea: (which picks pixmap or dPixmap
