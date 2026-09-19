@@ -641,9 +641,12 @@ static CGFloat WMLastScaleFactor = 1.0;
     const NSUInteger maxEventsPerCall = 50; // Limit to prevent CPU hogging
     BOOL moreEventsAvailable = NO;
 
-    // Use xcb_poll_for_event (non-blocking) instead of xcb_wait_for_event (blocking)
-    while ((e = xcb_poll_for_event([connection connection])) &&
-           eventsProcessed < maxEventsPerCall) {
+    // Use xcb_poll_for_event (non-blocking) instead of xcb_wait_for_event (blocking).
+    // The limit is checked first: polling takes the event off the queue, and
+    // one taken past the limit was never handled.  Losing a client's withdraw
+    // request that way left a quickly passed menu on the screen for good.
+    while (eventsProcessed < maxEventsPerCall &&
+           (e = xcb_poll_for_event([connection connection]))) {
         eventsProcessed++;
 
         // Motion event compression: accumulate the latest motion event

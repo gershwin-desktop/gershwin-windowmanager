@@ -1096,6 +1096,26 @@ static XCBConnection *sharedInstance;
 
 - (void)handleUnMapNotify:(xcb_unmap_notify_event_t *)anEvent
 {
+    /* A synthetic UnmapNotify is a client withdrawing its window (ICCCM
+     * 4.1.4).  A window the client maps and withdraws again at once - a
+     * menu passed over quickly - gets here while its map request is still
+     * ahead of it: the client's own unmap found nothing mapped yet, and we
+     * then mapped the window.  Only the withdrawal request is left to take
+     * it down again, or it stays on the screen for good. */
+    if (anEvent->response_type & 0x80)
+    {
+        xcb_get_window_attributes_reply_t *attr =
+            xcb_get_window_attributes_reply(connection,
+                xcb_get_window_attributes(connection, anEvent->window), NULL);
+
+        if (attr && attr->map_state != XCB_MAP_STATE_UNMAPPED)
+        {
+            xcb_unmap_window(connection, anEvent->window);
+            [self flush];
+        }
+        free(attr);
+    }
+
     // If the window being dragged unmapped, cancel the drag: its button
     // release may never arrive and would leave dragState stuck.  Other
     // windows come and go during a drag - the snap preview itself is hidden
