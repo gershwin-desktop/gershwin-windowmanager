@@ -3497,30 +3497,34 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                                                winRect.x, winRect.y);
             xcb_xfixes_destroy_region(conn, winClip);
 
-            [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion];
+            // A window still waiting for its first content left the pixels
+            // under it stale: counting its rect as fresh made the shadows of
+            // the windows above it darken with every repaint, which flickered
+            // while an application mapped many windows (Workspace starting).
+            if ([self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion]) {
+                // The opaque composite refreshed the window rect, so shadows that
+                // overlap it may be repainted over it this cycle.
+                if (freshRegion != XCB_NONE) {
+                    xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
+                    xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
+                    xcb_xfixes_union_region(conn, freshRegion, winRegion, freshRegion);
+                    xcb_xfixes_destroy_region(conn, winRegion);
+                }
 
-            // The opaque composite refreshed the window rect, so shadows that
-            // overlap it may be repainted over it this cycle.
-            if (freshRegion != XCB_NONE) {
-                xcb_xfixes_region_t winRegion = xcb_generate_id(conn);
-                xcb_xfixes_create_region(conn, winRegion, 1, &winRect);
-                xcb_xfixes_union_region(conn, freshRegion, winRegion, freshRegion);
-                xcb_xfixes_destroy_region(conn, winRegion);
+                // This window now owns its full extents in the root buffer, so
+                // any higher window overlapping it must also be repainted this
+                // cycle to stay on top.
+                int32_t bx = MIN(paintedBBox.x, windowBBox.x);
+                int32_t by = MIN(paintedBBox.y, windowBBox.y);
+                int32_t bx2 = MAX((int32_t)paintedBBox.x + (int32_t)paintedBBox.width,
+                                  (int32_t)windowBBox.x + (int32_t)windowBBox.width);
+                int32_t by2 = MAX((int32_t)paintedBBox.y + (int32_t)paintedBBox.height,
+                                  (int32_t)windowBBox.y + (int32_t)windowBBox.height);
+                paintedBBox.x = bx;
+                paintedBBox.y = by;
+                paintedBBox.width = (uint16_t)(bx2 - bx);
+                paintedBBox.height = (uint16_t)(by2 - by);
             }
-
-            // This window now owns its full extents in the root buffer, so
-            // any higher window overlapping it must also be repainted this
-            // cycle to stay on top.
-            int32_t bx = MIN(paintedBBox.x, windowBBox.x);
-            int32_t by = MIN(paintedBBox.y, windowBBox.y);
-            int32_t bx2 = MAX((int32_t)paintedBBox.x + (int32_t)paintedBBox.width,
-                              (int32_t)windowBBox.x + (int32_t)windowBBox.width);
-            int32_t by2 = MAX((int32_t)paintedBBox.y + (int32_t)paintedBBox.height,
-                              (int32_t)windowBBox.y + (int32_t)windowBBox.height);
-            paintedBBox.x = bx;
-            paintedBBox.y = by;
-            paintedBBox.width = (uint16_t)(bx2 - bx);
-            paintedBBox.height = (uint16_t)(by2 - by);
         } else {
             // Animating windows move every frame; the animation timer damages
             // the full start..end union, so a skip based on the static window
@@ -4139,9 +4143,10 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
     URS_PROFILE_END(shadowCreate);
 }
 
-- (void)paintWindow:(URSCompositeWindow *)cw 
-                atX:(int16_t)screenX 
-                atY:(int16_t)screenY 
+// Returns whether the window's content was composited into rootBuffer.
+- (BOOL)paintWindow:(URSCompositeWindow *)cw
+                atX:(int16_t)screenX
+                atY:(int16_t)screenY
      withClipRegion:(xcb_xfixes_region_t)clipRegion {
     URS_PROFILE_BEGIN(paintWindow);
     xcb_connection_t *conn = [self.connection connection];
@@ -4158,7 +4163,7 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
     // window.  After 3s the window paints regardless.
     if (!animating && !cw.damaged && cw.mappedAt > 0 && (now - cw.mappedAt) < 3.0) {
         URS_PROFILE_END(paintWindow);
-        return;
+        return NO;
     }
 
     if (animating && FnCheckXCBRectIsValid(cw.animationStartRect) &&
@@ -4257,7 +4262,7 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
 
         if (t >= 1.0 && wasMinimize) {
             [self finishAnimationForWindow:cw];
-            return;
+            return NO;
         }
 
         if (t >= 1.0) {
@@ -4318,7 +4323,9 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
         }
     }
 
+    BOOL composited = NO;
     if (cw.picture != XCB_NONE) {
+        composited = YES;
         int16_t destXInt = (int16_t)llround(destX);
         int16_t destYInt = (int16_t)llround(destY);
         uint16_t destWInt = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
@@ -4489,6 +4496,7 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
 
     // No need to recursively paint children - IncludeInferiors handles that
     URS_PROFILE_END(paintWindow);
+    return composited;
 }
 
 // Note: Child window painting is handled automatically by IncludeInferiors
