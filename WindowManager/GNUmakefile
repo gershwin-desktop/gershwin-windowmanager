@@ -26,6 +26,9 @@ $(APP_NAME)_OBJC_FILES = \
 		URSSnappingMenuController.m \
 		URSCompositingManager.m \
 		URSAttentionHopEffect.m \
+		URSOverviewLayout.m \
+		URSOverviewController.m \
+		URSOverviewTitleLabel.m \
 		URSRenderingContext.m \
 		URSWindowSwitcher.m \
 		URSWindowSwitcherOverlay.m \

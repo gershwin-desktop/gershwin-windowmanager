@@ -188,11 +188,16 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.keyboardManager = [[URSKeyboardManager alloc] initWithConnection:connection
                                                           windowSwitcher:self.windowSwitcher];
     self.keyboardManager.focusManager = self.focusManager;
+    self.windowSwitcher.focusManager = self.focusManager;
     self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
     self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
     self.titlebarController.workareaManager = self.workareaManager;
     self.titlebarController.focusManager = self.focusManager;
     self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
+    self.overviewController = [[URSOverviewController alloc] initWithConnection:connection
+                                                                    focusManager:self.focusManager
+                                                                 workareaManager:self.workareaManager
+                                                                  windowSwitcher:self.windowSwitcher];
 
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -242,6 +247,7 @@ static CGFloat WMLastScaleFactor = 1.0;
     if (self.compositingRequested) {
         [self initializeCompositing];
         self.titlebarController.compositingManager = self.compositingManager;
+        self.overviewController.compositingManager = self.compositingManager;
     }
 
     // Decorate any existing windows already on screen
@@ -256,6 +262,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
     // Setup keyboard grabbing for Alt-Tab
     [self.keyboardManager setupKeyboardGrabbing];
+    [self.overviewController setUp];
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
@@ -619,6 +626,17 @@ static CGFloat WMLastScaleFactor = 1.0;
     }
 }
 
+- (void)processMotionEvent:(xcb_motion_notify_event_t *)motionEvent
+{
+    if ([self.overviewController handleMotion:motionEvent]) {
+        return;
+    }
+    [connection handleMotionNotify:motionEvent];
+    [self.titlebarController handleResizeDuringMotion:motionEvent];
+    [self handleCompositingDuringMotion:motionEvent];
+    [self.titlebarController handleHoverDuringMotion:motionEvent];
+}
+
 - (void)processAvailableXCBEvents
 {
     // A broken XCB connection is unrecoverable and, worse, invisible without
@@ -668,10 +686,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         if (lastMotionEvent) {
             uint8_t nextType = e->response_type & ~0x80;
             if (nextType == XCB_BUTTON_RELEASE || nextType == XCB_BUTTON_PRESS) {
-                [connection handleMotionNotify:lastMotionEvent];
-                [self.titlebarController handleResizeDuringMotion:lastMotionEvent];
-                [self handleCompositingDuringMotion:lastMotionEvent];
-                [self.titlebarController handleHoverDuringMotion:lastMotionEvent];
+                [self processMotionEvent:lastMotionEvent];
                 needFlush = YES;
                 free(lastMotionEvent);
                 lastMotionEvent = NULL;
@@ -690,10 +705,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
     // Process any remaining compressed motion event (e.g. motion was last in queue)
     if (lastMotionEvent) {
-        [connection handleMotionNotify:lastMotionEvent];
-        [self.titlebarController handleResizeDuringMotion:lastMotionEvent];
-        [self handleCompositingDuringMotion:lastMotionEvent];
-        [self.titlebarController handleHoverDuringMotion:lastMotionEvent];
+        [self processMotionEvent:lastMotionEvent];
         needFlush = YES;
         free(lastMotionEvent);
         lastMotionEvent = NULL;
@@ -862,6 +874,9 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_BUTTON_PRESS: {
             xcb_button_press_event_t *pressEvent = (xcb_button_press_event_t *)event;
+            if ([self.overviewController handleButtonPress:pressEvent]) {
+                break;
+            }
 
             // Dismiss snapping context menu on any click outside it
             if (self.snappingMenuController.activeMenu) {
@@ -908,6 +923,9 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_BUTTON_RELEASE: {
             xcb_button_release_event_t *releaseEvent = (xcb_button_release_event_t *)event;
+            if ([self.overviewController handleButtonRelease:releaseEvent]) {
+                break;
+            }
 
             // Dismiss snapping context menu on button release outside it
             // (e.g., user held right-click on titlebar and released off the window)
@@ -1158,11 +1176,17 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_KEY_PRESS: {
             xcb_key_press_event_t *keyPressEvent = (xcb_key_press_event_t *)event;
+            if ([self.overviewController handleKeyPress:keyPressEvent]) {
+                break;
+            }
             [self.keyboardManager handleKeyPress:keyPressEvent];
             break;
         }
         case XCB_KEY_RELEASE: {
             xcb_key_release_event_t *keyReleaseEvent = (xcb_key_release_event_t *)event;
+            if ([self.overviewController handleKeyRelease:keyReleaseEvent]) {
+                break;
+            }
             [self.keyboardManager handleKeyRelease:keyReleaseEvent];
             break;
         }
@@ -2411,6 +2435,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         // Step 1: Clean up keyboard grabs
         //NSLog(@"[WindowManager] Step 1: Cleaning up keyboard grabs");
         [self.keyboardManager cleanupKeyboardGrabbing];
+        [self.overviewController tearDown];
         
         // Step 2: Undecorate and restore all client windows
         //NSLog(@"[WindowManager] Step 2: Restoring all client windows");
@@ -2811,6 +2836,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 {
     // Clean up keyboard grabs first
     [self.keyboardManager cleanupKeyboardGrabbing];
+    [self.overviewController tearDown];
 
     // Remove from run loop if integrated - must match all modes added in setupXCBEventIntegration
     [self teardownXCBEventIntegration];

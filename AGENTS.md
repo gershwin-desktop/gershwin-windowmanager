@@ -27,6 +27,7 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
   from the repo root. Uses the GNUstep ObjectTesting framework (`PASS()`);
   needs a live X server (`DISPLAY` set). Writes `tests.log`/`tests.sum`
   (gitignored).
+- Window overview layout: `gnustep-tests test-overview` (headless).
 - `test/` is a manual app (KillTest.app), not part of the automated suite.
 
 ## Branching

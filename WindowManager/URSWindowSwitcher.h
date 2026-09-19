@@ -26,9 +26,12 @@
 // Defaults key (BOOL, default NO): the window switched to hops in place.
 extern NSString * const URSHopOnWindowSwitchKey;
 
+@class URSFocusManager;
+
 @interface URSWindowSwitcher : NSObject
 
 @property (strong, nonatomic) XCBConnection *connection;
+@property (weak, nonatomic) URSFocusManager *focusManager;
 @property (strong, nonatomic) NSMutableArray *windowEntries;   // Array of URSWindowEntry
 @property (assign, nonatomic) NSInteger currentIndex;          // Current position during switching
 @property (assign, nonatomic) BOOL isSwitching;               // Whether we're in the middle of switching

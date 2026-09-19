@@ -11,6 +11,7 @@
 #import "XCBConnection.h"
 #import "XCBTypes.h"
 #import "URSWindowEffect.h"
+#import "URSWindowPresentation.h"
 #import <xcb/randr.h>
 
 // Replaces <dispatch/dispatch.h> dispatch_block_t without linking libdispatch
@@ -74,6 +75,11 @@ typedef void (^dispatch_block_t)(void);
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
+// While installed, the presentation decides where windows are painted
+// (nil removes it).  Tell the compositor when its answers change.
+- (void)setPresentation:(id<URSWindowPresentation>)presentation;
+- (void)presentationChanged;
+
 // Play an effect on the window where it stands.  Ignored while the window
 // already animates.
 - (void)playEffect:(id<URSWindowEffect>)effect onWindow:(xcb_window_t)windowId;

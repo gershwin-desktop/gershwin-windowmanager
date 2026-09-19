@@ -24,6 +24,9 @@
 
 // Focus tracking
 - (void)trackFocusGain:(xcb_window_t)clientWindowId;
+// Bring the window forward and give it focus, as a click on its titlebar
+// does.
+- (void)activateFrame:(XCBFrame *)frame;
 - (void)ensureFocusAfterWindowRemoval:(xcb_window_t)removedClientId;
 - (void)focusWindowDelayed:(XCBWindow *)clientWindow;
 - (void)focusWindowAfterThemeApplied:(XCBWindow *)clientWindow;

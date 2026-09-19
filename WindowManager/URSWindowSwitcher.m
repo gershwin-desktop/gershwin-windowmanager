@@ -9,6 +9,7 @@
 #import "URSWindowSwitcher.h"
 #import "XCBTypes.h"
 #import "URSAttentionHopEffect.h"
+#import "URSFocusManager.h"
 
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
@@ -24,7 +25,6 @@
 #import "EWMHService.h"
 #import <xcb/xcb.h>
 #import <xcb/xcb_icccm.h>
-#import "URSThemeIntegration.h"
 #import "TitleBarSettingsService.h"
 
 NSString * const URSHopOnWindowSwitchKey = @"URSHopOnWindowSwitch";
@@ -1082,49 +1082,12 @@ NSString * const URSHopOnWindowSwitchKey = @"URSHopOnWindowSwitch";
                 [self unminimizeWindow:entry.frame];
             }
             
-            // CRITICAL: Use the EXACT same code path as handleButtonPress
-            // This ensures window activation works identically to clicking the titlebar
-            XCBWindow *clientWindow = [entry.frame childWindowForKey:ClientWindow];
-            XCBTitleBar *titleBar = (XCBTitleBar *)[entry.frame childWindowForKey:TitleBar];
-            
-            if (clientWindow && entry.frame) {
-                //NSLog(@"[WindowSwitcher] Focusing client window %u and raising frame %u", 
-                      //[clientWindow window], [entry.frame window]);
-                
-                // Step 1: Focus the client window (same as handleButtonPress)
-                [clientWindow focus];
-                
-                // Step 2: Raise the frame (same as handleButtonPress)
-                [entry.frame stackAbove];
+            [self.focusManager activateFrame:entry.frame];
 
-                // Ensure dock windows remain stacked above regular windows
-                [self.connection restackDockWindowsAbove];
-
-                // Step 3: Update titlebar state and redraw all titlebars (same as handleButtonPress)
-                if (titleBar) {
-                    [titleBar setIsAbove:YES];
-                    [titleBar setButtonsAbove:YES];
-                    if (![titleBar isGSThemeActive]) {
-                        [titleBar drawTitleBarComponents];
-                        [self.connection drawAllTitleBarsExcept:titleBar];
-                    } else {
-                        // The raised window must not show up with its old
-                        // inactive titlebar until the client has taken focus
-                        // and its FocusIn arrives, a few frames later.
-                        [URSThemeIntegration showTitlebarsWithActiveFrame:entry.frame
-                                                               connection:self.connection];
-                    }
-                }
-                
-                // A minimized window needs no hop: its restore animation
-                // already leads the eye to it.
-                if (!entry.wasMinimized) {
-                    [self hopToAttention:entry.frame];
-                }
-
-                //NSLog(@"[WindowSwitcher] Window activation complete using XCBKit standard path");
-            } else {
-                NSLog(@"[WindowSwitcher] WARNING: Could not get client window or frame!");
+            // A minimized window needs no hop: its restore animation
+            // already leads the eye to it.
+            if (!entry.wasMinimized) {
+                [self hopToAttention:entry.frame];
             }
         }
         

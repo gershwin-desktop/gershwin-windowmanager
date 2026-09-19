@@ -60,8 +60,20 @@ Options:
 
 ```
 defaults write WindowManager URSHopOnWindowSwitch YES
+defaults write WindowManager URSOverviewHotCorner top-left
 ```
 
+The overview settings take effect when the window manager starts.
+
+- `URSOverviewEnabled` (default `YES`): F9 shows every window on the
+  screen side by side, shrunk, over a darkened desktop. Click a window,
+  or pick one with the arrow keys and Return, to bring it to the front;
+  Escape, F9 or a click beside the windows goes back. Needs compositing.
+- `URSOverviewKey` (default `F9`): the X key name of the key that opens
+  and closes the window overview.
+- `URSOverviewHotCorner` (default `none`): `top-left`, `top-right`,
+  `bottom-left` or `bottom-right` opens and closes the window overview
+  when the pointer is pushed into that screen corner.
 - `URSHopOnWindowSwitch` (default `NO`): the window Alt-Tab switches to
   hops in place to lead the eye to it. Needs compositing. Takes effect
   on the next switch, without restarting the window manager.

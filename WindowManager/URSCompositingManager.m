@@ -290,6 +290,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 
 // Animation timer
 @property (strong, nonatomic) NSTimer *animationTimer;
+@property (strong, nonatomic) id<URSWindowPresentation> presentation;
 @property (assign, nonatomic) NSUInteger activeAnimations;
 
 @end
@@ -2845,6 +2846,13 @@ static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
     self.allDamage = XCB_NONE;
     self.repairScheduled = NO;
 
+    // Damage arrives where windows are, but a presentation shows them
+    // elsewhere; repainting everything is the only way to be right.
+    if (self.presentation) {
+        xcb_xfixes_destroy_region([self.connection connection], damage);
+        damage = [self getScreenRegion];
+    }
+
     [self paintAll:damage];
 
     xcb_xfixes_destroy_region([self.connection connection], damage);
@@ -2918,8 +2926,13 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     return transform;
 }
 
+// A presentation in motion needs frames like an animation does.
+- (BOOL)needsAnimationFrames {
+    return self.activeAnimations != 0 || [self.presentation isAnimating];
+}
+
 - (void)startAnimationTimerIfNeeded {
-    if (self.animationTimer || self.activeAnimations == 0) {
+    if (self.animationTimer || ![self needsAnimationFrames]) {
         return;
     }
     self.animationTimer = [NSTimer scheduledTimerWithTimeInterval:0.016
@@ -2930,7 +2943,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 }
 
 - (void)stopAnimationTimerIfIdle {
-    if (self.activeAnimations != 0) {
+    if ([self needsAnimationFrames]) {
         return;
     }
     if (self.animationTimer) {
@@ -2940,9 +2953,12 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 }
 
 - (void)animationTimerFired:(NSTimer *)timer {
-    if (!self.compositingActive || self.activeAnimations == 0) {
+    if (!self.compositingActive || ![self needsAnimationFrames]) {
         [self stopAnimationTimerIfIdle];
         return;
+    }
+    if ([self.presentation isAnimating]) {
+        [self damageScreen];
     }
     for (URSCompositeWindow *cw in [self.cwindows allValues]) {
         if (!cw.animating) continue;
@@ -3189,6 +3205,35 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     return XCBMakeRect(XCBMakePoint(x, y),
                        XCBMakeSize((uint16_t)URSClampDouble(w, 1.0, 65535.0),
                                    (uint16_t)URSClampDouble(h, 1.0, 65535.0)));
+}
+
+#pragma mark - Presentation
+
+- (void)setPresentation:(id<URSWindowPresentation>)presentation {
+    _presentation = presentation;
+    [self presentationChanged];
+}
+
+- (void)presentationChanged {
+    if (!self.compositingActive) {
+        return;
+    }
+    [self damageScreen];
+    [self startAnimationTimerIfNeeded];
+}
+
+- (void)paintPresentationVeilInRegion:(xcb_xfixes_region_t)region {
+    double dimming = [self.presentation backdropDimming];
+    if (dimming <= 0.0) {
+        return;
+    }
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0 a:dimming];
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, region, 0, 0);
+    xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER, veil, XCB_NONE,
+                         self.rootBuffer, 0, 0, 0, 0, 0, 0,
+                         self.screenWidth, self.screenHeight);
+    xcb_render_free_picture(conn, veil);
 }
 
 - (void)finishAnimationForWindow:(URSCompositeWindow *)cw {
@@ -3522,6 +3567,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
         [self createShadowForWindow:menuCW];
     }
     BOOL menuShadowPainted = NO;
+    BOOL veilPainted = NO;
 
     // Cumulative area whose pixels were refreshed this cycle (damage plus the
     // full extents of every repainted window).  A window must be repainted if
@@ -3563,7 +3609,19 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
             continue;
         }
 
-        if (!cw.animating) {
+        NSRect presentedRect;
+        BOOL presented = self.presentation != nil && cw.viewable &&
+            [self.presentation getPaintRect:&presentedRect
+                                  forWindow:cw.windowId
+                                 windowRect:NSMakeRect(cw.x, cw.y,
+                                                       (double)cw.width + 2.0 * cw.borderWidth,
+                                                       (double)cw.height + 2.0 * cw.borderWidth)];
+        if (presented && !veilPainted) {
+            [self paintPresentationVeilInRegion:freshRegion];
+            veilPainted = YES;
+        }
+
+        if (!cw.animating && !presented) {
             // OPTIMIZATION: Skip windows whose full extents (window + shadow)
             // cannot overlap the refreshed area.  Their pixels in rootBuffer
             // were painted on an earlier pass and nothing changed underneath
@@ -3619,7 +3677,8 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
             // under it stale: counting its rect as fresh made the shadows of
             // the windows above it darken with every repaint, which flickered
             // while an application mapped many windows (Workspace starting).
-            if ([self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion]) {
+            if ([self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion
+                    presentedRect:NULL]) {
                 // The opaque composite refreshed the window rect, so shadows that
                 // overlap it may be repainted over it this cycle.
                 if (freshRegion != XCB_NONE) {
@@ -3656,12 +3715,17 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
             // flicker.  The fresh region covers the full erased area, so the
             // animation window repaints completely.  Their shadow strips are
             // skipped during animation.
-            xcb_rectangle_t animBBox = [self animationUnionRect:cw];
+            // A presentation repaints the whole screen every pass, so its
+            // windows can be anywhere on it.
+            xcb_rectangle_t animBBox = presented
+                ? (xcb_rectangle_t){ 0, 0, self.screenWidth, self.screenHeight }
+                : [self animationUnionRect:cw];
             if (!URSRectIntersects(animBBox, paintedBBox)) {
                 continue;
             }
             xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, freshRegion, 0, 0);
-            [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion];
+            [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion
+                presentedRect:presented ? &presentedRect : NULL];
 
             // This window now owns its animation range in the root buffer, so
             // any higher window overlapping it must also be repainted this
@@ -4262,13 +4326,17 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
 }
 
 // Returns whether the window's content was composited into rootBuffer.
+// presentedRect, when not NULL, is where the installed presentation shows
+// the window; it overrides any animation of the window while it lasts.
 - (BOOL)paintWindow:(URSCompositeWindow *)cw
                 atX:(int16_t)screenX
                 atY:(int16_t)screenY
-     withClipRegion:(xcb_xfixes_region_t)clipRegion {
+     withClipRegion:(xcb_xfixes_region_t)clipRegion
+      presentedRect:(const NSRect *)presentedRect {
     URS_PROFILE_BEGIN(paintWindow);
     xcb_connection_t *conn = [self.connection connection];
-    BOOL animating = cw.animating;
+    BOOL presented = presentedRect != NULL;
+    BOOL animating = cw.animating && !presented;
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     double destX = screenX;
     double destY = screenY;
@@ -4284,7 +4352,12 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
         return NO;
     }
 
-    if (animating && cw.effect) {
+    if (presented) {
+        destX = NSMinX(*presentedRect);
+        destY = NSMinY(*presentedRect);
+        destW = NSWidth(*presentedRect);
+        destH = NSHeight(*presentedRect);
+    } else if (animating && cw.effect) {
         double t = (now - cw.animationStart) / cw.animationDuration;
         if (t >= 1.0) {
             [self finishAnimationForWindow:cw];
@@ -4481,7 +4554,7 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
             appliedResizeScale = YES;
         }
 
-        if (animating) {
+        if (animating || presented) {
             double t = URSClampDouble((now - cw.animationStart) / cw.animationDuration, 0.0, 1.0);
             double srcW = fmax(1.0, (double)cw.width + (2.0 * (double)cw.borderWidth));
             double srcH = fmax(1.0, (double)cw.height + (2.0 * (double)cw.borderWidth));
@@ -4489,7 +4562,7 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
             double sy = srcH / (double)destHInt;
 
             double alpha = 1.0;
-            if (cw.animatingFade) {
+            if (animating && cw.animatingFade) {
                 if (cw.animatingMinimize || cw.closeAnimating) {
                     // Minimize/close: fade OUT (start opaque, end transparent).
                     // Close must fade out, not in like birth, or the window
@@ -4511,7 +4584,7 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
             transform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
             xcb_render_set_picture_transform(conn, cw.picture, transform);
 
-            if (cw.animatingFade && alpha < 0.999 && self.argbFormat != XCB_NONE) {
+            if (animating && cw.animatingFade && alpha < 0.999 && self.argbFormat != XCB_NONE) {
                 alphaMask = [self createSolidPicture:0.0 g:0.0 b:0.0 a:alpha * cw.opacity];
             }
         }
@@ -4538,7 +4611,7 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
                             destWInt,
                             destHInt);
 
-        if (animating) {
+        if (animating || presented) {
             xcb_render_transform_t reset = URSIdentityTransform();
             xcb_render_set_picture_transform(conn, cw.picture, reset);
         } else if (appliedResizeScale) {
@@ -4559,9 +4632,10 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
     // the window and avoids any temporary picture allocation.
     BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
     BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
-    // A window playing an effect keeps its shadow: it vanishing for the
-    // effect would read as a blink.
+    // A window playing an effect or shown elsewhere keeps its shadow: it
+    // vanishing would read as a blink.
     BOOL playingEffect = animating && cw.effect != nil;
+    BOOL repositioned = playingEffect || presented;
     if (cw.shadowPicture != XCB_NONE && (!animating || playingEffect) && !skipShadow && cw.picture != XCB_NONE && cw.pictureValid) {
         // The composite above ran under a clip to the window's full rect.
         // The shadow strips are semi-transparent and must ONLY be composited
@@ -4584,7 +4658,7 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
         uint16_t drawShadowHeight = cw.shadowHeight;
         BOOL appliedShadowScale = NO;
 
-        if ([self.connection resizeState] || playingEffect) {
+        if ([self.connection resizeState] || repositioned) {
             int32_t expectedShadowWidth = (int32_t)winW + self.gaussianSize;
             int32_t expectedShadowHeight = (int32_t)winH + self.gaussianSize;
             if (expectedShadowWidth < 1) expectedShadowWidth = 1;

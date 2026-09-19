@@ -11,6 +11,7 @@
 #import "XCBScreen.h"
 #import "XCBAttributesReply.h"
 #import "EWMHService.h"
+#import "URSThemeIntegration.h"
 #import <AppKit/AppKit.h>
 
 @interface URSFocusManager ()
@@ -475,6 +476,34 @@
     }
 
     return nil;
+}
+
+- (void)activateFrame:(XCBFrame *)frame {
+    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+    XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
+    if (!clientWindow) {
+        NSLog(@"[FocusManager] WARNING: frame %u has no client window to activate", [frame window]);
+        return;
+    }
+
+    [clientWindow focus];
+    [frame stackAbove];
+    [self.connection restackDockWindowsAbove];
+
+    if (titleBar) {
+        [titleBar setIsAbove:YES];
+        [titleBar setButtonsAbove:YES];
+        if (![titleBar isGSThemeActive]) {
+            [titleBar drawTitleBarComponents];
+            [self.connection drawAllTitleBarsExcept:titleBar];
+        } else {
+            // The raised window must not show up with its old inactive
+            // titlebar until the client has taken focus and its FocusIn
+            // arrives, a few frames later.
+            [URSThemeIntegration showTitlebarsWithActiveFrame:frame
+                                                   connection:self.connection];
+        }
+    }
 }
 
 @end

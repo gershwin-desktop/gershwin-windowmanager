@@ -62,6 +62,10 @@ WindowManager/
 ├── URSRenderingContext.h/m         Per-window rendering state
 ├── URSWindowEffect.h               Effect played on a window where it stands
 ├── URSAttentionHopEffect.h/m       Hop effect for the window switched to
+├── URSWindowPresentation.h         Shows windows elsewhere while installed
+├── URSOverviewController.h/m       Window overview: key, hot corner, input
+├── URSOverviewLayout.h/m           Window overview layout (pure geometry)
+├── URSOverviewTitleLabel.h/m       Title of the window under the pointer
 │
 ├── URSWindowSwitcher.h/m           Alt-Tab window switcher logic
 ├── URSWindowSwitcherOverlay.h/m    Window switcher overlay rendering
