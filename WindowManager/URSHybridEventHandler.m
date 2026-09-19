@@ -481,6 +481,12 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         connection.adoptingExistingWindows = NO;
 
+        // Each adopted window got a new frame, and new windows are created on
+        // top of the stack - above the Dock and the menu bar, which were above
+        // them before this window manager started.  Put that layer back now
+        // instead of leaving it buried until some later restack.
+        [connection restackDockWindowsAbove];
+
         [connection flush];
         
         // Recalculate workarea after scanning all existing windows for struts
@@ -1093,9 +1099,9 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                 width:configureNotify->width
                                                height:configureNotify->height];
                 // Stacking can also change via ConfigureNotify (stack mode);
-                // damage just the configured window — move/resize damage was
-                // already issued by resizeWindow: above.
-                [self.compositingManager markStackingOrderDirtyForWindow:configureNotify->window];
+                // move/resize damage was already issued by resizeWindow: above.
+                [self.compositingManager noteStackPosition:configureNotify->above_sibling
+                                                 forWindow:configureNotify->window];
             }
             break;
         }
@@ -1104,10 +1110,11 @@ static CGFloat WMLastScaleFactor = 1.0;
             [connection handleReparentNotify:reparentNotify];
 
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                // Re-register to refresh parent/geometry and avoid stale artifacts
+                // Re-register to refresh parent/geometry.  Unregistering damages
+                // what the window covered while it was painted; inside its new
+                // parent it shows up as damage to that parent.
                 [self.compositingManager unregisterWindow:reparentNotify->window];
                 [self.compositingManager registerWindow:reparentNotify->window];
-                [self.compositingManager scheduleComposite];
             }
             break;
         }

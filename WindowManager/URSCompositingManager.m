@@ -97,6 +97,10 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 @property (assign, nonatomic) uint16_t shadowHeight;
 // The window's own footprint is cut out of the shadow image (rounded corners)
 @property (assign, nonatomic) BOOL shadowHasCutout;
+// Sibling this window was last seen stacked directly above; ConfigureNotify
+// repeats it for every move and resize, so only a change is a restack.
+@property (assign, nonatomic) xcb_window_t aboveSibling;
+@property (assign, nonatomic) BOOL stackPositionKnown;
 // Timestamp set when the window is mapped (NSDate timeIntervalSinceReferenceDate)
 @property (assign, nonatomic) NSTimeInterval mappedAt;
 // Animation state
@@ -1220,6 +1224,11 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
     for (NSNumber *key in windowKeys) {
         URSCompositeWindow *cw = self.cwindows[key];
         if (!cw) continue;
+        // A window that is not on screen covers nothing.  Apps create and
+        // destroy many never-mapped helper windows while they start (GNUstep
+        // probes its frame offsets with one per window style); counting them
+        // repainted their whole area and every shadow over it each time.
+        if (!cw.viewable && !cw.animating) continue;
 
         xcb_xfixes_region_t extents = [self windowExtents:cw];
         if (extents == XCB_NONE) {
@@ -1621,19 +1630,21 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
     }
 
     NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:window];
+    if ([group count] == 0) {
+        // Not tracked: never painted, or already removed with its area
+        // damaged (a menu unmapped then destroyed) - nothing left to clear.
+        [self.parentFrameCache removeAllObjects];
+        return;
+    }
     xcb_xfixes_region_t damage = [self unionExtentsForCompositeWindows:group];
     if (damage != XCB_NONE) {
         [self addDamage:damage];
-    } else {
-        // If the window group is empty (cw already removed by an earlier
-        // cleanup — common for menus that are unmapped then destroyed in quick
-        // succession), fall back to damaging the full screen.  Without this the
-        // compositor never clears the area where the window was, leaving a ghost
-        // image on screen indefinitely.
-        [self damageScreen];
     }
     [self cleanupCompositeWindowGroup:group deleteDamage:YES removeRecords:YES];
     [self.parentFrameCache removeAllObjects];
+    if (damage == XCB_NONE) {
+        return;
+    }
 
     // Paint immediately so the shadow disappears in this frame, not the
     // next run loop iteration.  addDamage: above defers via scheduleRepair;
@@ -2106,6 +2117,22 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
     }
 }
 
+- (void)refreshGeometryForWindow:(URSCompositeWindow *)cw {
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_get_geometry_reply_t *geom =
+        xcb_get_geometry_reply(conn, xcb_get_geometry(conn, cw.windowId), NULL);
+    if (!geom) {
+        return;
+    }
+    cw.x = geom->x;
+    cw.y = geom->y;
+    cw.width = geom->width;
+    cw.height = geom->height;
+    cw.borderWidth = geom->border_width;
+    free(geom);
+    [self updateAbsolutePositionForWindow:cw];
+}
+
 - (void)mapWindow:(xcb_window_t)windowId {
     URSCompositeWindow *cw = [self findCWindow:windowId];
     if (!cw) {
@@ -2134,18 +2161,23 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
             cw.backgroundTransparentChecked = NO;
             cw.transparentProbeAttempts = 0;
         }
+        // Only top-level windows are painted, their children through the
+        // top-level picture; a child that appears arrives as damage to it.
+        // A shadow or a repaint for the child would only be wasted work,
+        // which added up to dozens of full repaints while windows are adopted.
+        if (cw.parentWindowId != self.rootWindow) {
+            return;
+        }
         // Create shadow for newly mapped window
         if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE) {
             [self createShadowForWindow:cw];
         }
-        // Force full-screen repaint on first map to ensure window appears even
-        // if windowExtents returns stale geometry.  This is especially important
-        // for unframed windows (menus, popups) whose extents may not be correct
-        // at map time.
-        //NSLog(@"[Compositor] mapWindow: %u viewable at (%d,%d) %dx%d parent=0x%x redirected=%d",
-              //windowId, cw.x, cw.y, cw.width, cw.height,
-              //(unsigned int)cw.parentWindowId, (int)cw.redirected);
-        [self damageScreen];
+        // A window appearing changes only the pixels under its own extents.
+        // An unframed window (menu, popup) may have been configured in ways
+        // this record missed, so its geometry is read back first - painting
+        // stale extents would leave part of it out.
+        [self refreshGeometryForWindow:cw];
+        [self damageWindowArea:cw];
         // OPTIMIZATION: Window mapping can change stacking order
         self.stackingOrderDirty = YES;
     }
@@ -2157,13 +2189,10 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 - (void)unmapWindow:(xcb_window_t)windowId {
     NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:windowId];
     if ([group count] == 0) {
-        // Window not tracked (cw may already have been cleaned up).
-        // Damage the full screen to prevent ghost images persisting.
-        [self damageScreen];
+        // Not tracked: either never painted, or already removed - and every
+        // removal of a painted window damages its area - so nothing of it is
+        // left on screen to clear.
         [self.parentFrameCache removeAllObjects];
-        self.stackingOrderDirty = YES;
-        xcb_flush([self.connection connection]);
-        [self performRepairNow];
         return;
     }
 
@@ -2192,8 +2221,9 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
         [self freeWindowData:cw delete:NO];
     }
 
+    // Unmapping leaves the stacking order as it was; paintAll: skips windows
+    // that are not viewable.
     [self.parentFrameCache removeAllObjects];
-    self.stackingOrderDirty = YES;
 
     xcb_flush([self.connection connection]);
     [self performRepairNow];
@@ -2257,8 +2287,11 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
     }
 
     if (!cw) {
-        // Truly unknown window damaged; force full screen repaint to avoid artifacts
-        [self damageScreen];
+        // Damage objects exist only for tracked windows, so this notify was
+        // still queued when its window was removed - and removal already
+        // repainted the area the window covered.  A full-screen repaint here
+        // redrew every window and shadow for nothing, several times over
+        // while windows are adopted at startup.
         URS_PROFILE_END(damageNotify);
         return;
     }
@@ -3158,7 +3191,27 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         return;
     }
 
-    [self scheduleStackingDamage];
+    // An unknown or unmapped window covers nothing, so its move in the stack
+    // changes no pixels; the order is re-read when it maps.  Only a mapped
+    // unredirected window, drawn by the X server itself, needs the full pass.
+    if (cw && cw.viewable) {
+        [self scheduleStackingDamage];
+    }
+}
+
+- (void)noteStackPosition:(xcb_window_t)sibling forWindow:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    // Only top-level windows are painted; the order of windows inside a frame
+    // is part of the frame's own picture.
+    if (!cw || cw.parentWindowId != self.rootWindow) {
+        return;
+    }
+    if (cw.stackPositionKnown && cw.aboveSibling == sibling) {
+        return;
+    }
+    cw.stackPositionKnown = YES;
+    cw.aboveSibling = sibling;
+    [self markStackingOrderDirtyForWindow:windowId];
 }
 
 // Composite shadow in 4 non-overlapping strips (top, bottom, left, right)

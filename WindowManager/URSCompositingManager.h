@@ -58,6 +58,10 @@ typedef void (^dispatch_block_t)(void);
 // window is unknown, unviewable or unredirected.
 - (void)markStackingOrderDirtyForWindow:(xcb_window_t)windowId;
 
+// A window's ConfigureNotify reported the sibling it is stacked above.  Every
+// move and resize repeats it, so only a change is treated as a restack.
+- (void)noteStackPosition:(xcb_window_t)sibling forWindow:(xcb_window_t)windowId;
+
 // Window animations (compositing-only)
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                                          fromRect:(XCBRect)startRect
