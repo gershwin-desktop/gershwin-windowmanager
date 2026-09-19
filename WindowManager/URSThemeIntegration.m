@@ -222,6 +222,8 @@ static CGFloat WMScaleFactor(void) {
 }
 
 static NSMutableDictionary *frameBorders = nil;
+// Frame window id -> the button rects last put on its titlebar
+static NSMutableDictionary *publishedButtonRects = nil;
 
 + (URSFrameBorder *)borderRecordForWindow:(xcb_window_t)window create:(BOOL)create
 {
@@ -242,6 +244,8 @@ static NSMutableDictionary *frameBorders = nil;
 {
     NSNumber *key = [NSNumber numberWithUnsignedInt:[window window]];
     URSFrameBorder *record = [frameBorders objectForKey:key];
+
+    [publishedButtonRects removeObjectForKey:key];
 
     if (record == nil) {
         return;
@@ -394,69 +398,105 @@ static NSMutableDictionary *frameBorders = nil;
     return styleMask;
 }
 
-+ (NSInteger)buttonIndexAtPoint:(NSPoint)point
-                   titlebarSize:(NSSize)size
-                      styleMask:(NSUInteger)styleMask {
-    CGFloat x = point.x;
++ (NSRect)buttonRect:(NSInteger)buttonIndex
+        titlebarSize:(NSSize)size
+           styleMask:(NSUInteger)styleMask {
     CGFloat width = size.width;
     CGFloat height = size.height;
-    BOOL hasMax = (styleMask & NSResizableWindowMask) != 0;
 
     if ([self themeDrawsTitlebarButtons]) {
-        NSInteger i;
-        for (i = 0; i <= 2; i++) {
-            NSRect r = [self themeButtonRect:i titlebarSize:size styleMask:styleMask];
-            // Themes lay buttons out from the bottom left, X11 events count
-            // from the top left.
-            r.origin.y = height - NSMaxY(r);
-            if (NSPointInRect(point, r)) {
-                return i;
-            }
+        NSRect r = [self themeButtonRect:buttonIndex titlebarSize:size styleMask:styleMask];
+        if (NSIsEmptyRect(r)) {
+            return NSZeroRect;
         }
-        return -1;
+        // Themes lay buttons out from the bottom left, X11 events count
+        // from the top left.
+        r.origin.y = height - NSMaxY(r);
+        return r;
     }
 
     // Edge layout: Close (X) on left | title | Minimize (-) | Maximize (+) on right
     // Buttons are square: width == height
-    if (x >= 0 && x < height) {
-        return 0;  // Close button
+    BOOL hasMax = (styleMask & NSResizableWindowMask) != 0;
+    switch (buttonIndex) {
+        case 0:
+            return NSMakeRect(0, 0, height, height);
+        case 1:
+            // Inner right when there is a maximize button, far right otherwise
+            return NSMakeRect(hasMax ? width - 2 * height : width - height, 0, height, height);
+        case 2:
+            return hasMax ? NSMakeRect(width - height, 0, height, height) : NSZeroRect;
+        default:
+            return NSZeroRect;
     }
+}
 
-    if (hasMax) {
-        CGFloat innerStart = width - 2 * height;
-        CGFloat outerStart = width - height;
-        if (x >= innerStart && x < outerStart) {
-            return 1;  // Minimize button (inner right)
-        }
-        if (x >= outerStart && x <= width) {
-            return 2;  // Zoom/maximize button (far right)
-        }
-    } else {
-        CGFloat miniStart = width - height;
-        if (x >= miniStart && x <= width) {
-            return 1;  // Minimize button
++ (NSInteger)buttonIndexAtPoint:(NSPoint)point
+                   titlebarSize:(NSSize)size
+                      styleMask:(NSUInteger)styleMask {
+    NSInteger i;
+    for (i = 0; i <= 2; i++) {
+        if (NSPointInRect(point, [self buttonRect:i titlebarSize:size styleMask:styleMask])) {
+            return i;
         }
     }
-
     return -1;  // Not over any button
+}
+
+// The style mask the button layout of frame's titlebar is computed from.
++ (NSUInteger)buttonLayoutStyleMaskForFrame:(XCBFrame *)frame {
+    if ([self themeDrawsTitlebarButtons]) {
+        // Theme layouts depend on exactly which buttons the titlebar shows.
+        return [self buttonStyleMaskForFrame:frame];
+    }
+    // Edge hit areas only depend on resizability; this runs on every
+    // pointer motion, so skip the WM_PROTOCOLS round trip.
+    XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+    BOOL isFixedSize = clientWindow && [self isFixedSizeWindow:[clientWindow window]];
+    return isFixedSize ? 0 : NSResizableWindowMask;
 }
 
 + (NSInteger)buttonIndexAtPoint:(NSPoint)point
                    titlebarSize:(NSSize)size
                           frame:(XCBFrame *)frame {
-    NSUInteger styleMask;
+    return [self buttonIndexAtPoint:point titlebarSize:size
+                          styleMask:[self buttonLayoutStyleMaskForFrame:frame]];
+}
 
-    if ([self themeDrawsTitlebarButtons]) {
-        // Theme layouts depend on exactly which buttons the titlebar shows.
-        styleMask = [self buttonStyleMaskForFrame:frame];
-    } else {
-        // Edge hit areas only depend on resizability; this runs on every
-        // pointer motion, so skip the WM_PROTOCOLS round trip.
-        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-        BOOL isFixedSize = clientWindow && [self isFixedSizeWindow:[clientWindow window]];
-        styleMask = isFixedSize ? 0 : NSResizableWindowMask;
++ (void)publishButtonRectsForTitlebar:(XCBTitleBar *)titlebar
+                                 size:(NSSize)size
+                                frame:(XCBFrame *)frame {
+    NSUInteger styleMask = [self buttonLayoutStyleMaskForFrame:frame];
+    NSMutableData *values = [NSMutableData data];
+    NSInteger i;
+    for (i = 0; i <= 2; i++) {
+        NSRect r = [self buttonRect:i titlebarSize:size styleMask:styleMask];
+        if (NSIsEmptyRect(r)) {
+            continue;
+        }
+        uint32_t entry[5] = {
+            (uint32_t)i,
+            (uint32_t)lround(NSMinX(r)), (uint32_t)lround(NSMinY(r)),
+            (uint32_t)lround(NSWidth(r)), (uint32_t)lround(NSHeight(r))
+        };
+        [values appendBytes:entry length:sizeof(entry)];
     }
-    return [self buttonIndexAtPoint:point titlebarSize:size styleMask:styleMask];
+
+    NSNumber *key = [NSNumber numberWithUnsignedInt:[frame window]];
+    if ([[publishedButtonRects objectForKey:key] isEqualToData:values]) {
+        return;
+    }
+    if (!publishedButtonRects) {
+        publishedButtonRects = [[NSMutableDictionary alloc] init];
+    }
+    [publishedButtonRects setObject:values forKey:key];
+
+    XCBConnection *connection = [frame connection];
+    XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
+    xcb_atom_t atom = [atomService cacheAtom:@"_WINDOW_TITLEBAR_BUTTONS"];
+    xcb_change_property([connection connection], XCB_PROP_MODE_REPLACE,
+                        [titlebar window], atom, XCB_ATOM_CARDINAL, 32,
+                        (uint32_t)([values length] / sizeof(uint32_t)), [values bytes]);
 }
 
 // Button position enum for side-by-side titlebar buttons
@@ -1313,6 +1353,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         }
 
         NSSize titlebarSize = NSMakeSize(targetWidth, titlebarRect.size.height);
+        [self publishButtonRectsForTitlebar:titlebar size:titlebarSize frame:frame];
         NSDebugLog(@"DEBUG: Using titlebarSize.width = %d (frame was %d)", (int)titlebarSize.width, (int)frameRect.size.width);
 
         // DEBUG: Also get client window dimensions for comparison

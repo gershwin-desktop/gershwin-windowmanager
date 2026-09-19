@@ -57,6 +57,18 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
   reading (one-shot); a re-mapped window without a fresh property must NOT
   reuse it.
 
+## Titlebar button property (cross-repo contract)
+
+- The theme draws the titlebar buttons as pixels, not windows, so the WM puts
+  their places on each titlebar window as `_WINDOW_TITLEBAR_BUTTONS`
+  (CARDINAL, five per shown button: 0 close / 1 minimize / 2 zoom, x, y,
+  width, height in titlebar pixels from the top left), written in
+  `URSThemeIntegration` when the titlebar is rendered and the layout changed.
+  `drive_ui titlebar_click` / `click titlebar "T" zoom` in uitests
+  (gershwin-developer DriveUI) read it; change both sides together.
+- Hit testing and the property share `+[URSThemeIntegration buttonRect:...]`,
+  so a click lands where the property says.
+
 ## Logging / error-noise conventions
 
 - `XCBReply description` is **intentionally silent** about BadWindow/BadDrawable

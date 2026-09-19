@@ -66,6 +66,21 @@
 // Buttons a frame's titlebar shows, as an NSWindow style mask
 + (NSUInteger)buttonStyleMaskForFrame:(XCBFrame *)frame;
 
+// Where a titlebar button is, in titlebar coordinates (X11, origin top left):
+// 0=close, 1=mini, 2=zoom.  NSZeroRect when the titlebar has no such button.
++ (NSRect)buttonRect:(NSInteger)buttonIndex
+        titlebarSize:(NSSize)size
+           styleMask:(NSUInteger)styleMask;
+
+// Put the titlebar's button rects on its window as _WINDOW_TITLEBAR_BUTTONS
+// (CARDINAL, five per shown button: index as above, x, y, width, height in
+// titlebar pixels from the top left).  The buttons are pixels drawn by the
+// theme, not windows, so tests and accessibility tools have no other way to
+// find them.  Rewritten only when the layout changes.
++ (void)publishButtonRectsForTitlebar:(XCBTitleBar *)titlebar
+                                 size:(NSSize)size
+                                frame:(XCBFrame *)frame;
+
 // Determine which button (if any) is at a point in titlebar coordinates
 // (X11, origin top left). Returns: 0=close, 1=mini, 2=zoom, -1=none
 + (NSInteger)buttonIndexAtPoint:(NSPoint)point
