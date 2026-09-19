@@ -3670,6 +3670,17 @@ static XCBConnection *sharedInstance;
         [window refreshCachedWMHints];
     }
 
+    if ([name isEqualToString:@"_WM_SHAPE_PATH"])
+    {
+        XCBWindow *parent = [window parentWindow];
+        if ([parent isKindOfClass:[XCBFrame class]]
+            && [(XCBFrame *)parent childWindowForKey:ClientWindow] == window)
+        {
+            [(XCBFrame *)parent clientShapePathChanged];
+            [self flush];
+        }
+    }
+
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
 
     if ([name isEqualToString:[ewmhService EWMHWMWindowType]])

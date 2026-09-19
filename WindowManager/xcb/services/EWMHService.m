@@ -560,6 +560,10 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
         // _WINDOW_CLOSE_ANIMATION only when the WM actually consumes them.
         @"_WINDOW_BIRTH_ANIMATION",
         @"_WINDOW_CLOSE_ANIMATION",
+
+        // Window outlines: clients check for this before setting
+        // _WM_SHAPE_PATH (see URSShapePath.h)
+        @"_WM_SHAPE_PATH",
     };
 
     NSArray *rootAtoms = [NSArray arrayWithObjects:rootProperties count:sizeof(rootProperties)/sizeof(NSString*)];
@@ -567,7 +571,8 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
     // Make sure the window-animation protocol atoms are interned so the
     // _NET_SUPPORTED array below carries real atom ids (FnFromNSArrayAtomsToXcbAtomTArray
     // only reads the cache; uncached names would map to 0).
-    [atomService cacheAtoms: @[ @"_WINDOW_BIRTH_ANIMATION", @"_WINDOW_CLOSE_ANIMATION" ]];
+    [atomService cacheAtoms: @[ @"_WINDOW_BIRTH_ANIMATION", @"_WINDOW_CLOSE_ANIMATION",
+                                @"_WM_SHAPE_PATH" ]];
 
     xcb_atom_t atomsTransformed[[rootAtoms count]];
     FnFromNSArrayAtomsToXcbAtomTArray(rootAtoms, atomsTransformed, atomService);

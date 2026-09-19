@@ -13,6 +13,8 @@
 #import "EWMHService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
+#import "XCBAtomService.h"
+#import "URSShapePath.h"
 
 // Loose typing for the compositor, mirroring the NSClassFromString lookup
 // the xcb layer uses everywhere; keeps URSCompositingManager.h out of here.
@@ -36,6 +38,25 @@
 
 // Informal protocol for theme-driven resize zones
 // Themes implementing these methods enable the resize zone protocol
+// What the frame asks of the compositor, which it finds by name
+@protocol URSShapePathCompositing <NSObject>
+- (BOOL)compositingActive;
+- (void)setShapePath:(URSShapePath *)path
+       clientOriginX:(int16_t)x
+                   y:(int16_t)y
+           forWindow:(xcb_window_t)windowId;
+@end
+
+@interface XCBFrame ()
+// The outline the client asked for with _WM_SHAPE_PATH, if any
+@property (nonatomic, strong) URSShapePath *clientShapePath;
+// The frame's shape was last cut to the client's
+@property (nonatomic, assign) BOOL clientShapeApplied;
+// How far above its bottom an outlined client ends at its right edge; the
+// grow box goes there, inside the outline
+@property (nonatomic, assign) uint16_t clientShapeRightInset;
+@end
+
 @interface NSObject (GSThemeResizeZones)
 - (CGFloat)resizeZoneCornerSize;
 - (CGFloat)resizeZoneEdgeThickness;
@@ -424,8 +445,8 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         [self createResizeZonesFromTheme];
     }
 
-    // Apply rounded top corners shape mask
-    [self applyRoundedCornersShapeMask];
+    // Apply rounded top corners shape mask, and the client's own outline
+    [self clientShapePathChanged];
 
     titleBar = nil;
     clientWindow = nil;
@@ -615,7 +636,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
         XCBRect frameRect = [self windowRect];
         int16_t handleX = frameRect.size.width - handleSize;
-        int16_t handleY = frameRect.size.height - handleSize;
+        int16_t handleY = frameRect.size.height - handleSize - self.clientShapeRightInset;
 
         // Update position and ensure handle stays above siblings in one call
         uint32_t values[3] = {handleX, handleY, XCB_STACK_MODE_ABOVE};
@@ -827,7 +848,9 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         if ([theme respondsToSelector:@selector(resizeZoneGrowBoxSize)]) {
             growBoxSize = [theme resizeZoneGrowBoxSize];
         }
-        [self updateResizeZone:ResizeZoneGrowBox toX:w - growBoxSize y:h - growBoxSize width:growBoxSize height:growBoxSize];
+        [self updateResizeZone:ResizeZoneGrowBox toX:w - growBoxSize
+                             y:h - growBoxSize - self.clientShapeRightInset
+                         width:growBoxSize height:growBoxSize];
     }
 }
 
@@ -911,6 +934,121 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
 - (void)applyRoundedCornersShapeMask
 {
+    BOOL cornersShaped = [self applyCornerShapes];
+    [self applyClientShapeOverCorners:cornersShaped];
+}
+
+- (void)clientShapePathChanged
+{
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    self.clientShapePath = client ? [self readShapePathOfClient:client] : nil;
+    self.clientShapeRightInset = 0;
+    [[self activeCompositor] setShapePath:self.clientShapePath
+                            clientOriginX:(int16_t)self.clientBorder
+                                        y:(int16_t)titleHeight
+                                forWindow:window];
+    [self applyRoundedCornersShapeMask];
+    [self updateAllResizeZonePositions];
+}
+
+- (URSShapePath *)readShapePathOfClient:(XCBWindow *)client
+{
+    xcb_connection_t *conn = [connection connection];
+    xcb_atom_t atom = [[XCBAtomService sharedInstanceWithConnection:connection]
+                          cacheAtom:@"_WM_SHAPE_PATH"];
+    xcb_get_property_reply_t *reply =
+        xcb_get_property_reply(conn,
+            xcb_get_property(conn, 0, [client window], atom, XCB_ATOM_INTEGER, 0, 65536),
+            NULL);
+    URSShapePath *path = nil;
+    if (reply && reply->type == XCB_ATOM_INTEGER && reply->format == 32) {
+        path = [URSShapePath shapePathWithValues:(const int32_t *)xcb_get_property_value(reply)
+                                           count:(NSUInteger)xcb_get_property_value_length(reply) / 4];
+    }
+    free(reply);
+    return path;
+}
+
+- (id<URSShapePathCompositing>)activeCompositor
+{
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (![compositorClass respondsToSelector:@selector(sharedManager)]) {
+        return nil;
+    }
+    id<URSShapePathCompositing> manager = [compositorClass performSelector:@selector(sharedManager)];
+    return [manager compositingActive] ? manager : nil;
+}
+
+// A client with an outline of its own (_WM_SHAPE_PATH, e.g. a curved
+// bottom edge) must show nothing of the frame outside it: below the titlebar
+// the frame is cut to the outline.
+- (void)applyClientShapeOverCorners:(BOOL)cornersShaped
+{
+    xcb_connection_t *conn = [connection connection];
+    const xcb_query_extension_reply_t *ext = xcb_get_extension_data(conn, &xcb_shape_id);
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    XCBRect frameRect = [self windowRect];
+
+    if (!ext || !ext->present) {
+        return;
+    }
+    if (!self.clientShapePath || !client) {
+        if (self.clientShapeApplied && !cornersShaped) {
+            xcb_shape_mask(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                           window, 0, 0, XCB_NONE);
+        }
+        self.clientShapeApplied = NO;
+        return;
+    }
+
+    if (!cornersShaped) {
+        xcb_rectangle_t whole = { 0, 0, frameRect.size.width, frameRect.size.height };
+        xcb_shape_rectangles(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                             XCB_CLIP_ORDERING_UNSORTED, window, 0, 0, 1, &whole);
+    }
+    int16_t clientTop = (int16_t)titleHeight;
+    if (frameRect.size.height > clientTop) {
+        xcb_rectangle_t below = { 0, clientTop, frameRect.size.width,
+                                  (uint16_t)(frameRect.size.height - clientTop) };
+        xcb_shape_rectangles(conn, XCB_SHAPE_SO_SUBTRACT, XCB_SHAPE_SK_BOUNDING,
+                             XCB_CLIP_ORDERING_UNSORTED, window, 0, 0, 1, &below);
+    }
+    {
+        int cb = self.clientBorder;
+        int clientWidth = (int)frameRect.size.width - 2 * cb;
+        int clientHeight = (int)frameRect.size.height - clientTop - cb;
+        if (clientWidth > 0 && clientHeight > 0) {
+            // Worked out for the frame's size now, so the outline is right on
+            // every step of a resize, before the client has caught up
+            NSData *coverage = [self.clientShapePath coverageForWidth:clientWidth
+                                                               height:clientHeight];
+            // With compositing the compositor fades the edge through the
+            // outline's coverage, and a little more than the outline stays so
+            // a scaled window (overview, animations) blends its edge with the
+            // client's own pixels, not with whatever the frame holds outside
+            // its shape.  Without compositing a pixel shows when mostly
+            // covered.
+            BOOL composited = ([self activeCompositor] != nil);
+            NSData *rects = URSShapeRects(coverage, clientWidth, clientHeight,
+                                          composited ? 1 : 128);
+            if (composited) {
+                rects = URSShapeRectsGrown(rects, 2, clientWidth, clientHeight);
+            }
+            xcb_shape_rectangles(conn, XCB_SHAPE_SO_UNION, XCB_SHAPE_SK_BOUNDING,
+                                 XCB_CLIP_ORDERING_UNSORTED, window,
+                                 (int16_t)cb, clientTop,
+                                 (uint32_t)([rects length] / sizeof(URSShapeRect)),
+                                 (const xcb_rectangle_t *)[rects bytes]);
+            self.clientShapeRightInset =
+                (uint16_t)URSShapeRightInset(coverage, clientWidth, clientHeight, 128);
+        }
+    }
+    self.clientShapeApplied = YES;
+}
+
+// Returns YES when it gave the frame window a bounding shape.
+- (BOOL)applyCornerShapes
+{
     // Query theme for corner radii - default to 0 (square corners) if not provided
     GSTheme *theme = [GSTheme theme];
     CGFloat topRadius = 0;
@@ -925,7 +1063,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     if (topRadius <= 0 && bottomRadius <= 0)
-        return;
+        return NO;
 
     // Use internal windowRect rather than a blocking xcb_get_geometry round-trip.
     // The C resize functions always update windowRect via setWindowRect: before
@@ -934,19 +1072,12 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     int fw = (int)frameRect.size.width;
     int fh = (int)frameRect.size.height;
     if (fw <= 0 || fh <= 0)
-        return;
+        return NO;
 
-    // Check if compositor is active
-    Class compositorClass = NSClassFromString(@"URSCompositingManager");
-    BOOL compositorActive = NO;
-    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-        id manager = [compositorClass sharedManager];
-        if ([manager respondsToSelector:@selector(compositingActive)]) {
-            compositorActive = [manager compositingActive];
-        }
-    }
+    BOOL compositorActive = ([self activeCompositor] != nil);
 
     // Apply bounding-shape to the FRAME window (always needed in non-compositor mode)
+    BOOL frameShaped = NO;
     if (!compositorActive) {
         XCBShape *shape = [[XCBShape alloc] initWithConnection:connection withWinId:window];
         if ([shape checkSupported]) {
@@ -957,6 +1088,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
             shape.orHeight = fh;
             [shape createPixmapsAndGCs];
             [shape createRoundedCornersWithTopRadius:(int)topRadius bottomRadius:(int)bottomRadius];
+            frameShaped = YES;
         }
         shape = nil;
     }
@@ -983,6 +1115,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
             titleBar = nil;
         }
     }
+    return frameShaped;
 }
 
 void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,

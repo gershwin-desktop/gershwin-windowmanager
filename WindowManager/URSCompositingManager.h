@@ -15,6 +15,8 @@
 #import "URSWindowDeformation.h"
 #import <xcb/randr.h>
 
+@class URSShapePath;
+
 // Replaces <dispatch/dispatch.h> dispatch_block_t without linking libdispatch
 typedef void (^dispatch_block_t)(void);
 
@@ -146,6 +148,14 @@ typedef void (^dispatch_block_t)(void);
 // alpha channel, so its drop shadow follows the arcs; 0 restores the
 // rectangular shadow.
 - (void)setShadowCornerRadius:(CGFloat)radius forWindow:(xcb_window_t)windowId;
+
+// The outline (_WM_SHAPE_PATH) of a frame's client, the client lying at
+// (x, y) in the frame; nil when it has none.  The frame is then painted
+// with smooth edges along the outline and its shadow follows it.
+- (void)setShapePath:(URSShapePath *)path
+       clientOriginX:(int16_t)x
+                   y:(int16_t)y
+           forWindow:(xcb_window_t)windowId;
 
 // Fast check used by the event loop to avoid redundant performRepairNow calls
 - (BOOL)hasPendingDamage;

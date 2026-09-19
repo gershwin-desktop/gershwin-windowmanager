@@ -48,6 +48,14 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
 - Compositing is ON by default; disable with `-dc`/`--disable-compositing`
   (see `main.m`). `URSCompositingManager` owns animations.
 
+## Window outline protocol (cross-repo contract)
+
+- Documented in SHAPES.md. WM advertises `_WM_SHAPE_PATH` in
+  `_NET_SUPPORTED`; apps (gershwin-components `Player/PlayerViews.m`) set the
+  vector outline on their client window, the Eau theme lifts its grow box via
+  `-resizeIndicatorBottomInset`. If you change the property layout, update
+  URSShapePath, its test (`test-shapepath`), the apps and SHAPES.md together.
+
 ## Window open/close animation protocol (cross-repo contract)
 
 - Documented in ANIMATIONS.md. WM advertises `_WINDOW_BIRTH_ANIMATION` and

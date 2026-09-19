@@ -89,6 +89,9 @@ extern NSString *URSWindowTitleContentChangedNotification;
 - (void) raiseResizeHandle;
 - (void) applyRoundedCornersShapeMask;
 - (void) clearShapeMasks;
+/// The client window's _WM_SHAPE_PATH outline changed (or is looked at for
+/// the first time); the frame follows it.
+- (void) clientShapePathChanged;
 - (void) programmaticResizeToRect:(XCBRect)targetRect;
 
 // WindowShade: roll the window up into its titlebar (double-click or
