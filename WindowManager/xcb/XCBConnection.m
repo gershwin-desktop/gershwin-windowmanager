@@ -2204,6 +2204,30 @@ static XCBConnection *sharedInstance;
     uint16_t winWidth = reqW + 2 * (uint16_t)cb;
     uint16_t winHeight = reqH + titleHeight + (uint16_t)cb;
 
+    if (self.adoptingExistingWindows) {
+        // When the previous window manager died, the X server left each
+        // client where its content was, one titlebar below its frame.
+        // Framing it at that point moved every window down by a titlebar on
+        // each restart.  The _NET_FRAME_EXTENTS that window manager left on
+        // the client tell where its frame was; a window without them was
+        // never framed and stays where it is.
+        EWMHService *extentsService = [EWMHService sharedInstanceWithConnection:self];
+        xcb_get_property_reply_t *extentsReply =
+            [extentsService getProperty:[extentsService EWMHWMFrameExtents]
+                           propertyType:XCB_ATOM_CARDINAL
+                              forWindow:window
+                                 delete:NO
+                                 length:4];
+        if (extentsReply && extentsReply->format == 32 &&
+            xcb_get_property_value_length(extentsReply) >= 4 * 4) {
+            // left, right, top, bottom
+            uint32_t *extents = xcb_get_property_value(extentsReply);
+            xPos = reqX - (int16_t)extents[0];
+            yPos = reqY - (int16_t)extents[2];
+        }
+        free(extentsReply);
+    }
+
     //NSLog(@"[MapRequest] Requested position for window %u: %d, %d (size %ux%u)", [window window], xPos, yPos, winWidth, winHeight);
 
     if (shouldReposition && screen) {
