@@ -10,6 +10,7 @@
 #import <Foundation/Foundation.h>
 #import "XCBConnection.h"
 #import "XCBTypes.h"
+#import "URSWindowEffect.h"
 #import <xcb/randr.h>
 
 // Replaces <dispatch/dispatch.h> dispatch_block_t without linking libdispatch
@@ -73,6 +74,9 @@ typedef void (^dispatch_block_t)(void);
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
+// Play an effect on the window where it stands.  Ignored while the window
+// already animates.
+- (void)playEffect:(id<URSWindowEffect>)effect onWindow:(xcb_window_t)windowId;
 - (void)animateWindowTransition:(xcb_window_t)windowId
                                                 fromRect:(XCBRect)startRect
                                                     toRect:(XCBRect)endRect

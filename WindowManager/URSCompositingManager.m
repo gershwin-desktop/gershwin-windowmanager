@@ -121,6 +121,9 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 @property (assign, nonatomic) BOOL animatingMinimize;
 @property (assign, nonatomic) BOOL animatingShrink;
 @property (assign, nonatomic) BOOL animatingFade;
+// Effect played on the window where it stands (see playEffect:onWindow:);
+// it follows the window's live rect, not the start/end rects.
+@property (strong, nonatomic) id<URSWindowEffect> effect;
 // Persistent window opacity (1.0 = opaque).  Used by the hover-peek feature
 // to show a rolled-down shaded window at reduced opacity; applied as an
 // alpha mask in paintWindow.
@@ -2260,6 +2263,12 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         cw.viewable = NO;
         cw.damaged = NO;
 
+        if (cw.effect) {
+            // An effect has nothing to show once the window is gone; playing
+            // it on would paint the last picture of a window no longer there.
+            [self finishAnimationForWindow:cw];
+        }
+
         if (cw.animating) {
             /* Keep resources AND the cached picture alive so a close/shrink
              * animation can still render the last captured frame even though
@@ -2734,6 +2743,10 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 - (xcb_rectangle_t)animationUnionRect:(URSCompositeWindow *)cw {
     XCBRect s = cw.animationStartRect;
     XCBRect e = cw.animationEndRect;
+    if (cw.effect) {
+        s = [self effectReachOfWindow:cw];
+        e = s;
+    }
     if (!FnCheckXCBRectIsValid(s) || !FnCheckXCBRectIsValid(e)) {
         xcb_rectangle_t r = { cw.x, cw.y,
             (uint16_t)(cw.width + 2 * cw.borderWidth),
@@ -2933,22 +2946,10 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
     for (URSCompositeWindow *cw in [self.cwindows allValues]) {
         if (!cw.animating) continue;
-        XCBRect s = cw.animationStartRect;
-        XCBRect e = cw.animationEndRect;
-        if (!FnCheckXCBRectIsValid(s) || !FnCheckXCBRectIsValid(e)) continue;
-        int16_t x1 = MIN(s.position.x, e.position.x);
-        int16_t y1 = MIN(s.position.y, e.position.y);
-        int16_t x2 = MAX(s.position.x + (int16_t)s.size.width,
-                         e.position.x + (int16_t)e.size.width) + 2 * cw.borderWidth;
-        int16_t y2 = MAX(s.position.y + (int16_t)s.size.height,
-                         e.position.y + (int16_t)e.size.height) + 2 * cw.borderWidth;
-        uint16_t shadowPad = self.gaussianSize + abs(SHADOW_OFFSET_X);
-        x1 -= shadowPad;
-        y1 -= shadowPad;
-        x2 += shadowPad;
-        y2 += shadowPad;
-        xcb_rectangle_t r = {x1, y1,
-                             (uint16_t)(x2 - x1), (uint16_t)(y2 - y1)};
+        if (!cw.effect &&
+            (!FnCheckXCBRectIsValid(cw.animationStartRect) ||
+             !FnCheckXCBRectIsValid(cw.animationEndRect))) continue;
+        xcb_rectangle_t r = [self animationUnionRect:cw];
         xcb_connection_t *conn = [self.connection connection];
         xcb_xfixes_region_t reg = xcb_generate_id(conn);
         xcb_xfixes_create_region(conn, reg, 1, &r);
@@ -3127,6 +3128,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     cw.animatingMinimize = minimizing;
     cw.animatingShrink = shrink;
     cw.animatingFade = fade;
+    cw.effect = nil;
     cw.animationCompletion = completion;
 
     if (!wasAnimating) {
@@ -3148,6 +3150,47 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     [self scheduleComposite];
 }
 
+- (void)playEffect:(id<URSWindowEffect>)effect onWindow:(xcb_window_t)windowId {
+    if (!self.compositingActive || windowId == XCB_NONE) {
+        return;
+    }
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    // A window that is already animating (restored from the Dock, just born)
+    // draws the eye by itself, and the effect must not cut that short.
+    if (!cw || !cw.viewable || cw.animating) {
+        return;
+    }
+
+    cw.animationStartRect = XCBInvalidRect;
+    cw.animationEndRect = XCBInvalidRect;
+    cw.animationStart = [NSDate timeIntervalSinceReferenceDate];
+    cw.animationDuration = [effect duration];
+    cw.animating = YES;
+    cw.effect = effect;
+    self.activeAnimations += 1;
+
+    [self startAnimationTimerIfNeeded];
+    [self scheduleComposite];
+}
+
+static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
+    return NSMakeRect(cw.x, cw.y,
+                      (double)cw.width + 2.0 * cw.borderWidth,
+                      (double)cw.height + 2.0 * cw.borderWidth);
+}
+
+// animationUnionRect: adds the borders back, so they are left out here.
+- (XCBRect)effectReachOfWindow:(URSCompositeWindow *)cw {
+    NSRect reach = [cw.effect reachOfWindowRect:URSWindowRectOf(cw)];
+    double x = floor(NSMinX(reach));
+    double y = floor(NSMinY(reach));
+    double w = ceil(NSMaxX(reach)) - x - 2.0 * cw.borderWidth;
+    double h = ceil(NSMaxY(reach)) - y - 2.0 * cw.borderWidth;
+    return XCBMakeRect(XCBMakePoint(x, y),
+                       XCBMakeSize((uint16_t)URSClampDouble(w, 1.0, 65535.0),
+                                   (uint16_t)URSClampDouble(h, 1.0, 65535.0)));
+}
+
 - (void)finishAnimationForWindow:(URSCompositeWindow *)cw {
     if (!cw || !cw.animating) {
         return;
@@ -3159,6 +3202,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     cw.animatingMinimize = NO;
     cw.animatingShrink = NO;
     cw.animatingFade = NO;
+    cw.effect = nil;
     cw.closeAnimating = NO;
     cw.animationStart = 0;
     cw.animationDuration = 0;
@@ -4240,7 +4284,20 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
         return NO;
     }
 
-    if (animating && FnCheckXCBRectIsValid(cw.animationStartRect) &&
+    if (animating && cw.effect) {
+        double t = (now - cw.animationStart) / cw.animationDuration;
+        if (t >= 1.0) {
+            [self finishAnimationForWindow:cw];
+            animating = NO;
+        } else {
+            NSRect paint = [cw.effect paintRectAtProgress:t
+                                            forWindowRect:NSMakeRect(screenX, screenY, destW, destH)];
+            destX = NSMinX(paint);
+            destY = NSMinY(paint);
+            destW = NSWidth(paint);
+            destH = NSHeight(paint);
+        }
+    } else if (animating && FnCheckXCBRectIsValid(cw.animationStartRect) &&
         FnCheckXCBRectIsValid(cw.animationEndRect) && cw.animationDuration > 0.0) {
         double t = (now - cw.animationStart) / cw.animationDuration;
         t = URSClampDouble(t, 0.0, 1.0);
@@ -4502,7 +4559,10 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
     // the window and avoids any temporary picture allocation.
     BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
     BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
-    if (cw.shadowPicture != XCB_NONE && !animating && !skipShadow && cw.picture != XCB_NONE && cw.pictureValid) {
+    // A window playing an effect keeps its shadow: it vanishing for the
+    // effect would read as a blink.
+    BOOL playingEffect = animating && cw.effect != nil;
+    if (cw.shadowPicture != XCB_NONE && (!animating || playingEffect) && !skipShadow && cw.picture != XCB_NONE && cw.pictureValid) {
         // The composite above ran under a clip to the window's full rect.
         // The shadow strips are semi-transparent and must ONLY be composited
         // over pixels that are fresh this cycle (background fill or a lower
@@ -4514,15 +4574,19 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
         // DamageNotify, so cw.damaged stays NO and their shadow would never be
         // painted.
         xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
-        int16_t shadowX = screenX + cw.shadowOffsetX;
-        int16_t shadowY = screenY + cw.shadowOffsetY;
+        int16_t winX = (int16_t)llround(destX);
+        int16_t winY = (int16_t)llround(destY);
+        uint16_t winW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
+        uint16_t winH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
+        int16_t shadowX = winX + cw.shadowOffsetX;
+        int16_t shadowY = winY + cw.shadowOffsetY;
         uint16_t drawShadowWidth = cw.shadowWidth;
         uint16_t drawShadowHeight = cw.shadowHeight;
         BOOL appliedShadowScale = NO;
 
-        if ([self.connection resizeState]) {
-            int32_t expectedShadowWidth = (int32_t)cw.width + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
-            int32_t expectedShadowHeight = (int32_t)cw.height + (2 * (int32_t)cw.borderWidth) + self.gaussianSize;
+        if ([self.connection resizeState] || playingEffect) {
+            int32_t expectedShadowWidth = (int32_t)winW + self.gaussianSize;
+            int32_t expectedShadowHeight = (int32_t)winH + self.gaussianSize;
             if (expectedShadowWidth < 1) expectedShadowWidth = 1;
             if (expectedShadowHeight < 1) expectedShadowHeight = 1;
             if (expectedShadowWidth > 65535) expectedShadowWidth = 65535;
@@ -4552,12 +4616,10 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
                                  shadowX, shadowY,
                                  drawShadowWidth, drawShadowHeight);
         } else {
-            uint16_t winW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
-            uint16_t winH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
             [self compositeShadowStrips:cw connection:conn
                                 shadowX:shadowX shadowY:shadowY
                            shadowWidth:drawShadowWidth shadowHeight:drawShadowHeight
-                                 winX:screenX winY:screenY
+                                 winX:winX winY:winY
                                  winW:winW winH:winH];
         }
 

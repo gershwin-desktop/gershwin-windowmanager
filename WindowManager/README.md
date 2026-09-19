@@ -56,6 +56,16 @@ Options:
 - Automatically falls back to non-compositing on any errors
 - Requires COMPOSITE, RENDER, DAMAGE, and XFIXES X extensions
 
+### Settings
+
+```
+defaults write WindowManager URSHopOnWindowSwitch YES
+```
+
+- `URSHopOnWindowSwitch` (default `NO`): the window Alt-Tab switches to
+  hops in place to lead the eye to it. Needs compositing. Takes effect
+  on the next switch, without restarting the window manager.
+
 **Note:** The display number `:1` is what you set for Xephyr. It cannot run on the same display where X11 is already running.
 
 Distributions may set the `DISPLAY` environment variable differently based on their needs. For example:

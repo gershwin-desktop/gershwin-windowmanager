@@ -60,6 +60,8 @@ WindowManager/
 │
 ├── URSCompositingManager.h/m       XRender compositing manager
 ├── URSRenderingContext.h/m         Per-window rendering state
+├── URSWindowEffect.h               Effect played on a window where it stands
+├── URSAttentionHopEffect.h/m       Hop effect for the window switched to
 │
 ├── URSWindowSwitcher.h/m           Alt-Tab window switcher logic
 ├── URSWindowSwitcherOverlay.h/m    Window switcher overlay rendering

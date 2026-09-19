@@ -8,6 +8,7 @@
 
 #import "URSWindowSwitcher.h"
 #import "XCBTypes.h"
+#import "URSAttentionHopEffect.h"
 
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
@@ -15,6 +16,7 @@
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
+- (void)playEffect:(id<URSWindowEffect>)effect onWindow:(xcb_window_t)windowId;
 @end
 #import "XCBTitleBar.h"
 #import "XCBScreen.h"
@@ -24,6 +26,8 @@
 #import <xcb/xcb_icccm.h>
 #import "URSThemeIntegration.h"
 #import "TitleBarSettingsService.h"
+
+NSString * const URSHopOnWindowSwitchKey = @"URSHopOnWindowSwitch";
 
 #pragma mark - Class Extension
 
@@ -484,12 +488,8 @@
 
         // Trigger compositing restore animation (Alt-Tab path)
         {
-            Class compositorClass = NSClassFromString(@"URSCompositingManager");
-            id<URSCompositingManaging> compositor = nil;
-            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                compositor = [compositorClass performSelector:@selector(sharedManager)];
-            }
-            if (compositor && [compositor compositingActive]) {
+            id<URSCompositingManaging> compositor = [self activeCompositor];
+            if (compositor) {
                 XCBRect iconRect = XCBInvalidRect;
                 EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
                 if (clientWindow) {
@@ -1116,6 +1116,12 @@
                     }
                 }
                 
+                // A minimized window needs no hop: its restore animation
+                // already leads the eye to it.
+                if (!entry.wasMinimized) {
+                    [self hopToAttention:entry.frame];
+                }
+
                 //NSLog(@"[WindowSwitcher] Window activation complete using XCBKit standard path");
             } else {
                 NSLog(@"[WindowSwitcher] WARNING: Could not get client window or frame!");
@@ -1196,6 +1202,30 @@
     self.isSwitching = NO;
     self.overlayVisible = NO;
     self.currentIndex = -1;
+}
+
+#pragma mark - Compositor
+
+// Looked up by name: the compositor is optional at run time.
+- (id<URSCompositingManaging>)activeCompositor {
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (![compositorClass respondsToSelector:@selector(sharedManager)]) {
+        return nil;
+    }
+    id<URSCompositingManaging> compositor = [compositorClass performSelector:@selector(sharedManager)];
+    return [compositor compositingActive] ? compositor : nil;
+}
+
+// Among many windows the one switched to is easy to lose track of.  Off
+// unless the user asks for it: motion on every switch is not to everyone's
+// taste.
+- (void)hopToAttention:(XCBFrame *)frame {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:URSHopOnWindowSwitchKey]) {
+        return;
+    }
+    URSAttentionHopEffect *hop =
+        [[URSAttentionHopEffect alloc] initWithScreenHeight:[[frame onScreen] height]];
+    [[self activeCompositor] playEffect:hop onWindow:[frame window]];
 }
 
 #pragma mark - Screen Redraw After Switcher Closes

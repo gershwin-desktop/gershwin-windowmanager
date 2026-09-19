@@ -23,6 +23,9 @@
 @property (strong, nonatomic) NSImage *icon;
 @end
 
+// Defaults key (BOOL, default NO): the window switched to hops in place.
+extern NSString * const URSHopOnWindowSwitchKey;
+
 @interface URSWindowSwitcher : NSObject
 
 @property (strong, nonatomic) XCBConnection *connection;
