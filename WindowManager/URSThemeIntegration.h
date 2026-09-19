@@ -100,6 +100,11 @@
 // must not overlay its edge buttons
 + (BOOL)themeDrawsTitlebarButtons;
 
+// YES when the titlebar's pixmap already holds the theme's drawing for the
+// frame's current width and the given active state, so showing it needs a
+// copy rather than a new render.
++ (BOOL)titlebar:(XCBTitleBar *)titlebar isCurrentForFrame:(XCBFrame *)frame active:(BOOL)active;
+
 // Width of the window border the theme draws around the client, 0 for none
 + (CGFloat)frameBorderWidth;
 // Paint that border on the frame window, and repaint it with the state last

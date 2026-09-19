@@ -4565,6 +4565,88 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
     URS_PROFILE_END(shadowCreate);
 }
 
+// The shadow made for another size, painted for a window of winW x winH in
+// nine slices: the corners as they are, the edges stretched only along their
+// length, the middle left out.  Only the rim of the blur varies, and it does
+// not depend on the window's size, so this is exact where scaling the whole
+// shadow squeezed or stretched the blur (a live resize to a larger window
+// left a shadow far too faint until the button was released), and it costs
+// a few composites instead of a new shadow per motion.  Returns NO when the
+// shadow already has the size, or has no constant middle to stretch (a
+// window smaller than the blur).
+- (BOOL)compositeShadowSlices:(URSCompositeWindow *)cw
+                      shadowX:(int16_t)shadowX shadowY:(int16_t)shadowY
+                         winX:(int16_t)winX winY:(int16_t)winY
+                         winW:(uint16_t)winW winH:(uint16_t)winH
+                         mask:(xcb_render_picture_t)mask
+                   clipRegion:(xcb_xfixes_region_t)clipRegion {
+    int32_t rim = self.gaussianSize;
+    int32_t srcW = cw.shadowWidth, srcH = cw.shadowHeight;
+    int32_t dstW = (int32_t)winW + rim, dstH = (int32_t)winH + rim;
+    if ((srcW == dstW && srcH == dstH) ||
+        srcW - 2 * rim < 1 || srcH - 2 * rim < 1 ||
+        dstW - 2 * rim < 1 || dstH - 2 * rim < 1) {
+        return NO;
+    }
+    xcb_connection_t *conn = [self.connection connection];
+
+    // A shadow without the window's footprint cut out must not be painted
+    // under the window, which would darken a translucent one.
+    xcb_xfixes_region_t sliceClip = XCB_NONE;
+    if (!cw.shadowHasCutout) {
+        sliceClip = xcb_generate_id(conn);
+        if (clipRegion != XCB_NONE) {
+            xcb_xfixes_create_region(conn, sliceClip, 0, NULL);
+            xcb_xfixes_copy_region(conn, clipRegion, sliceClip);
+        } else {
+            xcb_rectangle_t screen = { 0, 0, self.screenWidth, self.screenHeight };
+            xcb_xfixes_create_region(conn, sliceClip, 1, &screen);
+        }
+        xcb_rectangle_t windowRect = { winX, winY, winW, winH };
+        xcb_xfixes_region_t windowRegion = xcb_generate_id(conn);
+        xcb_xfixes_create_region(conn, windowRegion, 1, &windowRect);
+        xcb_xfixes_subtract_region(conn, sliceClip, windowRegion, sliceClip);
+        xcb_xfixes_destroy_region(conn, windowRegion);
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, sliceClip, 0, 0);
+    }
+
+    int32_t srcX[4] = { 0, rim, srcW - rim, srcW };
+    int32_t srcY[4] = { 0, rim, srcH - rim, srcH };
+    int32_t dstX[4] = { 0, rim, dstW - rim, dstW };
+    int32_t dstY[4] = { 0, rim, dstH - rim, dstH };
+    for (int row = 0; row < 3; row++) {
+        for (int column = 0; column < 3; column++) {
+            if (row == 1 && column == 1) {
+                continue;
+            }
+            int32_t sw = srcX[column + 1] - srcX[column];
+            int32_t sh = srcY[row + 1] - srcY[row];
+            int32_t dw = dstX[column + 1] - dstX[column];
+            int32_t dh = dstY[row + 1] - dstY[row];
+            // The slice's source origin goes into the transform; the
+            // composite's own source offset would be stretched with it.
+            xcb_render_transform_t transform = URSIdentityTransform();
+            transform.matrix11 = (xcb_render_fixed_t)((double)sw / dw * 65536.0);
+            transform.matrix22 = (xcb_render_fixed_t)((double)sh / dh * 65536.0);
+            transform.matrix13 = (xcb_render_fixed_t)(srcX[column] * 65536);
+            transform.matrix23 = (xcb_render_fixed_t)(srcY[row] * 65536);
+            xcb_render_set_picture_transform(conn, cw.shadowPicture, transform);
+            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                                 cw.shadowPicture, mask, self.rootBuffer,
+                                 0, 0, 0, 0,
+                                 (int16_t)(shadowX + dstX[column]), (int16_t)(shadowY + dstY[row]),
+                                 (uint16_t)dw, (uint16_t)dh);
+        }
+    }
+    xcb_render_set_picture_transform(conn, cw.shadowPicture, URSIdentityTransform());
+
+    if (sliceClip != XCB_NONE) {
+        xcb_xfixes_destroy_region(conn, sliceClip);
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
+    }
+    return YES;
+}
+
 // Returns whether the window's content was composited into rootBuffer.
 // The drop shadow around a window painted at rect; scaled when rect is not
 // the size the shadow was made for.  Only over pixels fresh this pass
@@ -4588,6 +4670,17 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
     uint16_t drawShadowWidth = cw.shadowWidth;
     uint16_t drawShadowHeight = cw.shadowHeight;
     BOOL appliedShadowScale = NO;
+
+    if (scaled && [self compositeShadowSlices:cw
+                                         shadowX:shadowX shadowY:shadowY
+                                            winX:winX winY:winY winW:winW winH:winH
+                                            mask:mask
+                                      clipRegion:clipRegion]) {
+        if (mask != XCB_NONE) {
+            xcb_render_free_picture(conn, mask);
+        }
+        return;
+    }
 
     if (scaled) {
         int32_t expectedShadowWidth = (int32_t)winW + self.gaussianSize;

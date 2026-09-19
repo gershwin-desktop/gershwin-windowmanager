@@ -227,6 +227,22 @@ static NSMutableDictionary *publishedButtonRects = nil;
 // Frame window id -> NSNumber BOOL: whether its titlebar was last drawn active.
 static NSMutableDictionary *drawnActiveStates = nil;
 
++ (BOOL)titlebar:(XCBTitleBar *)titlebar isCurrentForFrame:(XCBFrame *)frame active:(BOOL)active
+{
+    NSNumber *drawn = [drawnActiveStates objectForKey:[NSNumber numberWithUnsignedInt:[frame window]]];
+    if (drawn == nil || [drawn boolValue] != active || [titlebar pixmap] == 0) {
+        return NO;
+    }
+    // The width renderGSThemeToWindow:frame:title:active: gives the titlebar.
+    uint16_t width = [frame windowRect].size.width + ([self themeDrawsTitlebarButtons] ? 0 : 2);
+    XCBSize pixmapSize = [titlebar pixmapSize];
+    XCBSize themedSize = titlebar.themedSize;
+    return pixmapSize.width == width &&
+           pixmapSize.height == [titlebar windowRect].size.height &&
+           themedSize.width == pixmapSize.width &&
+           themedSize.height == pixmapSize.height;
+}
+
 + (void)noteFrame:(XCBWindow *)frame drawnActive:(BOOL)active
 {
     if (frame == nil) {
@@ -781,18 +797,23 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 // pixmap.  Every -lockFocus on a new NSImage makes the backend create a
 // hidden X window for the image's cache (GNUstep cannot draw into a bitmap),
 // so a new image per render created and destroyed hundreds of windows while
-// the window manager started.  One image per size is reused instead; both
-// render paths fill the whole image with NSCompositeCopy first, so nothing
-// of the previous render shows through.
+// the window manager started.  Images are reused instead; both render paths
+// fill the part they draw with NSCompositeCopy first and read back only that
+// part, so nothing of a previous render shows through.
 + (NSImage *)renderImageOfSize:(NSSize)size {
     static NSMutableDictionary<NSString *, NSImage *> *images = nil;
-    // Windows come in few widths; the limit only keeps resizes from
-    // piling up one image per width.
+    // Only the height has to match: callers clear, draw and read just the
+    // size they need at the image's left.  Widths are rounded up so a live
+    // resize, a new width on every step, reuses a few images; one image per
+    // width gave each step a new NSImage whose cache is an X window, which
+    // the compositor then looked up again when it was destroyed.
+    static const CGFloat widthStep = 256.0;
     static const NSUInteger maxImages = 16;
 
     if (images == nil) {
         images = [[NSMutableDictionary alloc] init];
     }
+    size.width = ceil(size.width / widthStep) * widthStep;
     NSString *key = NSStringFromSize(size);
     NSImage *image = images[key];
     if (image == nil) {
@@ -1245,6 +1266,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 
     [titlebar.connection flush];
+    titlebar.themedSize = [titlebar pixmapSize];
 
     // Notify compositor that titlebar rendering is complete
     // Use the parent frame's window ID for compositor notification

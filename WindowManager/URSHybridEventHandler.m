@@ -1747,6 +1747,17 @@ static CGFloat WMLastScaleFactor = 1.0;
                                            exposeClient != nil &&
                                            [exposeClient window] == self.focusManager.lastFocusedWindowId);
 
+                    // Most Exposes, a burst of them after every step of a live
+                    // resize among them, find the theme's drawing still in the
+                    // pixmap; the connection has copied the exposed part from
+                    // it already, so drawing the whole titlebar anew was pure
+                    // cost (over a third of the CPU a resize took).
+                    if ([URSThemeIntegration titlebar:titlebar
+                                    isCurrentForFrame:frame
+                                               active:exposeIsActive]) {
+                        break;
+                    }
+
                     // Re-apply GSTheme rendering to override the expose redraw
                     BOOL exposeSuccess = [URSThemeIntegration renderGSThemeToWindow:frame
                                                                              frame:frame

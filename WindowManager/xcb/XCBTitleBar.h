@@ -41,6 +41,9 @@ XCB_EVENT_MASK_KEY_PRESS
 @property (nonatomic, assign) XCBColor titleBarDownColor;
 @property (strong, nonatomic) EWMHService *ewmhService;
 @property (nonatomic, assign) BOOL titleIsSet;
+// Size of the pixmap when the theme last drew into it, so an Expose that
+// finds the pixmap still that size can copy it instead of drawing anew.
+@property (nonatomic, assign) XCBSize themedSize;
 
 // Content-activity spinner: small rotating indicator painted into the
 // titlebar pixmap right after the title text whenever the (possibly
