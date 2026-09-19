@@ -1096,9 +1096,16 @@ static XCBConnection *sharedInstance;
 
 - (void)handleUnMapNotify:(xcb_unmap_notify_event_t *)anEvent
 {
-    // If we were dragging when this window unmapped, cancel the drag.
-    // A missed button release (e.g., window unmapped during drag) leaves dragState stuck.
-    if (dragState) {
+    // If the window being dragged unmapped, cancel the drag: its button
+    // release may never arrive and would leave dragState stuck.  Other
+    // windows come and go during a drag - the snap preview itself is hidden
+    // when the pointer leaves the edge - and must not end it.
+    XCBWindow *unmapped = [self windowForXCBId:anEvent->window];
+    BOOL draggedWindowGone = (self.draggedFrame == nil ||
+                              unmapped == self.draggedFrame ||
+                              [unmapped parentWindow] == self.draggedFrame);
+    if (dragState && draggedWindowGone) {
+        self.draggedFrame = nil;
         //NSLog(@"DRAG SAFETY: Window %u unmapped while dragState=YES — clearing drag state", anEvent->window);
         dragState = NO;
         resizeState = NO;
@@ -2644,6 +2651,20 @@ static XCBConnection *sharedInstance;
         int16_t mouseX = anEvent->root_x;
         int16_t mouseY = anEvent->root_y;
         
+        // A snapped window keeps its place until the pointer has really
+        // moved, so a click on its titlebar does not undo the snap; dragged
+        // away, it gets back the size it had before the snap.
+        if ([frame isSnapped]) {
+            XCBRect snappedRect = [frame windowRect];
+            XCBPoint grab = [frame offset];
+            int dx = mouseX - (snappedRect.position.x + grab.x);
+            int dy = mouseY - (snappedRect.position.y + grab.y);
+            if (abs(dx) + abs(dy) < SNAP_LEAVE_DISTANCE) {
+                return;
+            }
+            [frame leaveSnapForDragAtPointerX:mouseX];
+        }
+
         // Calculate frame position (mouse position minus offset)
         XCBPoint offset = [frame offset];
         int16_t frameX = mouseX - offset.x;
@@ -2736,25 +2757,23 @@ static XCBConnection *sharedInstance;
                 detectedZone = SnapZoneRight;
             }
 
-            // State machine: track zone entry time, show preview after linger
+            // Entering a zone starts the linger time; the preview then comes
+            // up on a timer.  Waiting for the next motion instead meant that a
+            // pointer resting still at the edge never got a preview, and
+            // without one the release did not snap either.
             if (detectedZone != self.pendingSnapZone) {
-                // Entered a new zone (or left all zones)
-                if (detectedZone != SnapZoneNone) {
-                    //NSLog(@"[Snap] Entered zone %ld (was %ld)", (long)detectedZone, (long)self.pendingSnapZone);
-                }
                 self.pendingSnapZone = detectedZone;
-                self.snapZoneEntryTime = anEvent->time;
+                [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                                         selector:@selector(showPendingSnapPreview)
+                                                           object:nil];
                 if (self.snapPreviewShown) {
                     [self hideSnapPreview];
                     self.snapPreviewShown = NO;
                 }
-            } else if (detectedZone != SnapZoneNone) {
-                // Still in the same zone - check if linger time has elapsed
-                xcb_timestamp_t elapsed = anEvent->time - self.snapZoneEntryTime;
-                if (elapsed >= SNAP_LINGER_TIME && !self.snapPreviewShown) {
-                    //NSLog(@"[Snap] Linger time elapsed, showing preview for zone %ld", (long)detectedZone);
-                    [self showSnapPreviewForZone:detectedZone frame:frame];
-                    self.snapPreviewShown = YES;
+                if (detectedZone != SnapZoneNone) {
+                    [self performSelector:@selector(showPendingSnapPreview)
+                               withObject:nil
+                               afterDelay:SNAP_LINGER_TIME / 1000.0];
                 }
             }
         }
@@ -2883,6 +2902,9 @@ static XCBConnection *sharedInstance;
             frame = (XCBFrame *) window;
 
         [frame resize:anEvent xcbConnection:connection];
+        // Resized by hand, the window's size is the user's choice now and
+        // stays when it is later dragged away from the edge it was snapped to.
+        [frame setIsSnapped:NO];
 
         // Keep rounded corners visible during interactive resize in non-composited mode.
         // applyRoundedCornersShapeMask() uses cached geometry, so this avoids release-only updates.
@@ -2937,6 +2959,8 @@ static XCBConnection *sharedInstance;
     if ([window isMaximizeButton])
     {
         frame = (XCBFrame*)[[window parentWindow] parentWindow];
+        // Maximizing or restoring replaces whatever size the snap gave.
+        [frame setIsSnapped:NO];
         titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
         clientWindow = [frame childWindowForKey:ClientWindow];
 
@@ -3273,6 +3297,7 @@ static XCBConnection *sharedInstance;
     if ([frame window] != anEvent->root && [[frame childWindowForKey:ClientWindow] canMove])
     {
         dragState = YES;
+        self.draggedFrame = frame;
 
         // Keep rounded corners stable during move in non-composited mode.
         // This is a cheap one-time call per drag and repairs any stale mask state.
@@ -3463,6 +3488,10 @@ static XCBConnection *sharedInstance;
     }
 
     // Always clean up snap state
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(showPendingSnapPreview)
+                                               object:nil];
+    self.draggedFrame = nil;
     [self hideSnapPreview];
     self.pendingSnapZone = SnapZoneNone;
     self.snapPreviewShown = NO;
@@ -4855,8 +4884,11 @@ static XCBConnection *sharedInstance;
     //      (long)zone, _cachedWorkareaX, _cachedWorkareaY,
     //      _cachedWorkareaWidth, _cachedWorkareaHeight, self.workareaValid);
 
-    // Save current rect for restore
-    [frame setOldRect:[frame windowRect]];
+    // Dragged away again, the window gets back the size it had before its
+    // first snap; snapping it on to another edge, or snapping a maximized
+    // window, must not replace that with a snapped size.
+    if (![frame isSnapped] && ![frame isMaximized])
+        [frame setOldRect:[frame windowRect]];
 
     XCBRect targetRect;
     switch (zone) {
@@ -4943,6 +4975,7 @@ static XCBConnection *sharedInstance;
         }
     }
 
+    [frame setIsSnapped:YES];
     [frame updateAllResizeZonePositions];
     [frame applyRoundedCornersShapeMask];
 
@@ -4953,6 +4986,16 @@ static XCBConnection *sharedInstance;
     }
 
     [self flush];
+}
+
+// The pointer stayed in the snap zone for the linger time.
+- (void)showPendingSnapPreview {
+    if (!dragState || self.pendingSnapZone == SnapZoneNone ||
+        self.snapPreviewShown || !self.draggedFrame) {
+        return;
+    }
+    [self showSnapPreviewForZone:self.pendingSnapZone frame:self.draggedFrame];
+    self.snapPreviewShown = YES;
 }
 
 - (void)showSnapPreviewForZone:(SnapZone)zone frame:(XCBFrame *)frame {

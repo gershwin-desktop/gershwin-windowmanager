@@ -96,6 +96,9 @@ static const CGFloat kBorderWidth = 3.0;
                                     NSWindowCollectionBehaviorStationary |
                                     NSWindowCollectionBehaviorFullScreenAuxiliary];
         [self setReleasedWhenClosed:NO];  // Keep window alive for reuse
+        // A name lets tests and diagnostic tools find the preview among the
+        // window manager's otherwise anonymous windows.
+        [self setTitle:@"Snap Preview"];
 
         // Create the content view
         URSSnapPreviewOverlayView *contentView =

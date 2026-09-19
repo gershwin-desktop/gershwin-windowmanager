@@ -1,0 +1,55 @@
+#!/usr/bin/env run_uitest
+#
+# Copyright (c) 2026 Simon Peter
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Snapping a window to a screen edge and dragging it away again.
+#
+# Holding a window at the left edge shows the snap preview there, releasing it
+# gives the window the left half of the screen, and dragging it away from the
+# edge gives it back the size it had before it was snapped.  Taken back to the
+# middle before being released, the window is not snapped at all.
+#
+# Run with: run_uitest Tests/window_snap.uitest
+
+# Self-healing start: a copy left over from an interrupted run may still be
+# snapped, and its size would then be the wrong reference.
+shell "pkill -x EauTest; sleep 1; true"
+launch application "EauTest"
+wait until xwindow "EauTest" count = 1
+
+setcount WIDTH = width xwindow "EauTest"
+setcount HEIGHT = height xwindow "EauTest"
+
+# Changing one's mind: once the preview is up, taking the window back to the
+# middle before letting go leaves it where it was dropped, at its own size.
+# Hiding the preview again must not end the drag.
+grab titlebar "EauTest"
+move pointer to left edge
+wait until xwindow "Snap Preview" x = 0
+move pointer by 400 50
+release pointer
+wait until xwindow "EauTest" x > 100
+assert xwindow "EauTest" width = ${WIDTH}
+
+# Hold the window still at the left edge: after a moment the preview shows
+# where the window will go, without the pointer having to move any further.
+grab titlebar "EauTest"
+move pointer to left edge
+wait until xwindow "Snap Preview" x = 0
+setcount PREVIEW_WIDTH = width xwindow "Snap Preview"
+release pointer
+
+# Released there, the window takes exactly the place the preview showed.
+wait until xwindow "EauTest" x = 0
+wait until xwindow "EauTest" width = ${PREVIEW_WIDTH}
+assert xwindow "EauTest" width != ${WIDTH}
+
+# Dragged away from the edge, the window is no longer snapped and gets back
+# its earlier size.
+drag titlebar "EauTest" by 200 60
+wait until xwindow "EauTest" width = ${WIDTH}
+assert xwindow "EauTest" height = ${HEIGHT}
+
+shell "pkill -x EauTest; true"

@@ -28,6 +28,7 @@
 #define SNAP_EDGE_THRESHOLD 5    // Pixels from screen edge to trigger snap detection
 #define SNAP_CORNER_THRESHOLD 50 // Pixels from corner to trigger quarter snap
 #define SNAP_LINGER_TIME 300     // Milliseconds to linger before snap activates
+#define SNAP_LEAVE_DISTANCE 8    // Pixels a snapped window is dragged before it unsnaps
 
 // Snap zone types for drag-to-edge window snapping
 typedef NS_ENUM(NSInteger, SnapZone) {
@@ -78,7 +79,8 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 
 // Edge snap detection state
 @property (nonatomic, assign) SnapZone pendingSnapZone;
-@property (nonatomic, assign) xcb_timestamp_t snapZoneEntryTime;
+// Frame being moved by its titlebar while dragState is set
+@property (nonatomic, strong) XCBFrame *draggedFrame;
 @property (nonatomic, assign) BOOL snapPreviewShown;
 @property (nonatomic, assign) BOOL adoptingExistingWindows;
 

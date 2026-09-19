@@ -862,6 +862,33 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 }
 
+- (BOOL)leaveSnapForDragAtPointerX:(int16_t)pointerX
+{
+    if (![self isSnapped])
+        return NO;
+    [self setIsSnapped:NO];
+
+    XCBRect current = [self windowRect];
+    XCBRect restored = [self oldRect];
+    if (restored.size.width == 0 || restored.size.height == 0)
+        return NO;
+
+    // The window stays under the pointer at the same fraction of the
+    // titlebar's width where it was picked up.
+    XCBPoint grab = [self offset];
+    double fraction = (current.size.width > 0) ? (double)grab.x / current.size.width : 0.5;
+    int16_t grabX = (int16_t)lround(fraction * restored.size.width);
+    restored.position.x = pointerX - grabX;
+    restored.position.y = current.position.y;
+
+    [self programmaticResizeToRect:restored];
+    [self setIsMaximized:NO];
+    [self setOffset:XCBMakePoint(grabX, grab.y)];
+    [self updateAllResizeZonePositions];
+    [self applyRoundedCornersShapeMask];
+    return YES;
+}
+
 - (void)clearShapeMasks
 {
     // Remove any XShape bounding mask from the frame and titlebar windows so that

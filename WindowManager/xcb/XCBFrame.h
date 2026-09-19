@@ -105,6 +105,12 @@ extern NSString *URSWindowTitleContentChangedNotification;
 // which holds the pre-maximize geometry: sharing it made shading a maximized
 // window destroy the rect the maximize button restores to.
 @property (nonatomic, assign) uint16_t unshadedHeight;
+// Set by an edge snap and cleared when the user resizes or maximizes the
+// window; the size to go back to is in oldRect.
+@property (nonatomic, assign) BOOL isSnapped;
+// A snapped window being dragged away: give it back the size it had before
+// the snap, keeping the grab point under the pointer.  NO if not snapped.
+- (BOOL) leaveSnapForDragAtPointerX:(int16_t)pointerX;
 // Whether the activity spinner was already running when a hover-peek began.
 // A peek must never start the spinner from cold - it only keeps a spinner
 // that was already spinning (as if the window stayed rolled up).
