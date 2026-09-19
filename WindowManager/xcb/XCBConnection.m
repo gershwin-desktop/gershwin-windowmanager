@@ -1005,6 +1005,17 @@ static XCBConnection *sharedInstance;
     [aWindow setParentWindow:parentWindow];
 }
 
+/* Counterpart of framing in -[XCBFrame decorateClientWindow]: the client
+ * also leaves the save-set there, because when this WM exits the X server
+ * maps every unmapped save-set window, and a client that had withdrawn its
+ * window would then find it back on the screen. */
+- (void)releaseClientWindow:(XCBWindow *)aClient toRootAt:(XCBPoint)position
+{
+    [self reparentWindow:aClient toWindow:[[aClient queryTree] rootWindow] position:position];
+    xcb_change_save_set(connection, XCB_SET_MODE_DELETE, [aClient window]);
+    [aClient setDecorated:NO];
+}
+
 - (void)handleMapNotify:(xcb_map_notify_event_t *)anEvent
 {
     XCBWindow *window = [self windowForXCBId:anEvent->window];
@@ -1273,8 +1284,7 @@ static XCBConnection *sharedInstance;
                                        frameRect.position.y + clientRect.position.y);
         }
 
-        [self reparentWindow:window toWindow:[[window queryTree] rootWindow] position:reparentPos];
-        [window setDecorated:NO];
+        [self releaseClientWindow:window toRootAt:reparentPos];
         [self unregisterWindow:frameWindow];
         XCBTitleBar *titleBar = (XCBTitleBar *) [frameWindow childWindowForKey:TitleBar];
         if (titleBar != nil) {
@@ -2516,9 +2526,7 @@ static XCBConnection *sharedInstance;
             [frame setCloseAnimating: NO];
         }
         if (clientWindow != nil) {
-            XCBWindow *rootWin = [[clientWindow queryTree] rootWindow];
-            [self reparentWindow:clientWindow toWindow:rootWin position:[frame windowRect].position];
-            [clientWindow setDecorated:NO];
+            [self releaseClientWindow:clientWindow toRootAt:[frame windowRect].position];
         }
         if (frame != nil) {
             [self unregisterWindow:frame];

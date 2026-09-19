@@ -157,6 +157,7 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 /*** DEAL WITH WINDOW STUFFS ***/
 
 - (void) reparentWindow: (XCBWindow*) aWindow toWindow:(XCBWindow*)parentWindow position:(XCBPoint)position;
+- (void) releaseClientWindow:(XCBWindow*)aClient toRootAt:(XCBPoint)position;
 - (void) mapWindow: (XCBWindow*) aWindow;
 - (void) unmapWindow:(XCBWindow*)aWindow;
 - (void) addDamagedRegion:(XCBRegion*) damagedRegion;
