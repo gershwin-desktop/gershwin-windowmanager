@@ -1273,6 +1273,7 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
 
                     // Raise above panels by bumping stacking
                     [frame stackAbove];
+                    [connection restackDockWindowsAbove];
                     [connection flush];
 
                     frame = nil;

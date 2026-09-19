@@ -566,6 +566,25 @@ static XCBConnection *sharedInstance;
         }
     }
 
+    // A window kept above (_NET_WM_STATE_ABOVE) stays above even a full
+    // screen window: an application's controls floating over its own full
+    // screen picture would be covered otherwise.
+    // Titlebars and other children carry the flag for their own purposes,
+    // so only windows of their own count here.
+    for (XCBWindow *aWindow in [windowsMap allValues])
+    {
+        if (![aWindow isAbove] || ![aWindow isMapped] || [aWindow fullScreen])
+            continue;
+        if ([aWindow isKindOfClass:[XCBFrame class]] || [aWindow decorated]
+            || [[aWindow parentWindow] isKindOfClass:[XCBFrame class]])
+            continue;
+        [aWindow stackAbove];
+        if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+        {
+            [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+        }
+    }
+
     // All undecorated (auxiliary) windows of the focused application must
     // stay above their parent after any restack operation.  Broad check:
     // any window with the same PID that is not itself an XCBFrame.
