@@ -994,11 +994,14 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         // Load desktop background (image or solid color from preferences)
         [self loadDesktopBackground];
         
-        // Add all existing windows
-        [self addAllWindows];
-        
+        // Active before the windows are added: -addWindow: ignores windows
+        // while compositing is inactive, which left every window already on
+        // screen untracked until the first paint.  Held from the start so
+        // adding them cannot paint the screen half done.
         self.compositingActive = YES;
         self.paintingHeld = YES;
+
+        [self addAllWindows];
         //NSLog(@"[CompositingManager] Compositing activated successfully");
         
         // Damage entire screen to trigger initial paint
@@ -1186,7 +1189,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     int num_children = xcb_query_tree_children_length(tree_reply);
     
     for (int i = 0; i < num_children; i++) {
-        [self addWindow:children[i]];
+        [self addShownWindow:children[i]];
     }
     
     free(tree_reply);
@@ -1194,6 +1197,19 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 }
 
 #pragma mark - Window Management
+
+// Track a window that may already be on screen.  A viewable window's pixmap
+// holds what it showed (the X server copies it in when the window is
+// redirected, or the client drew it), so it counts as drawn: otherwise the
+// first-content gate and the shadow probe wait for a redraw that a window
+// with static content never sends, and it stays without a shadow.
+- (void)addShownWindow:(xcb_window_t)windowId {
+    [self addWindow:windowId];
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (cw.viewable) {
+        cw.damaged = YES;
+    }
+}
 
 - (URSCompositeWindow *)findCWindow:(xcb_window_t)windowId {
     return self.cwindows[@(windowId)];
@@ -2598,6 +2614,17 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 - (void)endPaintingHold {
     self.paintingHeld = NO;
     self.paintingHoldDeadline = 0;
+    // What the windows on screen hold now is their real content: either what
+    // they showed before this compositor started or what they drew while the
+    // hold lasted.  Their damage may never have reached their own record
+    // (a client redraws into the frame it was just reparented into), so the
+    // first-content gate and the shadow probe would keep refusing them and
+    // shadows appeared only on the next redraw, or never for static windows.
+    for (URSCompositeWindow *cw in [self.cwindows allValues]) {
+        if (cw.viewable) {
+            cw.damaged = YES;
+        }
+    }
     [self damageScreen];
 }
 
@@ -3473,7 +3500,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
         URSCompositeWindow *cw = [self findCWindow:win];
         if (!cw) {
             // Window not tracked yet, try to add it
-            [self addWindow:win];
+            [self addShownWindow:win];
             cw = [self findCWindow:win];
         }
         if (!cw || (!cw.viewable && !cw.animating)) {
