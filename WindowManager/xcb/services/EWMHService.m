@@ -1591,10 +1591,19 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                 [clientSet addObject:@([connection clientList][i])];
             }
 
+            // The root's children are frames for framed clients, so a frame
+            // stands for the client inside it.
             for (int i = 0; i < num_children; i++) {
-                NSNumber *childNumber = @(children[i]);
+                xcb_window_t child = children[i];
+                XCBWindow *childWindow = [connection windowForXCBId:child];
+                if ([childWindow isKindOfClass:[XCBFrame class]]) {
+                    XCBWindow *client = [(XCBFrame *)childWindow childWindowForKey:ClientWindow];
+                    child = client ? [client window] : XCB_NONE;
+                }
+                NSNumber *childNumber = @(child);
                 if ([clientSet containsObject:childNumber]) {
-                    stackingList[stackingCount++] = children[i];
+                    stackingList[stackingCount++] = child;
+                    [clientSet removeObject:childNumber];
                 }
             }
 

@@ -356,9 +356,13 @@ static XCBConnection *sharedInstance;
         return;
     }
     
-    if ([aWindow isKindOfClass:[XCBFrame class]] ||
-        [aWindow isKindOfClass:[XCBTitleBar class]] ||
-        [aWindow isCloseButton] || [aWindow isMaximizeButton] || [aWindow isMinimizeButton])
+    // Windows this connection created (frames, titlebars, their buttons and
+    // resize handles, the supporting window) are the window manager's own,
+    // never clients: telling them apart by class missed titlebars
+    // registered before they became XCBTitleBars and every resize handle,
+    // which then showed up in _NET_CLIENT_LIST with client properties.
+    const xcb_setup_t *setup = xcb_get_setup(connection);
+    if ((win & ~setup->resource_id_mask) == setup->resource_id_base)
     {
         win = 0;
     }
