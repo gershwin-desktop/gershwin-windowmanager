@@ -29,6 +29,9 @@ $(APP_NAME)_OBJC_FILES = \
 		URSOverviewLayout.m \
 		URSOverviewController.m \
 		URSOverviewTitleLabel.m \
+		URSWobblyModel.m \
+		URSTriangleSpans.m \
+		URSWobblyWindowsController.m \
 		URSRenderingContext.m \
 		URSWindowSwitcher.m \
 		URSWindowSwitcherOverlay.m \

@@ -11,6 +11,7 @@
 
 #define _DEFAULT_SOURCE  // For usleep
 #import "URSCompositingManager.h"
+#import "URSTriangleSpans.h"
 #import "URSImageUpload.h"
 #import "URSProfiler.h"
 #import "XCBScreen.h"
@@ -124,6 +125,10 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // Effect played on the window where it stands (see playEffect:onWindow:);
 // it follows the window's live rect, not the start/end rects.
 @property (strong, nonatomic) id<URSWindowEffect> effect;
+// Mesh the window's picture is bent over (see setDeformation:forWindow:),
+// and the area it covered when last painted, which must be repainted too.
+@property (strong, nonatomic) id<URSWindowDeformation> deformation;
+@property (assign, nonatomic) NSRect deformedReach;
 // Persistent window opacity (1.0 = opaque).  Used by the hover-peek feature
 // to show a rolled-down shaded window at reduced opacity; applied as an
 // alpha mask in paintWindow.
@@ -2264,7 +2269,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         cw.viewable = NO;
         cw.damaged = NO;
 
-        if (cw.effect) {
+        if (cw.effect || cw.deformation) {
             // An effect has nothing to show once the window is gone; playing
             // it on would paint the last picture of a window no longer there.
             [self finishAnimationForWindow:cw];
@@ -2747,6 +2752,9 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     if (cw.effect) {
         s = [self effectReachOfWindow:cw];
         e = s;
+    } else if (cw.deformation) {
+        s = [self deformationReachOfWindow:cw];
+        e = s;
     }
     if (!FnCheckXCBRectIsValid(s) || !FnCheckXCBRectIsValid(e)) {
         xcb_rectangle_t r = { cw.x, cw.y,
@@ -2841,6 +2849,10 @@ static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
     }
 
     self.lastRepairTime = now;
+
+    // Stepped before the damage is taken, so the area of the new mesh is
+    // part of what this pass repaints.
+    [self stepDeformations];
 
     xcb_xfixes_region_t damage = self.allDamage;
     self.allDamage = XCB_NONE;
@@ -2962,7 +2974,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     }
     for (URSCompositeWindow *cw in [self.cwindows allValues]) {
         if (!cw.animating) continue;
-        if (!cw.effect &&
+        if (!cw.effect && !cw.deformation &&
             (!FnCheckXCBRectIsValid(cw.animationStartRect) ||
              !FnCheckXCBRectIsValid(cw.animationEndRect))) continue;
         xcb_rectangle_t r = [self animationUnionRect:cw];
@@ -3145,6 +3157,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     cw.animatingShrink = shrink;
     cw.animatingFade = fade;
     cw.effect = nil;
+    cw.deformation = nil;
     cw.animationCompletion = completion;
 
     if (!wasAnimating) {
@@ -3207,6 +3220,200 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
                                    (uint16_t)URSClampDouble(h, 1.0, 65535.0)));
 }
 
+#pragma mark - Deformation
+
+- (void)setDeformation:(id<URSWindowDeformation>)deformation forWindow:(xcb_window_t)windowId {
+    if (!self.compositingActive || windowId == XCB_NONE) {
+        return;
+    }
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw || !cw.viewable) {
+        return;
+    }
+    if (!deformation) {
+        if (cw.deformation) {
+            [self finishAnimationForWindow:cw];
+        }
+        return;
+    }
+    // A hop gives way to the hand; real animations (birth, restore) are
+    // never cut short.
+    if (cw.effect) {
+        [self finishAnimationForWindow:cw];
+    }
+    if (cw.animating && !cw.deformation) {
+        return;
+    }
+    if (!cw.animating) {
+        cw.animating = YES;
+        self.activeAnimations += 1;
+    }
+    cw.animationStartRect = XCBInvalidRect;
+    cw.animationEndRect = XCBInvalidRect;
+    cw.deformation = deformation;
+    cw.deformedReach = URSWindowRectOf(cw);
+    [self startAnimationTimerIfNeeded];
+    [self scheduleComposite];
+}
+
+- (id<URSWindowDeformation>)deformationForWindow:(xcb_window_t)windowId {
+    return [self findCWindow:windowId].deformation;
+}
+
+// What the mesh covers now and covered when last painted (to erase that).
+- (XCBRect)deformationReachOfWindow:(URSCompositeWindow *)cw {
+    NSRect reach = NSUnionRect(NSUnionRect(cw.deformedReach, [cw.deformation reach]),
+                               URSWindowRectOf(cw));
+    double x = floor(NSMinX(reach));
+    double y = floor(NSMinY(reach));
+    double w = ceil(NSMaxX(reach)) - x - 2.0 * cw.borderWidth;
+    double h = ceil(NSMaxY(reach)) - y - 2.0 * cw.borderWidth;
+    return XCBMakeRect(XCBMakePoint(x, y),
+                       XCBMakeSize((uint16_t)URSClampDouble(w, 1.0, 65535.0),
+                                   (uint16_t)URSClampDouble(h, 1.0, 65535.0)));
+}
+
+- (void)stepDeformations {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    xcb_connection_t *conn = [self.connection connection];
+    for (URSCompositeWindow *cw in [self.cwindows allValues]) {
+        if (!cw.deformation) {
+            continue;
+        }
+        if (![cw.deformation stepToTime:now windowRect:URSWindowRectOf(cw)]) {
+            // Finishing damages the whole screen.
+            [self finishAnimationForWindow:cw];
+            continue;
+        }
+        xcb_rectangle_t r = [self animationUnionRect:cw];
+        xcb_xfixes_region_t region = xcb_generate_id(conn);
+        xcb_xfixes_create_region(conn, region, 1, &r);
+        [self addDamage:region];
+    }
+}
+
+// Maps a picture onto a mesh one triangle at a time: each triangle is an
+// exact affine map from the picture, so a picture transform per triangle
+// bends the whole picture.  Each is a plain composite clipped to the
+// triangle's spans: glamor does those on the GPU, while RenderTriangles
+// falls back to the CPU and copies the whole screen buffer to and fro for
+// every triangle (about one frame per second).  dest and source hold
+// (columns + 1) * (rows + 1) points, row by row.
+- (void)compositePicture:(xcb_render_picture_t)picture
+                  source:(const NSPoint *)source
+                    dest:(const NSPoint *)dest
+                 columns:(NSUInteger)columns
+                    rows:(NSUInteger)rows {
+    xcb_connection_t *conn = [self.connection connection];
+    NSUInteger stride = columns + 1;
+    NSUInteger spanCapacity = 0;
+    xcb_rectangle_t *spans = NULL;
+    for (NSUInteger r = 0; r < rows; r++) {
+        for (NSUInteger c = 0; c < columns; c++) {
+            NSUInteger corners[4] = { r * stride + c, r * stride + c + 1,
+                                      (r + 1) * stride + c + 1, (r + 1) * stride + c };
+            static const int triangles[2][3] = { {0, 1, 2}, {0, 2, 3} };
+            for (int t = 0; t < 2; t++) {
+                NSPoint d0 = dest[corners[triangles[t][0]]];
+                NSPoint d1 = dest[corners[triangles[t][1]]];
+                NSPoint d2 = dest[corners[triangles[t][2]]];
+                NSPoint s0 = source[corners[triangles[t][0]]];
+                NSPoint s1 = source[corners[triangles[t][1]]];
+                NSPoint s2 = source[corners[triangles[t][2]]];
+                double det = (d1.x - d0.x) * (d2.y - d0.y) - (d2.x - d0.x) * (d1.y - d0.y);
+                if (fabs(det) < 1e-6) {
+                    continue;
+                }
+                // Destination to picture: s = A * (d - d0) + s0.
+                double a = ((s1.x - s0.x) * (d2.y - d0.y) - (s2.x - s0.x) * (d1.y - d0.y)) / det;
+                double b = ((s2.x - s0.x) * (d1.x - d0.x) - (s1.x - s0.x) * (d2.x - d0.x)) / det;
+                double e = ((s1.y - s0.y) * (d2.y - d0.y) - (s2.y - s0.y) * (d1.y - d0.y)) / det;
+                double f = ((s2.y - s0.y) * (d1.x - d0.x) - (s1.y - s0.y) * (d2.x - d0.x)) / det;
+                xcb_render_transform_t transform = URSIdentityTransform();
+                transform.matrix11 = (xcb_render_fixed_t)(a * 65536.0);
+                transform.matrix12 = (xcb_render_fixed_t)(b * 65536.0);
+                transform.matrix13 = (xcb_render_fixed_t)((s0.x - a * d0.x - b * d0.y) * 65536.0);
+                transform.matrix21 = (xcb_render_fixed_t)(e * 65536.0);
+                transform.matrix22 = (xcb_render_fixed_t)(f * 65536.0);
+                transform.matrix23 = (xcb_render_fixed_t)((s0.y - e * d0.x - f * d0.y) * 65536.0);
+
+                double top = MIN(d0.y, MIN(d1.y, d2.y));
+                double bottom = MAX(d0.y, MAX(d1.y, d2.y));
+                NSUInteger capacity = (NSUInteger)((bottom - top) / URSTriangleSpanHeight) + 2;
+                if (capacity > spanCapacity) {
+                    spanCapacity = capacity;
+                    spans = realloc(spans, sizeof(xcb_rectangle_t) * spanCapacity);
+                }
+                NSUInteger count = URSTriangleSpans(d0, d1, d2, spans, capacity);
+                if (count == 0) {
+                    continue;
+                }
+                int32_t x1 = INT32_MAX, x2 = INT32_MIN;
+                for (NSUInteger i = 0; i < count; i++) {
+                    x1 = MIN(x1, spans[i].x);
+                    x2 = MAX(x2, spans[i].x + spans[i].width);
+                }
+                int16_t y1 = spans[0].y;
+                int16_t y2 = spans[count - 1].y + spans[count - 1].height;
+
+                xcb_render_set_picture_transform(conn, picture, transform);
+                xcb_xfixes_region_t clip = xcb_generate_id(conn);
+                xcb_xfixes_create_region(conn, clip, (uint32_t)count, spans);
+                xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clip, 0, 0);
+                xcb_xfixes_destroy_region(conn, clip);
+                // Source and destination origins match, so the transform
+                // above works in screen coordinates.
+                xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER, picture, XCB_NONE,
+                                     self.rootBuffer, (int16_t)x1, y1, 0, 0, (int16_t)x1, y1,
+                                     (uint16_t)(x2 - x1), (uint16_t)(y2 - y1));
+            }
+        }
+    }
+    free(spans);
+    xcb_render_set_picture_transform(conn, picture, URSIdentityTransform());
+}
+
+// The window bent over its mesh, shadow first.  The shadow is bent the same
+// way, each of its points kept at the same distance from the window point it
+// belongs to, so it stays attached to the bent edges.
+- (void)compositeDeformedWindow:(URSCompositeWindow *)cw withShadow:(BOOL)withShadow {
+    id<URSWindowDeformation> mesh = cw.deformation;
+    NSUInteger columns = [mesh columns];
+    NSUInteger rows = [mesh rows];
+    NSUInteger count = (columns + 1) * (rows + 1);
+    NSPoint *dest = malloc(sizeof(NSPoint) * count);
+    NSPoint *source = malloc(sizeof(NSPoint) * count);
+    NSPoint *shadowDest = malloc(sizeof(NSPoint) * count);
+    NSPoint *shadowSource = malloc(sizeof(NSPoint) * count);
+    double srcW = (double)cw.width + 2.0 * cw.borderWidth;
+    double srcH = (double)cw.height + 2.0 * cw.borderWidth;
+
+    for (NSUInteger r = 0; r <= rows; r++) {
+        for (NSUInteger c = 0; c <= columns; c++) {
+            NSUInteger i = r * (columns + 1) + c;
+            double fu = (double)c / columns;
+            double fv = (double)r / rows;
+            dest[i] = [mesh pointAtColumn:c row:r];
+            source[i] = NSMakePoint(srcW * fu, srcH * fv);
+            shadowSource[i] = NSMakePoint(cw.shadowWidth * fu, cw.shadowHeight * fv);
+            shadowDest[i] = NSMakePoint(dest[i].x + cw.shadowOffsetX + shadowSource[i].x - source[i].x,
+                                        dest[i].y + cw.shadowOffsetY + shadowSource[i].y - source[i].y);
+        }
+    }
+
+    if (withShadow) {
+        [self compositePicture:cw.shadowPicture source:shadowSource dest:shadowDest
+                       columns:columns rows:rows];
+    }
+    [self compositePicture:cw.picture source:source dest:dest columns:columns rows:rows];
+    cw.deformedReach = [mesh reach];
+
+    free(dest);
+    free(source);
+    free(shadowDest);
+    free(shadowSource);
+}
+
 #pragma mark - Presentation
 
 - (void)setPresentation:(id<URSWindowPresentation>)presentation {
@@ -3248,6 +3455,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     cw.animatingShrink = NO;
     cw.animatingFade = NO;
     cw.effect = nil;
+    cw.deformation = nil;
     cw.closeAnimating = NO;
     cw.animationStart = 0;
     cw.animationDuration = 0;
@@ -4326,6 +4534,70 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
 }
 
 // Returns whether the window's content was composited into rootBuffer.
+// The drop shadow around a window painted at rect; scaled when rect is not
+// the size the shadow was made for.  Only over pixels fresh this pass
+// (clipRegion): painted over its own stale pixels it darkens every pass.
+- (void)paintShadowForWindow:(URSCompositeWindow *)cw
+                      inRect:(NSRect)rect
+                      scaled:(BOOL)scaled
+                  clipRegion:(xcb_xfixes_region_t)clipRegion {
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
+    int16_t winX = (int16_t)llround(NSMinX(rect));
+    int16_t winY = (int16_t)llround(NSMinY(rect));
+    uint16_t winW = (uint16_t)URSClampDouble(NSWidth(rect), 1.0, 65535.0);
+    uint16_t winH = (uint16_t)URSClampDouble(NSHeight(rect), 1.0, 65535.0);
+    int16_t shadowX = winX + cw.shadowOffsetX;
+    int16_t shadowY = winY + cw.shadowOffsetY;
+    uint16_t drawShadowWidth = cw.shadowWidth;
+    uint16_t drawShadowHeight = cw.shadowHeight;
+    BOOL appliedShadowScale = NO;
+
+    if (scaled) {
+        int32_t expectedShadowWidth = (int32_t)winW + self.gaussianSize;
+        int32_t expectedShadowHeight = (int32_t)winH + self.gaussianSize;
+        if (expectedShadowWidth < 1) expectedShadowWidth = 1;
+        if (expectedShadowHeight < 1) expectedShadowHeight = 1;
+        if (expectedShadowWidth > 65535) expectedShadowWidth = 65535;
+        if (expectedShadowHeight > 65535) expectedShadowHeight = 65535;
+
+        if (cw.shadowWidth > 0 && cw.shadowHeight > 0 &&
+            (cw.shadowWidth != expectedShadowWidth || cw.shadowHeight != expectedShadowHeight)) {
+            double sx = (double)cw.shadowWidth / (double)expectedShadowWidth;
+            double sy = (double)cw.shadowHeight / (double)expectedShadowHeight;
+            xcb_render_transform_t shadowTransform = URSIdentityTransform();
+            shadowTransform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
+            shadowTransform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
+            xcb_render_set_picture_transform(conn, cw.shadowPicture, shadowTransform);
+            drawShadowWidth = (uint16_t)expectedShadowWidth;
+            drawShadowHeight = (uint16_t)expectedShadowHeight;
+            appliedShadowScale = YES;
+        }
+    }
+
+    if (cw.shadowHasCutout) {
+        // The window's footprint is already cut out of this shadow, so
+        // painting it whole reaches the transparent corners outside the
+        // arcs without covering the window.
+        xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
+                             cw.shadowPicture, XCB_NONE, self.rootBuffer,
+                             0, 0, 0, 0,
+                             shadowX, shadowY,
+                             drawShadowWidth, drawShadowHeight);
+    } else {
+        [self compositeShadowStrips:cw connection:conn
+                            shadowX:shadowX shadowY:shadowY
+                       shadowWidth:drawShadowWidth shadowHeight:drawShadowHeight
+                             winX:winX winY:winY
+                             winW:winW winH:winH];
+    }
+
+    if (appliedShadowScale) {
+        xcb_render_transform_t resetShadow = URSIdentityTransform();
+        xcb_render_set_picture_transform(conn, cw.shadowPicture, resetShadow);
+    }
+}
+
 // presentedRect, when not NULL, is where the installed presentation shows
 // the window; it overrides any animation of the window while it lasts.
 - (BOOL)paintWindow:(URSCompositeWindow *)cw
@@ -4527,6 +4799,17 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
         }
     }
 
+    BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
+    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
+
+    if (animating && cw.deformation && cw.picture != XCB_NONE) {
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
+        [self compositeDeformedWindow:cw
+                           withShadow:cw.shadowPicture != XCB_NONE && !skipShadow && cw.pictureValid];
+        URS_PROFILE_END(paintWindow);
+        return YES;
+    }
+
     BOOL composited = NO;
     if (cw.picture != XCB_NONE) {
         composited = YES;
@@ -4630,8 +4913,6 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
     // Render shadow AFTER window content in 4 strips (top, bottom, left, right)
     // that surround the window rectangle. This never paints shadow pixels behind
     // the window and avoids any temporary picture allocation.
-    BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
-    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
     // A window playing an effect or shown elsewhere keeps its shadow: it
     // vanishing would read as a blink.
     BOOL playingEffect = animating && cw.effect != nil;
@@ -4647,60 +4928,10 @@ static double URSRoundedRectCoverage(int px, int py, double rx, double ry,
         // windows adopted at startup or with static content never receive a
         // DamageNotify, so cw.damaged stays NO and their shadow would never be
         // painted.
-        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
-        int16_t winX = (int16_t)llround(destX);
-        int16_t winY = (int16_t)llround(destY);
-        uint16_t winW = (uint16_t)URSClampDouble(destW, 1.0, 65535.0);
-        uint16_t winH = (uint16_t)URSClampDouble(destH, 1.0, 65535.0);
-        int16_t shadowX = winX + cw.shadowOffsetX;
-        int16_t shadowY = winY + cw.shadowOffsetY;
-        uint16_t drawShadowWidth = cw.shadowWidth;
-        uint16_t drawShadowHeight = cw.shadowHeight;
-        BOOL appliedShadowScale = NO;
-
-        if ([self.connection resizeState] || repositioned) {
-            int32_t expectedShadowWidth = (int32_t)winW + self.gaussianSize;
-            int32_t expectedShadowHeight = (int32_t)winH + self.gaussianSize;
-            if (expectedShadowWidth < 1) expectedShadowWidth = 1;
-            if (expectedShadowHeight < 1) expectedShadowHeight = 1;
-            if (expectedShadowWidth > 65535) expectedShadowWidth = 65535;
-            if (expectedShadowHeight > 65535) expectedShadowHeight = 65535;
-
-            if (cw.shadowWidth > 0 && cw.shadowHeight > 0 &&
-                (cw.shadowWidth != expectedShadowWidth || cw.shadowHeight != expectedShadowHeight)) {
-                double sx = (double)cw.shadowWidth / (double)expectedShadowWidth;
-                double sy = (double)cw.shadowHeight / (double)expectedShadowHeight;
-                xcb_render_transform_t shadowTransform = URSIdentityTransform();
-                shadowTransform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
-                shadowTransform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
-                xcb_render_set_picture_transform(conn, cw.shadowPicture, shadowTransform);
-                drawShadowWidth = (uint16_t)expectedShadowWidth;
-                drawShadowHeight = (uint16_t)expectedShadowHeight;
-                appliedShadowScale = YES;
-            }
-        }
-
-        if (cw.shadowHasCutout) {
-            // The window's footprint is already cut out of this shadow, so
-            // painting it whole reaches the transparent corners outside the
-            // arcs without covering the window.
-            xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER,
-                                 cw.shadowPicture, XCB_NONE, self.rootBuffer,
-                                 0, 0, 0, 0,
-                                 shadowX, shadowY,
-                                 drawShadowWidth, drawShadowHeight);
-        } else {
-            [self compositeShadowStrips:cw connection:conn
-                                shadowX:shadowX shadowY:shadowY
-                           shadowWidth:drawShadowWidth shadowHeight:drawShadowHeight
-                                 winX:winX winY:winY
-                                 winW:winW winH:winH];
-        }
-
-        if (appliedShadowScale) {
-            xcb_render_transform_t resetShadow = URSIdentityTransform();
-            xcb_render_set_picture_transform(conn, cw.shadowPicture, resetShadow);
-        }
+        [self paintShadowForWindow:cw
+                            inRect:NSMakeRect(destX, destY, destW, destH)
+                            scaled:[self.connection resizeState] || repositioned
+                        clipRegion:clipRegion];
     }
 #endif
 

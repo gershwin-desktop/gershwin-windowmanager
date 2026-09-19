@@ -24,6 +24,7 @@
 #import "URSTitlebarController.h"
 #import "URSSnappingMenuController.h"
 #import "URSOverviewController.h"
+#import "URSWobblyWindowsController.h"
 
 @interface URSHybridEventHandler : NSObject <NSApplicationDelegate, RunLoopEvents>
 
@@ -56,6 +57,7 @@
 @property (strong, nonatomic) URSTitlebarController *titlebarController;
 @property (strong, nonatomic) URSSnappingMenuController *snappingMenuController;
 @property (strong, nonatomic) URSOverviewController *overviewController;
+@property (strong, nonatomic) URSWobblyWindowsController *wobblyWindowsController;
 
 // Window manager lifecycle
 - (BOOL)registerAsWindowManager;

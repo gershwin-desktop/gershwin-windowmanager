@@ -28,6 +28,7 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
   needs a live X server (`DISPLAY` set). Writes `tests.log`/`tests.sum`
   (gitignored).
 - Window overview layout: `gnustep-tests test-overview` (headless).
+- Wobbly window model: `gnustep-tests test-wobbly` (headless).
 - `test/` is a manual app (KillTest.app), not part of the automated suite.
 
 ## Branching

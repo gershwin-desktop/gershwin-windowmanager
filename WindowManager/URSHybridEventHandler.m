@@ -248,6 +248,8 @@ static CGFloat WMLastScaleFactor = 1.0;
         [self initializeCompositing];
         self.titlebarController.compositingManager = self.compositingManager;
         self.overviewController.compositingManager = self.compositingManager;
+        self.wobblyWindowsController = [[URSWobblyWindowsController alloc] init];
+        self.wobblyWindowsController.compositingManager = self.compositingManager;
     }
 
     // Decorate any existing windows already on screen
@@ -945,6 +947,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
             // Let xcbkit handle the release first
             [connection handleButtonRelease:releaseEvent];
+            [self.wobblyWindowsController dragEnded];
             // After resize completes, update the titlebar with GSTheme
             [self.titlebarController handleResizeComplete:releaseEvent];
 
@@ -2356,6 +2359,9 @@ static CGFloat WMLastScaleFactor = 1.0;
             
             // Get the frame's current position (after moveTo: was called)
             XCBRect frameRect = [frame windowRect];
+            [self.wobblyWindowsController frameDragged:frame
+                                               pointer:NSMakePoint(motionEvent->root_x,
+                                                                   motionEvent->root_y)];
             
             // Notify compositor of window move (efficient - doesn't recreate picture)
             [self.compositingManager moveWindow:[frame window] 

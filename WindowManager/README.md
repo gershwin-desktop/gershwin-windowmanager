@@ -61,6 +61,7 @@ Options:
 ```
 defaults write WindowManager URSHopOnWindowSwitch YES
 defaults write WindowManager URSOverviewHotCorner top-left
+defaults write WindowManager URSWobblyWindows YES
 ```
 
 The overview settings take effect when the window manager starts.
@@ -74,6 +75,9 @@ The overview settings take effect when the window manager starts.
 - `URSOverviewHotCorner` (default `none`): `top-left`, `top-right`,
   `bottom-left` or `bottom-right` opens and closes the window overview
   when the pointer is pushed into that screen corner.
+- `URSWobblyWindows` (default `NO`): a window dragged by its titlebar
+  bends and trails behind the pointer like jelly and wobbles back into
+  shape when let go. Needs compositing. Takes effect on the next drag.
 - `URSHopOnWindowSwitch` (default `NO`): the window Alt-Tab switches to
   hops in place to lead the eye to it. Needs compositing. Takes effect
   on the next switch, without restarting the window manager.

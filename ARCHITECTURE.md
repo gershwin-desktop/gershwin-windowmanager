@@ -66,6 +66,10 @@ WindowManager/
 ├── URSOverviewController.h/m       Window overview: key, hot corner, input
 ├── URSOverviewLayout.h/m           Window overview layout (pure geometry)
 ├── URSOverviewTitleLabel.h/m       Title of the window under the pointer
+├── URSWindowDeformation.h          Bends a window's picture over a mesh
+├── URSWobblyModel.h/m              Spring mesh of a wobbly window (pure physics)
+├── URSTriangleSpans.h/m            Watertight triangle spans for bent windows
+├── URSWobblyWindowsController.h/m  Wobbly windows while dragging
 │
 ├── URSWindowSwitcher.h/m           Alt-Tab window switcher logic
 ├── URSWindowSwitcherOverlay.h/m    Window switcher overlay rendering

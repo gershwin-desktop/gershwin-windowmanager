@@ -12,6 +12,7 @@
 #import "XCBTypes.h"
 #import "URSWindowEffect.h"
 #import "URSWindowPresentation.h"
+#import "URSWindowDeformation.h"
 #import <xcb/randr.h>
 
 // Replaces <dispatch/dispatch.h> dispatch_block_t without linking libdispatch
@@ -75,6 +76,11 @@ typedef void (^dispatch_block_t)(void);
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
+// Bend the window's picture over the deformation's mesh until it reports
+// being flat (nil ends it at once).  Ignored while the window animates.
+- (void)setDeformation:(id<URSWindowDeformation>)deformation forWindow:(xcb_window_t)windowId;
+- (id<URSWindowDeformation>)deformationForWindow:(xcb_window_t)windowId;
+
 // While installed, the presentation decides where windows are painted
 // (nil removes it).  Tell the compositor when its answers change.
 - (void)setPresentation:(id<URSWindowPresentation>)presentation;
