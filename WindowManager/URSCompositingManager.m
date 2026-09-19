@@ -37,6 +37,14 @@
 // had this throttle while event-driven paints ran uncapped.
 static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 
+// While the window manager starts, every window already on screen is put
+// into a new frame and redraws; showing each step made the whole desktop
+// flicker for about a second.  Painting is held until no damage arrived for
+// URSStartupQuietInterval, but never longer than URSStartupHoldLimit after
+// the windows were adopted.
+static const NSTimeInterval URSStartupQuietInterval = 0.15;
+static const NSTimeInterval URSStartupHoldLimit = 1.0;
+
 // Shadow configuration
 #define SHADOW_RADIUS 12
 #define SHADOW_OFFSET_X -18
@@ -217,6 +225,9 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 // Throttling to prevent excessive recomposites
 @property (assign, nonatomic) BOOL repairScheduled;
 @property (assign, nonatomic) NSTimeInterval lastRepairTime;
+@property (assign, nonatomic) BOOL paintingHeld;
+// 0 until -releasePaintingWhenSettled; the latest time the hold may end.
+@property (assign, nonatomic) NSTimeInterval paintingHoldDeadline;
 @property (assign, nonatomic) NSUInteger repairFrameCounter; // Frame counter for throttling during drag
 @property (assign, nonatomic) BOOL stackingDamageScheduled; // Debounce markStackingOrderDirty
 
@@ -957,15 +968,18 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
     @try {
         //NSLog(@"[CompositingManager] Activating compositing...");
         
-        // Redirect all windows for compositing
-        if (![self redirectWindows]) {
-            NSLog(@"[CompositingManager] Failed to redirect windows");
-            return NO;
-        }
-        
-        // Create overlay window
+        // The overlay goes up before the windows are redirected: it has no
+        // background, so it keeps showing the last picture on screen while
+        // painting is held, instead of the root window's background that
+        // redirecting would expose.
         if (![self createOverlayWindow]) {
             NSLog(@"[CompositingManager] Failed to create overlay window");
+            [self cleanup];
+            return NO;
+        }
+
+        if (![self redirectWindows]) {
+            NSLog(@"[CompositingManager] Failed to redirect windows");
             [self cleanup];
             return NO;
         }
@@ -984,6 +998,7 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
         [self addAllWindows];
         
         self.compositingActive = YES;
+        self.paintingHeld = YES;
         //NSLog(@"[CompositingManager] Compositing activated successfully");
         
         // Damage entire screen to trigger initial paint
@@ -2464,7 +2479,7 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 }
 
 - (BOOL)hasPendingDamage {
-    if (!self.compositingActive) {
+    if (!self.compositingActive || self.paintingHeld) {
         return NO;
     }
     return (self.allDamage != XCB_NONE) || self.repairScheduled;
@@ -2551,8 +2566,39 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
     } else {
         self.allDamage = damage;
     }
-    
+
+    if (self.paintingHeld) {
+        if (self.paintingHoldDeadline > 0) {
+            [self scheduleEndOfPaintingHold];
+        }
+        return;
+    }
+
     [self scheduleRepair];
+}
+
+- (void)releasePaintingWhenSettled {
+    if (!self.paintingHeld) {
+        return;
+    }
+    self.paintingHoldDeadline = [NSDate timeIntervalSinceReferenceDate] + URSStartupHoldLimit;
+    [self scheduleEndOfPaintingHold];
+}
+
+- (void)scheduleEndOfPaintingHold {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(endPaintingHold)
+                                               object:nil];
+    NSTimeInterval left = self.paintingHoldDeadline - [NSDate timeIntervalSinceReferenceDate];
+    [self performSelector:@selector(endPaintingHold)
+               withObject:nil
+               afterDelay:MAX(0.0, MIN(URSStartupQuietInterval, left))];
+}
+
+- (void)endPaintingHold {
+    self.paintingHeld = NO;
+    self.paintingHoldDeadline = 0;
+    [self damageScreen];
 }
 
 - (xcb_xfixes_region_t)windowExtents:(URSCompositeWindow *)cw {
@@ -2730,8 +2776,9 @@ static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
         return;
     }
 
-    // Check if there's damage to paint
-    if (self.allDamage == XCB_NONE) {
+    // Check if there's damage to paint; while painting is held it stays in
+    // allDamage for the first pass after the hold.
+    if (self.allDamage == XCB_NONE || self.paintingHeld) {
         self.repairScheduled = NO;
         URS_PROFILE_END(performRepair);
         return;

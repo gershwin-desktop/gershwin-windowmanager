@@ -246,6 +246,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
     // Decorate any existing windows already on screen
     [self decorateExistingWindowsOnStartup];
+    [self.compositingManager releasePaintingWhenSettled];
 
     // Setup XCB event integration with NSRunLoop
     [self setupXCBEventIntegration];
@@ -409,6 +410,10 @@ static CGFloat WMLastScaleFactor = 1.0;
 
         //NSLog(@"[WindowManager] Decorating %u pre-existing windows", childCount);
 
+        // Focusing every adopted window in turn made each titlebar flash
+        // active; only the topmost one (the tree is bottom-first) gets focus.
+        XCBWindow *topmostAdopted = nil;
+
         connection.adoptingExistingWindows = YES;
         for (uint32_t i = 0; i < childCount; i++) {
             xcb_window_t winId = children[i];
@@ -473,6 +478,9 @@ static CGFloat WMLastScaleFactor = 1.0;
                     [self registerChildWindowsForCompositor:[frame window] depth:3];
                 }
                 [self adjustBorderForFixedSizeWindow:winId];
+                if ([self.focusManager isWindowFocusable:mappedClient allowDesktop:NO]) {
+                    topmostAdopted = mappedClient;
+                }
             }
 
             // Apply GSTheme rendering to the titlebar immediately after decoration.
@@ -481,6 +489,10 @@ static CGFloat WMLastScaleFactor = 1.0;
             [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:winId]];
         }
         connection.adoptingExistingWindows = NO;
+
+        if (topmostAdopted) {
+            [self focusWindowAfterThemeApplied:topmostAdopted];
+        }
 
         // Each adopted window got a new frame, and new windows are created on
         // top of the stack - above the Dock and the menu bar, which were above
@@ -2000,11 +2012,13 @@ static CGFloat WMLastScaleFactor = 1.0;
                         //NSLog(@"Found frame for client window %u, applying GSTheme to titlebar", windowId);
 
                         // Apply GSTheme rendering (this will override XCBKit's decoration).
-                        // Newly mapped windows almost always get focus, so default active.
+                        // Newly mapped windows almost always get focus, so default active;
+                        // windows adopted at startup do not.
+                        BOOL adopting = self.connection.adoptingExistingWindows;
                         BOOL success = [URSThemeIntegration renderGSThemeToWindow:window
                                                                              frame:frame
                                                                              title:titlebar.windowTitle
-                                                                            active:YES];
+                                                                            active:!adopting];
 
                         if (success) {
                             // Add to managed list so we can handle expose events
@@ -2032,9 +2046,11 @@ static CGFloat WMLastScaleFactor = 1.0;
 
                             // Auto-focus the client window - the frame and titlebar are now fully set up
                             // Focus after a small delay to ensure the window is properly rendered and ready
-                            [self performSelector:@selector(focusWindowAfterThemeApplied:)
-                                       withObject:clientWindow
-                                       afterDelay:0.1];
+                            if (!adopting) {
+                                [self performSelector:@selector(focusWindowAfterThemeApplied:)
+                                           withObject:clientWindow
+                                           afterDelay:0.1];
+                            }
                         } else {
                             NSLog(@"Failed to apply GSTheme to titlebar for window %u", windowId);
                         }
@@ -2049,7 +2065,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         // Undecorated windows have no titlebars, so GSTheme is not applicable — skip silently.
         XCBWindow *directWindow = [self.connection windowForXCBId:windowId];
         if (directWindow) {
-            if (![directWindow decorated]) return;
+            if (![directWindow decorated] || self.connection.adoptingExistingWindows) return;
 
             // Attempt a direct focus on the client window as a fallback.
             if ([self.focusManager isWindowFocusable:directWindow allowDesktop:NO]) {

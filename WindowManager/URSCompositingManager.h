@@ -137,6 +137,11 @@ typedef void (^dispatch_block_t)(void);
 // Damage the entire screen region (used after resize/expose to force full redraw)
 - (void)damageScreen;
 
+// Painting is held from activation so the windows already on screen can be
+// adopted without showing each step; call once they are.  The hold ends when
+// damage has been quiet for a moment, bounded by a short limit.
+- (void)releasePaintingWhenSettled;
+
 // Handle damage events
 - (void)handleDamageNotify:(xcb_window_t)window
                                      area:(xcb_rectangle_t)area;
