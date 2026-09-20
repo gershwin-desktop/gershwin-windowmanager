@@ -1294,9 +1294,10 @@
     originalRect = rect;
 }
 
-/* Re-apply the frame geometry after a GSScaleFactor change: resize the frame
- * and titlebar to the new titlebar height and re-position the client. */
-- (void)reframeForScaleChange
+/* Re-apply the frame geometry after anything that changes how a window is
+ * decorated - a GSScaleFactor change or a theme change: resize the frame and
+ * titlebar to the titlebar height in force now and re-position the client. */
+- (void)reframeForDecorationChange
 {
     /* Only decorated client windows live in a frame; titlebars and frames
      * (also in the windows map) must be skipped. */
@@ -1309,7 +1310,12 @@
     XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     int titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
-    int cb = [frame clientBorder];
+    int cb;
+
+    /* A theme that draws a window frame of its own decides the inset, so it
+     * has to be read again and not taken from what the last theme left. */
+    [frame updateClientBorder];
+    cb = [frame clientBorder];
 
     /* Keep the frame's cached titlebar height in sync with the service so
      * later interactive resizes (which read frame.titleHeight) place the

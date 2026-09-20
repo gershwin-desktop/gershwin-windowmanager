@@ -46,7 +46,7 @@ static inline GSThemeTitleBarButton GSThemeTitleBarButtonForIndex(NSInteger inde
 // Helper methods
 - (GSTheme*)currentTheme;
 - (NSUInteger)windowStyleMask;
-- (GSThemeControlState)themeStateForActive:(BOOL)isActive;
+- (int)titleBarInputStateForActive:(BOOL)isActive;
 
 // Button hit detection - returns which button was clicked at the given coordinates
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point;

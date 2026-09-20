@@ -70,6 +70,18 @@ static NSMutableSet *fixedSizeWindows = nil;
 static xcb_window_t hoveredTitlebarWindow = 0;
 static NSInteger hoveredButtonIndex = -1;  // -1=none, 0=close, 1=mini, 2=zoom
 
+/* The state -drawWindowBorder:...state: and -drawTitleBarRect:...state: take is
+ * an input state (NSGraphicsContext.h: GSTitleBarKey, GSTitleBarNormal,
+ * GSTitleBarMain), not a GSThemeControlState.  GSTheme's own implementation
+ * indexes two three-element arrays with it, so passing GSThemeSelectedState
+ * (6) for an unfocused window read past the end of titleTextAttributes[] and
+ * killed the window manager with a segmentation fault under every theme that
+ * does not override those methods. */
+static inline int URSTitleBarInputState(BOOL isActive)
+{
+    return isActive ? GSTitleBarKey : GSTitleBarNormal;
+}
+
 // Edge button metrics: buttons are square, width equals titlebar height (queried at render time)
 // Declared early so they can be used in hover state methods
 // Multiplied by GSScaleFactor for HiDPI support (lazily computed).
@@ -241,6 +253,18 @@ static NSMutableDictionary *drawnActiveStates = nil;
            pixmapSize.height == [titlebar windowRect].size.height &&
            themedSize.width == pixmapSize.width &&
            themedSize.height == pixmapSize.height;
+}
+
+/* A theme change alters the whole titlebar: its height, its button rects and
+ * every pixel of it.  The caches that let an ordinary focus change redraw only
+ * what moved would otherwise make the re-render skip titlebars whose active
+ * state did not change, and leave the button rects of the old theme published
+ * to the clients. */
++ (void)themeDidChange
+{
+    [drawnActiveStates removeAllObjects];
+    [publishedButtonRects removeAllObjects];
+    [self invalidateScaleFactorCache];
 }
 
 + (void)noteFrame:(XCBWindow *)frame drawnActive:(BOOL)active
@@ -929,7 +953,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             styleMask |= NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask;
         }
 
-        GSThemeControlState state = isActive ? GSThemeNormalState : GSThemeSelectedState;
+        int state = URSTitleBarInputState(isActive);
 
         NSDebugLog(@"Drawing GSTheme titlebar with styleMask: 0x%lx, state: %d", (unsigned long)styleMask, (int)state);
 
@@ -1431,7 +1455,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // Hit testing uses the same mask, so the buttons stay where they are drawn
         NSUInteger styleMask = [URSThemeIntegration buttonStyleMaskForFrame:frame];
 
-        GSThemeControlState state = isActive ? GSThemeNormalState : GSThemeSelectedState;
+        int state = URSTitleBarInputState(isActive);
 
         NSDebugLog(@"Drawing standalone GSTheme titlebar with styleMask: 0x%lx, state: %d", (unsigned long)styleMask, (int)state);
 

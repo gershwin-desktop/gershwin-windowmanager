@@ -101,10 +101,31 @@ static CGFloat WMLastScaleFactor = 1.0;
 
 - (void)applyScaleFactor:(CGFloat)factor
 {
+  [[TitleBarSettingsService sharedInstance] setScaleFactor:factor];
+  [self redecorateManagedWindows];
+}
+
+/* The theme was switched under the running window manager.  Every number the
+ * decorations are built from comes from the theme, so the whole set has to be
+ * read again: the window manager keeps the frames it already has, and without
+ * this they would go on being drawn by the theme that has gone until each of
+ * them happens to be re-rendered for another reason. */
+- (void)themeDidActivate:(NSNotification *)notification
+{
+  (void)notification;
+  [URSThemeIntegration themeDidChange];
+  [self redecorateManagedWindows];
+}
+
+/* Re-read every decoration metric from the theme and apply it to the windows
+ * that are already framed.  Shared by the scale factor and the theme change,
+ * which need exactly the same work: the scale factor is written into the
+ * settings first, the theme change drops the render caches first. */
+- (void)redecorateManagedWindows
+{
   TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
   GSTheme *theme = [GSTheme theme];
-
-  [settings setScaleFactor:factor];
+  CGFloat factor = [settings scaleFactor];
 
   /* Titlebar drawing constants cache the scale factor; invalidate so the
    * next render uses the new value. */
@@ -128,15 +149,16 @@ static CGFloat WMLastScaleFactor = 1.0;
   EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
   [ewmh updateGNUStepFrameOffsetsForRootWindow:rootWin];
 
-  /* Re-frame every managed window so its titlebar height follows the factor.
-   * reframeForScaleChange self-guards (only acts on frame-parented windows). */
+  /* Re-frame every managed window so its titlebar height and frame inset
+   * follow the new metrics.  reframeForDecorationChange self-guards (only
+   * acts on frame-parented windows). */
   NSDictionary *windows = [self.connection windowsMap];
   for (XCBWindow *win in [windows allValues])
     {
-      [win reframeForScaleChange];
+      [win reframeForDecorationChange];
     }
 
-  /* Re-render all titlebars with the new scale. */
+  /* Re-render all titlebars with the new metrics. */
   xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
   [URSThemeIntegration refreshAllTitlebarsWithFocusedWindow:focusedId];
 }
@@ -250,6 +272,13 @@ static CGFloat WMLastScaleFactor = 1.0;
         self.wobblyWindowsController = [[URSWobblyWindowsController alloc] init];
         self.wobblyWindowsController.compositingManager = self.compositingManager;
     }
+
+    /* Follow the theme the user picks while the session runs.  GSTheme posts
+     * this in every process that adopts the new theme, this one included. */
+    [[NSNotificationCenter defaultCenter] addObserver: self
+                                             selector: @selector(themeDidActivate:)
+                                                 name: GSThemeDidActivateNotification
+                                               object: nil];
 
     // Decorate any existing windows already on screen
     [self decorateExistingWindowsOnStartup];

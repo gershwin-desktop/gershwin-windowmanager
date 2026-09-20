@@ -201,7 +201,7 @@ typedef NS_ENUM(NSInteger, WindowState)
 - (void) showResizeCursorForPosition:(MousePosition)position;
 - (void) putWindowBackgroundWithPixmap:(xcb_pixmap_t)aPixmap;
 - (void) refreshBorder;
-- (void) reframeForScaleChange;
+- (void) reframeForDecorationChange;
 - (BOOL) updatePid;
 - (BOOL) updateLeaderWindow;
 

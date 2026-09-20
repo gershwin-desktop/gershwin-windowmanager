@@ -158,4 +158,7 @@ extern NSString *URSWindowTitleContentChangedNotification;
 - (NSMutableDictionary*) getChildren;
 - (void) decorateClientWindow;
 
+// Re-read the frame inset the theme and the compositor ask for.
+- (void) updateClientBorder;
+
 @end

@@ -40,6 +40,10 @@
 // to determine which titlebar should appear active.
 + (void)refreshAllTitlebarsWithFocusedWindow:(xcb_window_t)focusedClientId;
 
+// Drop everything cached about how the titlebars were last drawn, so the next
+// render asks the theme that is current now.
++ (void)themeDidChange;
+
 // Draw activeFrame's titlebar active and every other frame's inactive, and
 // have the compositor show them in its next paint.
 + (void)showTitlebarsWithActiveFrame:(XCBFrame *)activeFrame

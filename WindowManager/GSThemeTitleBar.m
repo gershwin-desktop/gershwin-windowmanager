@@ -80,7 +80,7 @@
     // Use GSTheme to draw window titlebar
     NSRect drawRect = NSMakeRect(0, 0, size.width, size.height);
     NSUInteger styleMask = [self windowStyleMask];
-    GSThemeControlState state = [self themeStateForActive:isActive];
+    int state = [self titleBarInputStateForActive:isActive];
 
     [theme drawWindowBorder:drawRect
                   withFrame:drawRect
@@ -243,8 +243,11 @@
     return styleMask;
 }
 
-- (GSThemeControlState)themeStateForActive:(BOOL)isActive {
-    return isActive ? GSThemeNormalState : GSThemeSelectedState;
+/* -drawWindowBorder:...state: wants an input state, not a control state; a
+ * GSThemeSelectedState (6) indexes past the end of the three-element arrays
+ * GSTheme's own implementation keeps and kills the process. */
+- (int)titleBarInputStateForActive:(BOOL)isActive {
+    return isActive ? GSTitleBarKey : GSTitleBarNormal;
 }
 
 #pragma mark - Button Hit Detection
