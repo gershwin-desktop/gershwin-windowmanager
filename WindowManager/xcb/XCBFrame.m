@@ -159,8 +159,12 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     ICCCMService* icccmService = [ICCCMService sharedInstanceWithConnection:connection];
     xcb_size_hints_t *sizeHints = [icccmService wmNormalHintsForWindow:aClientWindow];
 
-    [self setMinHeightHint:sizeHints->min_height];
-    [self setMinWidthHint:sizeHints->min_width];
+    /* A client need not set WM_NORMAL_HINTS, and then there is nothing to
+     * read: -wmNormalHintsForWindow: hands back NULL for it.  No hints means
+     * no minimum of the client's own and a window that may be resized, which
+     * is what the defaults below say. */
+    [self setMinHeightHint: sizeHints ? sizeHints->min_height : 0];
+    [self setMinWidthHint: sizeHints ? sizeHints->min_width : 0];
 
     // Enforce an absolute minimum client area so windows can never collapse
     // to just the titlebar height. Clients that don't set WM_NORMAL_HINTS
@@ -172,7 +176,8 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         minWidthHint = WM_MIN_CLIENT_WIDTH;
 
     // Respect ICCCM WM_NORMAL_HINTS: if min == max for both dimensions, treat as non-resizable
-    if ((sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
+    if (sizeHints != NULL &&
+        (sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
         (sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MAX_SIZE) &&
         sizeHints->min_width == sizeHints->max_width &&
         sizeHints->min_height == sizeHints->max_height)
