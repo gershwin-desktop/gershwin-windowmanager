@@ -10,6 +10,10 @@
 //
 
 #import "URSHybridEventHandler.h"
+#import <unistd.h>
+#import <fcntl.h>
+#import <errno.h>
+#import <string.h>
 #import "URSProfiler.h"
 #import "xcb/services/TitleBarSettingsService.h"
 #import <GNUstepGUI/GSTheme.h>
@@ -46,6 +50,11 @@
 #import "URSThemeIntegration.h"
 #import "GSThemeTitleBar.h"
 #import "URSWindowSwitcher.h"
+
+@interface URSHybridEventHandler ()
+// Read end of the pipe a termination signal writes to; -1 while unset.
+@property (assign, nonatomic) int terminationReadFD;
+@end
 
 @implementation URSHybridEventHandler
 
@@ -194,6 +203,8 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.nsRunLoopActive = NO;
     self.eventCount = 0;
     _randrEventBase = 0;
+    // No pipe yet, and never the fd 0 the property would default to.
+    _terminationReadFD = -1;
 
     // Initialize XCB connection
     connection = [XCBConnection sharedConnectionAsWindowManager:YES];
@@ -650,10 +661,55 @@ static CGFloat WMLastScaleFactor = 1.0;
                 extra:(void*)extra
               forMode:(NSString*)mode
 {
-    if (type == ET_RDESC) {
-        // Process available XCB events (non-blocking)
-        [self processAvailableXCBEvents];
+    if (type != ET_RDESC) {
+        return;
     }
+    if ((int)(uintptr_t)data == self.terminationReadFD) {
+        [self handleTerminationSignal];
+        return;
+    }
+    // Process available XCB events (non-blocking)
+    [self processAvailableXCBEvents];
+}
+
+/* A termination signal only writes a byte to this pipe: shutting down from
+ * the handler itself deadlocked the window manager.  The handler interrupts
+ * whatever X call is in flight, and the X connection lock it holds is still
+ * taken while the handler asks the server for a reply of its own, so the
+ * process hangs forever with the desktop unmanaged. */
+- (int)installTerminationPipe
+{
+    int fds[2];
+    if (pipe(fds) != 0) {
+        NSLog(@"[WindowManager] ERROR: could not create the termination pipe: %s",
+              strerror(errno));
+        return -1;
+    }
+    for (int i = 0; i < 2; i++) {
+        fcntl(fds[i], F_SETFD, fcntl(fds[i], F_GETFD, 0) | FD_CLOEXEC);
+        fcntl(fds[i], F_SETFL, fcntl(fds[i], F_GETFL, 0) | O_NONBLOCK);
+    }
+    self.terminationReadFD = fds[0];
+
+    NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
+    for (NSString *mode in @[NSDefaultRunLoopMode, NSRunLoopCommonModes,
+                             NSEventTrackingRunLoopMode, NSModalPanelRunLoopMode]) {
+        [runLoop addEvent:(void*)(uintptr_t)fds[0]
+                     type:ET_RDESC
+                  watcher:self
+                  forMode:mode];
+    }
+    return fds[1];
+}
+
+- (void)handleTerminationSignal
+{
+    char drained[16];
+    while (read(self.terminationReadFD, drained, sizeof(drained)) > 0) {
+        ;
+    }
+    [self cleanupBeforeExit];
+    [NSApp terminate:nil];
 }
 
 - (void)processMotionEvent:(xcb_motion_notify_event_t *)motionEvent

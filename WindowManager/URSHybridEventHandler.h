@@ -79,6 +79,10 @@
 // Cleanup
 - (void)cleanupBeforeExit;
 
+// A pipe a signal handler can write one byte to; the shutdown itself then
+// runs from the run loop.  Returns the write end, or -1.
+- (int)installTerminationPipe;
+
 // ICCCM Manager Selection Protocol
 - (void)handleSelectionClear:(xcb_selection_clear_event_t *)event;
 
