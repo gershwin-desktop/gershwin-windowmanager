@@ -299,6 +299,10 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 
 // Windows that should not have drop shadows rendered (e.g. snap preview overlay)
 @property (strong, nonatomic) NSMutableSet<NSNumber *> *noShadowWindows;
+// Root children that can never be tracked: every paint pass offers each
+// untracked root child to addWindow:, and asking the server about the same
+// InputOnly window again was a round trip per frame.
+@property (strong, nonatomic) NSMutableSet<NSNumber *> *inputOnlyWindows;
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSNumber *> *shadowCornerRadii;
 // Frame window -> @[URSShapePath, client x, client y] of its client's outline
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSArray *> *shapePaths;
@@ -385,6 +389,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         
         // Initialize no-shadow windows set
         _noShadowWindows = [[NSMutableSet alloc] init];
+        _inputOnlyWindows = [[NSMutableSet alloc] init];
         _shadowCornerRadii = [[NSMutableDictionary alloc] init];
         _shapePaths = [[NSMutableDictionary alloc] init];
 
@@ -1375,6 +1380,9 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     if ([self findCWindow:windowId]) {
         return; // Already added
     }
+    if ([self.inputOnlyWindows containsObject:@(windowId)]) {
+        return;
+    }
     
     xcb_connection_t *conn = [self.connection connection];
     
@@ -1391,6 +1399,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         return;
     }
     if (attr->_class == XCB_WINDOW_CLASS_INPUT_ONLY) {
+        [self.inputOnlyWindows addObject:@(windowId)];
         free(attr);
         return;
     }
@@ -1841,6 +1850,8 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     if (!self.compositingActive) {
         return;
     }
+    // The id is free for reuse by a window of any class.
+    [self.inputOnlyWindows removeObject:@(window)];
 
     NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:window];
     if ([group count] == 0) {
@@ -3433,6 +3444,12 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
 }
 
 - (void)stepDeformations {
+    // A deformation always counts as an animation, and this runs on every
+    // repair: copying every tracked window into an array only to find no
+    // mesh was a tenth of an idle compositor's time.
+    if (self.activeAnimations == 0) {
+        return;
+    }
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     xcb_connection_t *conn = [self.connection connection];
     for (URSCompositeWindow *cw in [self.cwindows allValues]) {
@@ -3960,15 +3977,55 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
                                    self.rootBuffer, bg_color, 1, &bg_rect);
     }
 
+    // Each root child is looked up once per pass.  Every application keeps
+    // unmapped windows at the root, so there are hundreds of them for a
+    // handful on screen, and looking all of them up twice (for Menu.app,
+    // then for painting) cost more than painting what is visible.
+    xcb_window_t overlayWindow = self.overlayWindow;
+    xcb_window_t outputWindow = self.outputWindow;
+    xcb_window_t rootWindow = self.rootWindow;
+    uint16_t screenWidth = self.screenWidth;
+    NSMutableArray<URSCompositeWindow *> *paintList = [NSMutableArray array];
     // Find Menu.app and ensure its shadow is created early so we can
     // paint it at the desktop z-order (below all other windows).
     URSCompositeWindow *menuCW = nil;
-    for (NSUInteger i = 0; i < num_windows && !menuCW; i++) {
-        URSCompositeWindow *cw = [self findCWindow:
-            [self.windowStackingOrder[i] unsignedIntValue]];
-        if (cw && cw.y == 0 && cw.width == self.screenWidth && cw.height < 50) {
+    for (NSUInteger i = 0; i < num_windows; i++) {
+        NSNumber *key = self.windowStackingOrder[i];
+        xcb_window_t win = [key unsignedIntValue];
+
+        // Skip overlay and output windows (our own compositor windows)
+        if (win == overlayWindow || win == outputWindow) {
+            continue;
+        }
+
+        URSCompositeWindow *cw = self.cwindows[key];
+        if (!cw) {
+            // Window not tracked yet, try to add it
+            [self addShownWindow:win];
+            cw = self.cwindows[key];
+        }
+        if (!cw) {
+            continue;
+        }
+        if (!menuCW && cw.y == 0 && cw.width == screenWidth && cw.height < 50) {
             menuCW = cw;
         }
+        if (!cw.viewable && !cw.animating) {
+            continue;
+        }
+
+        // Skip windows that requested compositor bypass — the client draws
+        // them directly to the screen, so the compositor must not paint them.
+        if (!cw.redirected) {
+            continue;
+        }
+
+        // Only paint top-level windows (root children). Child windows are
+        // composited via IncludeInferiors on their parent.
+        if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != rootWindow) {
+            continue;
+        }
+        [paintList addObject:cw];
     }
     // Ensure shadow exists before the main loop (paintWindow: skips
     // shadow creation for the Menu.app due to the skip condition).
@@ -3988,35 +4045,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     xcb_rectangle_t paintedBBox = damageBBox;
 
     // Paint windows from bottom to top (so higher z-order windows are on top)
-    for (NSUInteger i = 0; i < num_windows; i++) {
-        xcb_window_t win = [self.windowStackingOrder[i] unsignedIntValue];
-        
-        // Skip overlay and output windows (our own compositor windows)
-        if (win == self.overlayWindow || win == self.outputWindow) {
-            continue;
-        }
-        
-        URSCompositeWindow *cw = [self findCWindow:win];
-        if (!cw) {
-            // Window not tracked yet, try to add it
-            [self addShownWindow:win];
-            cw = [self findCWindow:win];
-        }
-        if (!cw || (!cw.viewable && !cw.animating)) {
-            continue;
-        }
-
-        // Skip windows that requested compositor bypass — the client draws
-        // them directly to the screen, so the compositor must not paint them.
-        if (!cw.redirected) {
-            continue;
-        }
-
-        // Only paint top-level windows (root children). Child windows are
-        // composited via IncludeInferiors on their parent.
-        if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) {
-            continue;
-        }
+    for (URSCompositeWindow *cw in paintList) {
 
         NSRect presentedRect;
         BOOL presented = self.presentation != nil && cw.viewable &&
@@ -5747,6 +5776,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
             [self freeWindowData:cw delete:YES];
         }
         [self.cwindows removeAllObjects];
+        [self.inputOnlyWindows removeAllObjects];
         
         // Free damage regions
         if (self.allDamage != XCB_NONE) {

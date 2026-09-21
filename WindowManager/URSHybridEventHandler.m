@@ -2907,6 +2907,13 @@ static CGFloat WMLastScaleFactor = 1.0;
 
     NSString *newTitle = [(clientWindow ? clientWindow : eventWindow) title];
 
+    // One retitle arrives as several notifies (WM_NAME, _NET_WM_NAME, the
+    // frame's copy of the name), and a titlebar rendered again with the title
+    // it shows already cost a theme render and its round trips each time.
+    if (newTitle != nil && [newTitle isEqualToString:[titlebar windowTitle]]) {
+        return;
+    }
+
     [titlebar setInternalTitle:newTitle];
 
     if ([titlebar isGSThemeActive] && [[URSThemeIntegration sharedInstance] enabled]) {
