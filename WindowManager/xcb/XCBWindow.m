@@ -436,8 +436,8 @@
 {
     NSUInteger size = [[connection screens] count];
     XCBQueryTreeReply *queryTreeReply = [self queryTree];
-    
-    if ([queryTreeReply message] == BadWindow)
+
+    if (queryTreeReply == nil || [queryTreeReply message] == BadWindow)
         return nil;
     
     XCBWindow *rootWindow = [queryTreeReply rootWindow];
@@ -602,6 +602,10 @@
         [queryReply description];
         return queryReply;
     }
+    /* Neither a reply nor an error: nothing can be said about this window. */
+    if (reply == NULL)
+        return nil;
+
     queryReply = [[XCBQueryTreeReply alloc] initWithReply:reply andConnection:connection];
 
 

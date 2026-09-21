@@ -1030,7 +1030,14 @@ static XCBConnection *sharedInstance;
  * window would then find it back on the screen. */
 - (void)releaseClientWindow:(XCBWindow *)aClient toRootAt:(XCBPoint)position
 {
-    [self reparentWindow:aClient toWindow:[[aClient queryTree] rootWindow] position:position];
+    XCBQueryTreeReply *tree = [aClient queryTree];
+
+    /* No tree means the client is already gone; there is nothing to hand back
+     * to the root window. */
+    if (tree == nil)
+        return;
+
+    [self reparentWindow:aClient toWindow:[tree rootWindow] position:position];
     xcb_change_save_set(connection, XCB_SET_MODE_DELETE, [aClient window]);
     [aClient setDecorated:NO];
 }
