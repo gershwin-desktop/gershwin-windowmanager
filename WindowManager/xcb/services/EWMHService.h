@@ -196,6 +196,21 @@
 
 - (void) updateNetFrameExtentsForWindow:(XCBWindow*)aWindow;
 - (void) updateNetFrameExtentsForWindow:(XCBWindow*)aWindow andExtents:(uint32_t[])extents;
+
+// YES when the client's own _GNUSTEP_WM_ATTR window_style carries
+// NSUtilityWindowMask (16).  Read this instead of _NET_WM_WINDOW_TYPE: the
+// active Eau theme republishes every NSPanel's _NET_WM_WINDOW_TYPE as
+// _NET_WM_WINDOW_TYPE_DIALOG (GSDisplayServer+Eau.m's popup-menu-type fix),
+// so that EWMH property no longer distinguishes a utility panel from an
+// ordinary dialog once Eau has touched it.
+- (BOOL) clientDeclaresUtilityWindowStyle:(XCBWindow*)aWindow;
+
+// YES when the client's _GNUSTEP_WM_ATTR window_level is
+// NSFloatingWindowLevel (2) or higher - a broader check than
+// clientDeclaresUtilityWindowStyle: (which looks at the style mask, not
+// the level): catches a floating panel that never set
+// NSUtilityWindowMask too.
+- (BOOL) clientDeclaresFloatingOrAboveLevel:(XCBWindow*)aWindow;
 - (void) updateNetWmWindowTypeDockForWindow:(XCBWindow*)aWindow;
 - (BOOL) ewmhClientMessage:(NSString*)anAtomMessageName;
 - (void) handleClientMessage:(NSString*)anAtomMessageName forWindow:(XCBWindow*)aWindow data:(xcb_client_message_data_t)someData;

@@ -57,7 +57,9 @@
 @synthesize cursor;
 @synthesize windowClass;
 @synthesize windowType;
+@synthesize isUtilityPanel;
 @synthesize leaderWindow;
+
 @synthesize maximizedHorizontally;
 @synthesize maximizedVertically;
 @synthesize shape;
@@ -1165,7 +1167,7 @@
     XCBFrame *frame = (XCBFrame*)parentWindow;
     XCBRect frameRect = [frame windowRect];//[[frame geometries] rect];
     TitleBarSettingsService *settingsService = [TitleBarSettingsService sharedInstance];
-    int titleHeight = [settingsService heightDefined] ? [settingsService height] : [settingsService defaultHeight];
+    int titleHeight = [settingsService heightForUtility:[self isUtilityPanel]];
     int cb = [frame clientBorder];
 
     /*** Handle windows we manage ***/
@@ -1185,9 +1187,14 @@
     if (anEvent->value_mask & XCB_CONFIG_WINDOW_Y)
     {
         // Same rationale as X: anEvent->y is the frame Y directly.
+        // Never honor a client-requested move that would put the titlebar
+        // inside a strut (menu bar) - clamp before it reaches the frame.
+        int32_t requestedY = anEvent->y;
+        XCBPoint clamped = [connection clampFramePosition:XCBMakePoint(frameRect.position.x, requestedY)
+                                                      size:frameRect.size];
         config_frame_mask |= XCB_CONFIG_WINDOW_Y;
-        config_frame_vals[frame_i++] = anEvent->y;
-        frameRect.position.y = anEvent->y;
+        config_frame_vals[frame_i++] = (uint32_t)(int32_t)clamped.y;
+        frameRect.position.y = clamped.y;
     }
 
     if (anEvent->value_mask & XCB_CONFIG_WINDOW_WIDTH)
@@ -1313,7 +1320,7 @@
     XCBFrame *frame = (XCBFrame *)parentWindow;
     XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    int titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    int titleHeight = [settings heightForUtility:[self isUtilityPanel]];
     int cb;
 
     /* A theme that draws a window frame of its own decides the inset, so it

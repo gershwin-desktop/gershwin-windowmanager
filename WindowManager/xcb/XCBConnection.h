@@ -95,6 +95,7 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void) registerWindow:(XCBWindow*) aWindow;
 - (void) unregisterWindow:(XCBWindow *) aWindow;
 - (void) restackDockWindowsAbove;
+- (void) reassertAboveFramesForPid:(uint32_t)pid;
 - (void) lowerNormalWindowBeneathAllPeers:(XCBWindow *)aWindow;
 - (void) lowerNormalWindowAboveDesktop:(XCBWindow *)aWindow;
 - (void) noteClientContentDamage:(xcb_window_t)windowId
@@ -185,5 +186,18 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void)showSnapPreviewForZone:(SnapZone)zone frame:(XCBFrame *)frame;
 - (void)hideSnapPreview;
 - (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame;
+
+/*** STRUTS / WORKAREA ***/
+
+// Clamps a proposed frame position (root coords) so the frame stays inside
+// the cached _NET_WORKAREA - keeps x, only pushes y down when it would sit
+// inside a top strut (menu bar), and keeps at least a sliver on every edge.
+// A no-op when the workarea cache is not valid (no struts known yet).
+- (XCBPoint)clampFramePosition:(XCBPoint)pos size:(XCBSize)size;
+
+// Re-clamps every currently mapped frame against the (just refreshed)
+// workarea - called after _NET_WORKAREA changes, so windows already
+// sitting under a strut (or a strut that grew) get pushed back into view.
+- (void)reclampAllFramesToWorkarea;
 
 @end

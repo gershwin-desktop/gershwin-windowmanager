@@ -720,7 +720,7 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
 - (void) updateNetFrameExtentsForWindow:(XCBWindow *)aWindow
 {
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t titleHeight = [settings heightForUtility:[aWindow isUtilityPanel]];
 
     BOOL compositorActive = NO;
     Class compositorClass = NSClassFromString(@"URSCompositingManager");
@@ -765,6 +765,65 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                          withFormat:32
                      withDataLength:4
                            withData:extents];
+}
+
+- (BOOL) clientDeclaresUtilityWindowStyle:(XCBWindow*)aWindow
+{
+    if (!aWindow)
+        return NO;
+
+    // GNUstepWMAttributes (XGServerWindow.h): flags, window_style,
+    // window_level, ...  Every field is stored as one XA_CARDINAL/format-32
+    // unit regardless of the compiler's native 'long' width, so word index 1
+    // is always window_style.  NSUtilityWindowMask == 16 (NSPanel.h).
+    void *reply = [self getProperty:GNUStepWmAttr
+                        propertyType:XCB_GET_PROPERTY_TYPE_ANY
+                           forWindow:aWindow
+                              delete:NO
+                              length:4];
+    if (!reply)
+        return NO;
+
+    BOOL isUtility = NO;
+    int len = xcb_get_property_value_length((xcb_get_property_reply_t *)reply);
+    if (len >= (int)(2 * sizeof(uint32_t)))
+    {
+        uint32_t *words = (uint32_t *)xcb_get_property_value(reply);
+        isUtility = (words[1] & 16) != 0;
+    }
+    free(reply);
+    return isUtility;
+}
+
+- (BOOL) clientDeclaresFloatingOrAboveLevel:(XCBWindow*)aWindow
+{
+    if (!aWindow)
+        return NO;
+
+    // GNUstepWMAttributes: flags, window_style, window_level, ...  Word
+    // index 2 is window_level (see clientDeclaresUtilityWindowStyle:).
+    // NSFloatingWindowLevel == 2 (NSWindow.h) - any window the client asked
+    // to float above normal ones (whether or not it also set
+    // NSUtilityWindowMask) must keep-above so a document raise never
+    // buries it, matching what a real floating panel does on screen.
+    void *reply = [self getProperty:GNUStepWmAttr
+                        propertyType:XCB_GET_PROPERTY_TYPE_ANY
+                           forWindow:aWindow
+                              delete:NO
+                              length:4];
+    if (!reply)
+        return NO;
+
+    BOOL isFloatingOrAbove = NO;
+    int len = xcb_get_property_value_length((xcb_get_property_reply_t *)reply);
+    if (len >= (int)(3 * sizeof(uint32_t)))
+    {
+        uint32_t *words = (uint32_t *)xcb_get_property_value(reply);
+        int32_t level = (int32_t)words[2];
+        isFloatingOrAbove = level >= 2; // NSFloatingWindowLevel
+    }
+    free(reply);
+    return isFloatingOrAbove;
 }
 
 - (void)updateNetWmWindowTypeDockForWindow:(XCBWindow *)aWindow
@@ -1083,7 +1142,9 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
             XCBWindow *rootWindow = [screen rootWindow];
             [self readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
 
-            if (maxHorz)
+            // Utility panels (palettes) are never maximized - matches the
+            // titlebar's missing zoom button and the snapping menu's guard.
+            if (maxHorz && ![aWindow isUtilityPanel])
             {
                 if ([aWindow isMinimized])
                     [aWindow restoreFromIconified];
@@ -1153,7 +1214,9 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
             XCBWindow *rootWindow = [screen rootWindow];
             [self readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
 
-            if (maxVert)
+            // Utility panels (palettes) are never maximized - matches the
+            // titlebar's missing zoom button and the snapping menu's guard.
+            if (maxVert && ![aWindow isUtilityPanel])
             {
                 if ([aWindow isMinimized])
                     [aWindow restoreFromIconified];
@@ -1320,7 +1383,7 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                     // fullscreen enter — it was never unmapped).
                     XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
                     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-                    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+                    uint16_t titleHgt = [settings heightForUtility:[clientWin isUtilityPanel]];
                     {
                         uint32_t tvals[2] = {frameRect.size.width, titleHgt};
                         xcb_configure_window([connection connection], [titleBar window],
