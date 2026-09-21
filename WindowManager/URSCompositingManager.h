@@ -39,7 +39,8 @@ typedef void (^dispatch_block_t)(void);
 
 // Window management for compositing
 - (void)registerWindow:(xcb_window_t)window;
-- (void)unregisterWindow:(xcb_window_t)window;
+// destroyed: the server has already destroyed the window (DestroyNotify).
+- (void)unregisterWindow:(xcb_window_t)window destroyed:(BOOL)destroyed;
 - (void)updateWindow:(xcb_window_t)window;
 
 // Window state changes

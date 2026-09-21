@@ -1268,7 +1268,14 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // This covers the frame, titlebar, client window, and any auxiliary child windows.
 // Using a single group allows unmap/destroy cleanup to remove all parts together
 // and repaint the whole window area atomically.
-- (NSArray<NSNumber *> *)trackedWindowGroupForWindow:(xcb_window_t)windowId {
+- (NSArray<NSNumber *> *)trackedWindowGroupForWindow:(xcb_window_t)windowId
+                                          destroyed:(BOOL)destroyed {
+    // findParentFrameWindow: only ever answers a tracked window, so nothing
+    // can be grouped under one that is not tracked.  Apps destroy many such
+    // windows (never-mapped helpers, InputOnly windows).
+    if (![self findCWindow:windowId]) {
+        return @[];
+    }
     xcb_window_t topLevel = [self topLevelFrameForWindow:windowId];
     NSMutableArray<NSNumber *> *group = [[NSMutableArray alloc] init];
 
@@ -1278,6 +1285,23 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 
         if (cw.windowId == topLevel) {
             [group addObject:key];
+            continue;
+        }
+        // A destroyed window has left the server's tree together with all of
+        // its children, so a walk up from any live window can no longer reach
+        // it; only what the cache remembers from before can.
+        if (destroyed && topLevel == windowId) {
+            NSNumber *cachedFrame = self.parentFrameCache[key];
+            if (cachedFrame && [cachedFrame unsignedIntValue] == topLevel) {
+                [group addObject:key];
+            }
+            continue;
+        }
+        // Nothing frames a child of the root, and the root's
+        // SubstructureNotify re-registers every window that leaves it, so
+        // parentWindowId answers here what a QueryTree per tracked window
+        // did - on every unmap, destroy and reparent.
+        if (cw.parentWindowId == XCB_NONE || cw.parentWindowId == self.rootWindow) {
             continue;
         }
 
@@ -1846,14 +1870,14 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // Destroy a logical window group when the client is gone.
 // This ensures the compositor removes the whole frame+content bundle in one pass,
 // instead of allowing decorations or client content to linger separately.
-- (void)unregisterWindow:(xcb_window_t)window {
+- (void)unregisterWindow:(xcb_window_t)window destroyed:(BOOL)destroyed {
     if (!self.compositingActive) {
         return;
     }
     // The id is free for reuse by a window of any class.
     [self.inputOnlyWindows removeObject:@(window)];
 
-    NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:window];
+    NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:window destroyed:destroyed];
     if ([group count] == 0) {
         // Not tracked: never painted, or already removed with its area
         // damaged (a menu unmapped then destroyed) - nothing left to clear.
@@ -2414,7 +2438,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // This makes the window disappear atomically, with decorations and content
 // invalidated together rather than in separate repaint steps.
 - (void)unmapWindow:(xcb_window_t)windowId {
-    NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:windowId];
+    NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:windowId destroyed:NO];
     if ([group count] == 0) {
         // Not tracked: either never painted, or already removed - and every
         // removal of a painted window damages its area - so nothing of it is

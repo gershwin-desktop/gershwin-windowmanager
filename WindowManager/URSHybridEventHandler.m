@@ -1184,7 +1184,7 @@ static CGFloat WMLastScaleFactor = 1.0;
             
             // Unregister window from compositor before connection handles destroy
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager unregisterWindow:destroyNotify->window];
+                [self.compositingManager unregisterWindow:destroyNotify->window destroyed:YES];
             }
             
             // Remove any struts for this window
@@ -1242,7 +1242,7 @@ static CGFloat WMLastScaleFactor = 1.0;
                 // Re-register to refresh parent/geometry.  Unregistering damages
                 // what the window covered while it was painted; inside its new
                 // parent it shows up as damage to that parent.
-                [self.compositingManager unregisterWindow:reparentNotify->window];
+                [self.compositingManager unregisterWindow:reparentNotify->window destroyed:NO];
                 [self.compositingManager registerWindow:reparentNotify->window];
             }
             break;
