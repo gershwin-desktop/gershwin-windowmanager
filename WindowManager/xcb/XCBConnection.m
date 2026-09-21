@@ -2202,6 +2202,14 @@ static XCBConnection *sharedInstance;
     uint16_t reqW = [window windowRect].size.width;
     uint16_t reqH = [window windowRect].size.height;
 
+    /* The server never reports a zero size, so a zero rect means the geometry
+     * query failed: the client destroyed its window while its MapRequest was
+     * still queued.  Framing it anyway asks for a frame of width 0, the server
+     * refuses to create it, and the frame's cursor setup then crashes on the
+     * missing screen. */
+    if (reqW == 0 || reqH == 0)
+        return;
+
     // In compositor mode (drop shadows), the client sits flush inside the frame
     // with no pixel-wide border strips, so cb=0.  Non-compositor uses cb=1.
     // Scale cb by GSScaleFactor for HiDPI displays.
