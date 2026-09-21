@@ -815,6 +815,132 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 }
 
+#pragma mark - Utility Panel Titlebar Rendering
+
+// Utility panels (NSPanel/NSUtilityWindowMask) get a fixed 16px titlebar
+// (TitleBarSettingsService heightForUtility:).  The theme's own
+// drawWindowBorder:/drawtitleRect: (Eau: Eau+WindowDecoration.m) compute
+// their title/button rects from the theme's fixed METRICS_TITLEBAR_HEIGHT_PX
+// constant regardless of the image we hand them, so calling into the theme
+// for a shorter titlebar would draw content sized for the normal height and
+// clip or overflow.  Draw a compact, self-contained titlebar instead: no
+// theme call, close button only (no minimize/maximize - matches Cocoa/
+// GNUstep utility panel convention), title text scaled to the reduced
+// height.
++ (BOOL)renderUtilityTitlebarForTitlebar:(XCBTitleBar *)titlebar
+                             clientWindow:(XCBWindow *)clientWindow
+                                    title:(NSString *)title
+                                   active:(BOOL)isActive {
+    @try {
+        XCBRect xcbRect = [titlebar windowRect];
+        NSSize titlebarSize = NSMakeSize(xcbRect.size.width, xcbRect.size.height);
+        if (titlebarSize.width < 1 || titlebarSize.height < 1) {
+            return NO;
+        }
+
+        NSImage *titlebarImage = [[NSImage alloc] initWithSize:titlebarSize];
+        [titlebarImage lockFocus];
+
+        BOOL compositorActive = [[URSCompositingManager sharedManager] compositingActive];
+        NSRect fullRect = NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height);
+        if (compositorActive) {
+            [[NSColor clearColor] set];
+            NSRectFillUsingOperation(fullRect, NSCompositeCopy);
+        }
+
+        NSColor *bg1 = isActive ? [NSColor colorWithCalibratedWhite:0.83 alpha:1.0]
+                                 : [NSColor colorWithCalibratedWhite:0.92 alpha:1.0];
+        NSColor *bg2 = isActive ? [NSColor colorWithCalibratedWhite:0.63 alpha:1.0]
+                                 : [NSColor colorWithCalibratedWhite:0.83 alpha:1.0];
+        NSGradient *bgGradient = [[NSGradient alloc] initWithStartingColor:bg1 endingColor:bg2];
+        [bgGradient drawInRect:fullRect angle:-90];
+
+        BOOL showClose = NO;
+        if (clientWindow && [clientWindow canClose]) {
+            ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[titlebar connection]];
+            if ([icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow]) {
+                showClose = YES;
+            }
+        }
+
+        xcb_window_t tbId = [titlebar window];
+        BOOL isTitlebarHovered = (tbId == hoveredTitlebarWindow);
+        BOOL closeHovered = isTitlebarHovered && hoveredButtonIndex == 0;
+
+        CGFloat closeWidth = 0;
+        if (showClose) {
+            NSRect closeFrame = NSMakeRect(0, 0, titlebarSize.height, titlebarSize.height);
+            [URSThemeIntegration drawEdgeButtonInRect:closeFrame
+                                             position:TitleBarButtonPositionLeft
+                                           buttonType:0
+                                               active:isActive
+                                              hovered:closeHovered];
+            if (isActive || closeHovered) {
+                NSColor *ic = [URSThemeIntegration iconColorForActive:isActive highlighted:closeHovered];
+                CGFloat inset = MAX(2.0, titlebarSize.height * 0.22);
+                NSRect iconRect = NSInsetRect(closeFrame, inset, inset);
+                [URSThemeIntegration drawCloseIconInRect:iconRect withColor:ic];
+            }
+            closeWidth = titlebarSize.height;
+        }
+
+        // Title, scaled down with the titlebar (never larger than a normal
+        // titlebar's font, never below a legible floor).  Centered on the
+        // FULL window width - like a normal titlebar's title, which does
+        // not re-center itself around whichever edge holds its buttons -
+        // not in the space to the right of the close button.  When the
+        // centered text would overlap the button (a very narrow palette),
+        // it is truncated symmetrically (a middle ellipsis) rather than
+        // shifted off-center, so the visible remainder stays centered.
+        if (title.length > 0) {
+            CGFloat fontSize = MAX(6.0, MIN(11.0, titlebarSize.height * 0.62));
+            NSFont *font = [NSFont systemFontOfSize:fontSize];
+            NSColor *textColor = isActive ? [NSColor blackColor]
+                                           : [NSColor colorWithCalibratedWhite:0.4 alpha:1.0];
+            NSMutableParagraphStyle *centerStyle = [[NSMutableParagraphStyle alloc] init];
+            [centerStyle setAlignment:NSCenterTextAlignment];
+            [centerStyle setLineBreakMode:NSLineBreakByTruncatingMiddle];
+            NSDictionary *attrs = @{ NSFontAttributeName: font,
+                                      NSForegroundColorAttributeName: textColor,
+                                      NSParagraphStyleAttributeName: centerStyle };
+
+            CGFloat margin = 4.0;
+            CGFloat centerX = titlebarSize.width / 2.0;
+            // The tightest symmetric half-width around the window's own
+            // center that still clears the button - the right side has
+            // only the plain margin to clear, the left side also has the
+            // button, so the left distance is always the binding one.
+            CGFloat halfWidth = centerX - (closeWidth + margin);
+            if (halfWidth > 2.0) {
+                NSSize textSize = [title sizeWithAttributes:attrs];
+                CGFloat ty = (titlebarSize.height - textSize.height) / 2.0;
+                if (textSize.width <= 2.0 * halfWidth) {
+                    // Fits without truncation - draw at its natural size,
+                    // still centered on the full width.
+                    [title drawAtPoint:NSMakePoint(centerX - textSize.width / 2.0, ty)
+                         withAttributes:attrs];
+                } else {
+                    NSRect drawRect = NSMakeRect(centerX - halfWidth, ty,
+                                                  2.0 * halfWidth, textSize.height);
+                    [title drawInRect:drawRect withAttributes:attrs];
+                }
+            }
+        }
+
+        // Read the pixels while the image is focused: -TIFFRepresentation
+        // would add the bitmap to the reused image and serve that stale
+        // bitmap on every later render.
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithFocusedViewRect:
+                                       NSMakeRect(0, 0, titlebarSize.width, titlebarSize.height)];
+        [titlebarImage unlockFocus];
+
+        return [self transferBitmap:bitmap toPixmap:[titlebar pixmap] onTitlebar:titlebar];
+    } @catch (NSException *exception) {
+        NSLog(@"URSThemeIntegration: utility titlebar render failed: %@", exception.reason);
+        return NO;
+    }
+}
+
 #pragma mark - GSTheme Titlebar Rendering
 
 // The image a titlebar is rendered into before its pixels go to the X
@@ -853,6 +979,17 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 + (BOOL)renderGSThemeTitlebar:(XCBTitleBar*)titlebar
                         title:(NSString*)title
                        active:(BOOL)isActive {
+
+    XCBWindow *earlyParentFrame = [titlebar parentWindow];
+    if ([earlyParentFrame isKindOfClass:[XCBFrame class]]) {
+        XCBWindow *earlyClientWindow = [(XCBFrame *)earlyParentFrame childWindowForKey:ClientWindow];
+        if ([earlyClientWindow isUtilityPanel]) {
+            return [self renderUtilityTitlebarForTitlebar:titlebar
+                                              clientWindow:earlyClientWindow
+                                                     title:title
+                                                    active:isActive];
+        }
+    }
 
     if (![[URSThemeIntegration sharedInstance] enabled] || !titlebar) {
         return NO;
@@ -1217,8 +1354,16 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 
     // Get corner radius — zero corner pixels for compositor transparency.
+    // Utility panels keep square corners (no rounding at all).
     CGFloat topR = 0;
-    if (compositorActive) {
+    BOOL isUtilityTitlebar = NO;
+    {
+        XCBWindow *cornerParentFrame = [titlebar parentWindow];
+        if ([cornerParentFrame isKindOfClass:[XCBFrame class]]) {
+            isUtilityTitlebar = [[(XCBFrame *)cornerParentFrame childWindowForKey:ClientWindow] isUtilityPanel];
+        }
+    }
+    if (compositorActive && !isUtilityTitlebar) {
         GSTheme *theme = [GSTheme theme];
         if ([theme respondsToSelector:@selector(titlebarCornerRadius)])
             topR = [theme titlebarCornerRadius];
@@ -1375,6 +1520,15 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             return NO;
         }
         XCBTitleBar *titlebar = (XCBTitleBar*)titlebarWindow;
+
+        XCBWindow *earlyClientWindow = [frame childWindowForKey:ClientWindow];
+        if ([earlyClientWindow isUtilityPanel]) {
+            URS_PROFILE_END(themeRender);
+            return [self renderUtilityTitlebarForTitlebar:titlebar
+                                              clientWindow:earlyClientWindow
+                                                     title:title
+                                                    active:isActive];
+        }
 
         // Get titlebar dimensions - use frame width to ensure titlebar spans full window
         XCBRect titlebarRect = [titlebar windowRect];

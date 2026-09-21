@@ -166,14 +166,28 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     [self setMinHeightHint: sizeHints ? sizeHints->min_height : 0];
     [self setMinWidthHint: sizeHints ? sizeHints->min_width : 0];
 
+    BOOL isUtilityPanel = [aClientWindow isUtilityPanel];
+
     // Enforce an absolute minimum client area so windows can never collapse
     // to just the titlebar height. Clients that don't set WM_NORMAL_HINTS
     // get minHeightHint=0 which previously caused uint32_t underflows
     // in the resize functions and allowed 0-height client areas.
-    if (minHeightHint < WM_MIN_CLIENT_HEIGHT)
-        minHeightHint = WM_MIN_CLIENT_HEIGHT;
-    if (minWidthHint < WM_MIN_CLIENT_WIDTH)
-        minWidthHint = WM_MIN_CLIENT_WIDTH;
+    // Utility panels (palettes) are exempt: a control strip may legitimately
+    // be smaller than 100x100, so only guard against an actual zero size.
+    if (isUtilityPanel)
+    {
+        if (minHeightHint < 1)
+            minHeightHint = 1;
+        if (minWidthHint < 1)
+            minWidthHint = 1;
+    }
+    else
+    {
+        if (minHeightHint < WM_MIN_CLIENT_HEIGHT)
+            minHeightHint = WM_MIN_CLIENT_HEIGHT;
+        if (minWidthHint < WM_MIN_CLIENT_WIDTH)
+            minWidthHint = WM_MIN_CLIENT_WIDTH;
+    }
 
     // Respect ICCCM WM_NORMAL_HINTS: if min == max for both dimensions, treat as non-resizable
     if (sizeHints != NULL &&
@@ -188,7 +202,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    titleHeight = [settings heightForUtility:isUtilityPanel];
 
     [self updateClientBorder];
 
@@ -344,7 +358,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
 
-    uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t height = [settings heightForUtility:[clientWindow isUtilityPanel]];
 
     XCBCreateWindowTypeRequest* request = [[XCBCreateWindowTypeRequest alloc] initForWindowType:XCBTitleBarRequest];
     [request setDepth:depth];
@@ -552,7 +566,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
      * match the rendered titlebar even after a GSScaleFactor change (which
      * re-frames windows but must not leave the cached titleHeight stale). */
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    titleHeight = [settings heightForUtility:[[self childWindowForKey:ClientWindow] isUtilityPanel]];
 
     /*** width ***/
 
@@ -910,6 +924,27 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     return YES;
 }
 
+// Overrides XCBWindow's plain raise-to-top so the palette-above-document
+// invariant holds no matter which of the many call sites raised this frame
+// (map, a ConfigureRequest with stack_mode Above, _NET_ACTIVE_WINDOW,
+// click-to-front, unminimize...) instead of having to find and patch each
+// one to remember to call it. Only fires for a NORMAL (non-utility) frame:
+// an isAbove panel raising itself must not re-trigger this for every
+// sibling panel, which reassertAboveFramesForPid: already re-raises in one
+// pass and would otherwise be repeated once per panel for no benefit.
+- (void)stackAbove
+{
+    [super stackAbove];
+
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    if (client && ![client isAbove]) {
+        uint32_t pid = [client pid];
+        if (pid > 0) {
+            [[self connection] reassertAboveFramesForPid:pid];
+        }
+    }
+}
+
 - (void)clearShapeMasks
 {
     // Remove any XShape bounding mask from the frame and titlebar windows so that
@@ -932,6 +967,14 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
 - (void)applyRoundedCornersShapeMask
 {
+    // Utility panels (palettes) keep square corners - never round them,
+    // in any mode (compositor ARGB corner-zeroing is skipped separately
+    // in URSThemeIntegration transferImage:toPixmap:onTitlebar:).
+    if ([[self childWindowForKey:ClientWindow] isUtilityPanel]) {
+        [self clearShapeMasks];
+        return;
+    }
+
     BOOL cornersShaped = [self applyCornerShapes];
     [self applyClientShapeOverCorners:cornersShaped];
 }
@@ -1573,7 +1616,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     // tracked frame ends up desynced from the real window.
     XCBRect rect = [self windowRect];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t height = [settings heightForUtility:[clientWindow isUtilityPanel]];
 
     // While shaded the frame is clipped to the titlebar, so its cached rect
     // height is tiny.  Reporting that clipped height to the client would make
@@ -1619,7 +1662,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     if (!clientWindow) return;
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t titleHgt = [settings heightForUtility:[clientWindow isUtilityPanel]];
 
     // Use the static helper with explicit dimensions (same as manual resize)
     sendSyntheticConfigureNotify([connection connection], clientWindow,
@@ -1647,7 +1690,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     xcb_connection_t *conn = [connection connection];
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t titleHgt = [settings heightForUtility:[clientWindow isUtilityPanel]];
 
     // Calculate child window dimensions (same as manual resize functions)
     XCBRect titleBarRect = XCBMakeRect(XCBMakePoint(0, 0),
@@ -1717,7 +1760,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 - (uint16_t)shadedFrameHeight
 {
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t titleHgt = [settings heightForUtility:[[self childWindowForKey:ClientWindow] isUtilityPanel]];
     settings = nil;
     return titleHgt + (uint16_t)self.clientBorder;
 }

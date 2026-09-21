@@ -122,6 +122,18 @@ static const NSTimeInterval URSZoomAnimationDuration = 0.22;
         frame = (XCBFrame *)[titlebar parentWindow];
     }
 
+    // Utility panels always draw a single fixed-size close square (see
+    // URSThemeIntegration renderUtilityTitlebarForTitlebar:), not the
+    // theme's normal button layout - hit-test that fixed layout instead
+    // of asking the theme, so clicks land where the pixels actually are.
+    XCBWindow *clientWindow = frame ? [frame childWindowForKey:ClientWindow] : nil;
+    if ([clientWindow isUtilityPanel]) {
+        CGFloat h = titlebarRect.size.height;
+        NSRect closeFrame = NSMakeRect(0, 0, h, h);
+        return NSPointInRect(point, closeFrame) ? GSThemeTitleBarButtonClose
+                                                  : GSThemeTitleBarButtonNone;
+    }
+
     NSInteger index = [URSThemeIntegration buttonIndexAtPoint:point
                                                  titlebarSize:NSMakeSize(titlebarRect.size.width,
                                                                          titlebarRect.size.height)
@@ -418,11 +430,25 @@ static const NSTimeInterval URSZoomAnimationDuration = 0.22;
         XCBRect titlebarRect = [titlebar windowRect];
         NSSize titlebarSize = NSMakeSize(frameRect.size.width, titlebarRect.size.height);
 
-        NSInteger newButtonIndex =
-            [URSThemeIntegration buttonIndexAtPoint:NSMakePoint(motionEvent->event_x,
-                                                                motionEvent->event_y)
-                                       titlebarSize:titlebarSize
-                                              frame:frame];
+        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+        NSInteger newButtonIndex;
+        if ([clientWindow isUtilityPanel]) {
+            // The compact utility titlebar always draws a single fixed
+            // close square (see renderUtilityTitlebarForTitlebar:), not the
+            // theme's normal button layout - compute hover the same fixed
+            // way so the highlight lines up with the pixels actually drawn.
+            CGFloat h = titlebarRect.size.height;
+            NSRect closeFrame = NSMakeRect(0, 0, h, h);
+            newButtonIndex = NSPointInRect(NSMakePoint(motionEvent->event_x,
+                                                        motionEvent->event_y),
+                                            closeFrame) ? 0 : -1;
+        } else {
+            newButtonIndex =
+                [URSThemeIntegration buttonIndexAtPoint:NSMakePoint(motionEvent->event_x,
+                                                                    motionEvent->event_y)
+                                           titlebarSize:titlebarSize
+                                                  frame:frame];
+        }
 
         xcb_window_t prevTitlebar = [URSThemeIntegration hoveredTitlebarWindow];
         NSInteger prevButtonIndex = [URSThemeIntegration hoveredButtonIndex];
