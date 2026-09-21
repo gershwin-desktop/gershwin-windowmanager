@@ -871,39 +871,46 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         self.desktopBgPixmap = XCB_NONE;
     }
 
-    NSString *prefsPath = [@"~/Library/Preferences/org.gnustep.Workspace.plist" stringByExpandingTildeInPath];
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:prefsPath];
-    NSDictionary *dskinfo = [prefs objectForKey:@"desktopinfo"];
-
     // Default color from GNUstep workspace
     self.desktopBgRed = 0.372;
     self.desktopBgGreen = 0.403;
     self.desktopBgBlue = 0.439;
 
-    if (!dskinfo) {
-        NSLog(@"[Compositor] Desktop background: no desktopinfo in preferences, using default color");
-        self.desktopBgLoaded = YES;
-        return;
-    }
+    NSString *imagePath = nil;
+    /* Workspace keeps every window geometry it ever saved in this file, so
+       parsing it makes about a hundred thousand objects.  They are let go
+       before the image is decoded, so the two peaks do not add up in a heap
+       that keeps its high-water mark. */
+    @autoreleasepool {
+        NSString *prefsPath = [@"~/Library/Preferences/org.gnustep.Workspace.plist" stringByExpandingTildeInPath];
+        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:prefsPath];
+        NSDictionary *dskinfo = [prefs objectForKey:@"desktopinfo"];
 
-    NSDictionary *backcolor = [dskinfo objectForKey:@"backcolor"];
-    if (backcolor) {
-        self.desktopBgRed = [[backcolor objectForKey:@"red"] doubleValue];
-        self.desktopBgGreen = [[backcolor objectForKey:@"green"] doubleValue];
-        self.desktopBgBlue = [[backcolor objectForKey:@"blue"] doubleValue];
-    }
+        if (!dskinfo) {
+            NSLog(@"[Compositor] Desktop background: no desktopinfo in preferences, using default color");
+            self.desktopBgLoaded = YES;
+            return;
+        }
 
-    if (![[dskinfo objectForKey:@"usebackimage"] boolValue]) {
-        NSLog(@"[Compositor] Desktop background: using solid color");
-        self.desktopBgLoaded = YES;
-        return;
-    }
+        NSDictionary *backcolor = [dskinfo objectForKey:@"backcolor"];
+        if (backcolor) {
+            self.desktopBgRed = [[backcolor objectForKey:@"red"] doubleValue];
+            self.desktopBgGreen = [[backcolor objectForKey:@"green"] doubleValue];
+            self.desktopBgBlue = [[backcolor objectForKey:@"blue"] doubleValue];
+        }
 
-    NSString *imagePath = [dskinfo objectForKey:@"imagepath"];
-    if (!imagePath) {
-        NSLog(@"[Compositor] Desktop background: no image path configured, using solid color");
-        self.desktopBgLoaded = YES;
-        return;
+        if (![[dskinfo objectForKey:@"usebackimage"] boolValue]) {
+            NSLog(@"[Compositor] Desktop background: using solid color");
+            self.desktopBgLoaded = YES;
+            return;
+        }
+
+        imagePath = [[dskinfo objectForKey:@"imagepath"] copy];
+        if (!imagePath) {
+            NSLog(@"[Compositor] Desktop background: no image path configured, using solid color");
+            self.desktopBgLoaded = YES;
+            return;
+        }
     }
 
     @autoreleasepool {
@@ -924,9 +931,15 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
                 fromRect:NSZeroRect
                operation:NSCompositeCopy
                 fraction:1.0];
+        /* Read the pixels back directly: -TIFFRepresentation does the same
+           read and then encodes a TIFF that would only be decoded again,
+           two more full-screen copies at once. */
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc]
+          initWithFocusedViewRect:NSMakeRect(0, 0, outW, outH)];
         [scaled unlockFocus];
-
-        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithData:[scaled TIFFRepresentation]];
+        // Neither is needed any more; free them before the upload buffer.
+        image = nil;
+        scaled = nil;
         if (!bitmap) {
             NSLog(@"[Compositor] Desktop background: bitmap conversion failed");
             self.desktopBgLoaded = YES;

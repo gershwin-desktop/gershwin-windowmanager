@@ -50,6 +50,9 @@
 #import "URSThemeIntegration.h"
 #import "GSThemeTitleBar.h"
 #import "URSWindowSwitcher.h"
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 @interface URSHybridEventHandler ()
 // Read end of the pipe a termination signal writes to; -1 while unset.
@@ -304,6 +307,24 @@ static CGFloat WMLastScaleFactor = 1.0;
     // Setup keyboard grabbing for Alt-Tab
     [self.keyboardManager setupKeyboardGrabbing];
     [self.overviewController setUp];
+
+    /* Loading the desktop background and decorating every window go
+       through tens of megabytes that are freed again, some of them only
+       when the launch autorelease pool drains after this method; the heap
+       is trimmed on the next pass of the run loop. */
+    [self performSelector:@selector(releaseFreedHeapMemory)
+               withObject:nil
+               afterDelay:0];
+}
+
+- (void)releaseFreedHeapMemory
+{
+#ifdef __GLIBC__
+    /* glibc gives memory back only from the top of the heap, so the freed
+       pages below a surviving object stay resident for the life of the
+       process.  The allocators of the BSDs return such pages on their own. */
+    malloc_trim(0);
+#endif
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
