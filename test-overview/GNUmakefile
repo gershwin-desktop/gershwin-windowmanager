@@ -6,7 +6,7 @@ include $(GNUSTEP_MAKEFILES)/common.make
 
 GNUSTEP_OBJ_DIR=./obj
 
-TEST_TOOL_NAME =  overviewlayout
+TEST_TOOL_NAME =  overviewlayout windowlistfilter
 
 ADDITIONAL_CPPFLAGS += -I$(GNUSTEP_MAKEFILES)/TestFramework
 
@@ -22,6 +22,7 @@ ADDITIONAL_OBJCCFLAGS += -Wno-deprecated
 
 
 overviewlayout_OBJC_FILES=overviewlayout.m
+windowlistfilter_OBJC_FILES=windowlistfilter.m
 
 -include GNUmakefile.preamble
 -include make-check.mak

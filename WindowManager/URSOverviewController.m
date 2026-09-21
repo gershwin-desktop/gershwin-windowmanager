@@ -6,6 +6,7 @@
 
 #import "URSOverviewController.h"
 #import "URSOverviewLayout.h"
+#import "URSWindowListFilter.h"
 #import "URSOverviewTitleLabel.h"
 #import "URSCompositingManager.h"
 #import "URSFocusManager.h"
@@ -238,8 +239,14 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
             continue;
         }
         XCBFrame *frame = window;
-        if (frame.needDestroy ||
-            ![[frame childWindowForKey:TitleBar] isKindOfClass:[XCBTitleBar class]] ||
+        // Palettes float above their document and stay out of the way of
+        // the user's eye on purpose; showing them here would just clutter
+        // the overview with windows that are not meant to be switched to.
+        BOOL hasTitlebar = [[frame childWindowForKey:TitleBar] isKindOfClass:[XCBTitleBar class]];
+        BOOL isUtilityPanel = [[frame childWindowForKey:ClientWindow] isUtilityPanel];
+        if (![URSWindowListFilter includesFrameNeedingDestroy:frame.needDestroy
+                                                   hasTitlebar:hasTitlebar
+                                                isUtilityPanel:isUtilityPanel] ||
             [self.windowSwitcher isWindowMinimized:frame]) {
             continue;
         }

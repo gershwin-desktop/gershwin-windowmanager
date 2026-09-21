@@ -28,6 +28,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSAttentionHopEffect.m \
 		URSOverviewLayout.m \
 		URSOverviewController.m \
+		URSWindowListFilter.m \
 		URSOverviewTitleLabel.m \
 		URSWobblyModel.m \
 		URSTriangleSpans.m \

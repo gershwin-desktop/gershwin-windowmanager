@@ -10,6 +10,7 @@
 #import "XCBTypes.h"
 #import "URSAttentionHopEffect.h"
 #import "URSFocusManager.h"
+#import "URSWindowListFilter.h"
 
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
@@ -107,18 +108,21 @@ NSString * const URSHopOnWindowSwitchKey = @"URSHopOnWindowSwitch";
                 
                 // Check if the frame has a titlebar (managed window)
                 XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
-                if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
-                    if (!frame.needDestroy) {
-                        BOOL isMinimized = [self isWindowMinimized:frame];
-                        NSString *title = [self getTitleForFrame:frame];
-                        
-                        URSWindowEntry *entry = [[URSWindowEntry alloc] initWithFrame:frame
-                                                                         wasMinimized:isMinimized
-                                                                                title:title];
-                        // Fetch the app icon
-                        entry.icon = [self getIconForFrame:frame];
-                        [validEntries addObject:entry];
-                    }
+                // Palettes are auxiliary to their document window and are
+                // meant to stay out of the switcher entirely, the same way
+                // they are excluded from the F9 overview.
+                if ([URSWindowListFilter includesFrameNeedingDestroy:frame.needDestroy
+                                                          hasTitlebar:[titlebarWindow isKindOfClass:[XCBTitleBar class]]
+                                                       isUtilityPanel:[[frame childWindowForKey:ClientWindow] isUtilityPanel]]) {
+                    BOOL isMinimized = [self isWindowMinimized:frame];
+                    NSString *title = [self getTitleForFrame:frame];
+
+                    URSWindowEntry *entry = [[URSWindowEntry alloc] initWithFrame:frame
+                                                                     wasMinimized:isMinimized
+                                                                            title:title];
+                    // Fetch the app icon
+                    entry.icon = [self getIconForFrame:frame];
+                    [validEntries addObject:entry];
                 }
             }
         }
