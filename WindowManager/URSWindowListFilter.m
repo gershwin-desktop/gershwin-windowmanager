@@ -14,4 +14,10 @@
     return !needDestroy && hasTitlebar && !isUtilityPanel;
 }
 
++ (BOOL)isManagedUtilityPanelNeedingDestroy:(BOOL)needDestroy
+                                 hasTitlebar:(BOOL)hasTitlebar
+                              isUtilityPanel:(BOOL)isUtilityPanel {
+    return !needDestroy && hasTitlebar && isUtilityPanel;
+}
+
 @end

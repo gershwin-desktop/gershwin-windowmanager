@@ -19,4 +19,11 @@
                          hasTitlebar:(BOOL)hasTitlebar
                       isUtilityPanel:(BOOL)isUtilityPanel;
 
+// The complement: a live, fully decorated utility panel - the ones excluded
+// above.  The F9 overview uses this to find the palettes it must fade out of
+// its own scene instead of laying them into the grid.
++ (BOOL)isManagedUtilityPanelNeedingDestroy:(BOOL)needDestroy
+                                 hasTitlebar:(BOOL)hasTitlebar
+                              isUtilityPanel:(BOOL)isUtilityPanel;
+
 @end

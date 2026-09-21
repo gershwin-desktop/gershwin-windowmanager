@@ -69,6 +69,11 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 @property (strong, nonatomic) NSDictionary *items;
 // Menu bar, Dock and other dock-type windows, faded out while it is open.
 @property (strong, nonatomic) NSSet *dockWindows;
+// Utility panels (palettes) excluded from the grid, faded out the same way
+// as the dock windows so they do not clutter the overview; restored the
+// instant it closes, since they are never part of self.items and so never
+// get relaid out or moved.
+@property (strong, nonatomic) NSSet *utilityPanelWindows;
 @property (strong, nonatomic) URSOverviewItem *selectedItem;
 @property (assign, nonatomic) BOOL open;
 @property (assign, nonatomic) double fromProgress;
@@ -318,6 +323,28 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     return docks;
 }
 
+// Palettes are excluded from the grid (collectItems) but stay on screen at
+// their normal spot, still above their document per the raise rule; fading
+// them out here keeps the overview free of windows the user did not ask to
+// overview, the same way it already clears the Menu bar and Dock away.
+- (NSSet *)collectUtilityPanelWindows {
+    NSMutableSet *panels = [NSMutableSet set];
+    for (id window in [[self.connection windowsMap] allValues]) {
+        if (![window isKindOfClass:[XCBFrame class]]) {
+            continue;
+        }
+        XCBFrame *frame = window;
+        BOOL hasTitlebar = [[frame childWindowForKey:TitleBar] isKindOfClass:[XCBTitleBar class]];
+        BOOL isUtilityPanel = [[frame childWindowForKey:ClientWindow] isUtilityPanel];
+        if ([URSWindowListFilter isManagedUtilityPanelNeedingDestroy:frame.needDestroy
+                                                          hasTitlebar:hasTitlebar
+                                                       isUtilityPanel:isUtilityPanel]) {
+            [panels addObject:@([frame window])];
+        }
+    }
+    return panels;
+}
+
 - (void)layOutItems:(NSArray *)items {
     XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
     NSRect area = NSMakeRect(0, 0, [screen width], [screen height]);
@@ -396,6 +423,7 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     }
     self.items = byFrame;
     self.dockWindows = [self collectDockWindows];
+    self.utilityPanelWindows = [self collectUtilityPanelWindows];
     self.selectedItem = nil;
     self.open = YES;
     self.fromProgress = 0.0;
@@ -450,6 +478,7 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     }
     self.items = nil;
     self.dockWindows = nil;
+    self.utilityPanelWindows = nil;
     self.selectedItem = nil;
     [self.compositingManager setPresentation:nil];
 }
@@ -468,7 +497,13 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 }
 
 - (double)opacityForWindow:(xcb_window_t)windowId {
-    return [self.dockWindows containsObject:@(windowId)] ? 1.0 - [self progress] : 1.0;
+    // Palettes fade with the Menu bar and Dock: hidden from the overview's
+    // own scene without ever being unmapped, so they reappear exactly as
+    // they were - including mid-fade, if a document is picked before the
+    // fade-out finishes - the instant progress heads back to 0.
+    BOOL fadesOut = [self.dockWindows containsObject:@(windowId)] ||
+                    [self.utilityPanelWindows containsObject:@(windowId)];
+    return fadesOut ? 1.0 - [self progress] : 1.0;
 }
 
 - (double)backdropDimming {
