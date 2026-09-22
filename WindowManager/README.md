@@ -64,7 +64,8 @@ defaults write WindowManager URSOverviewHotCorner top-left
 defaults write WindowManager URSWobblyWindows YES
 ```
 
-The overview settings take effect when the window manager starts.
+The overview and Show Desktop settings take effect when the window manager
+starts.
 
 - `URSOverviewEnabled` (default `YES`): F9 shows every window on the
   screen side by side, shrunk, over a darkened desktop; the menu bar, the
@@ -77,6 +78,18 @@ The overview settings take effect when the window manager starts.
 - `URSOverviewHotCorner` (default `none`): `top-left`, `top-right`,
   `bottom-left` or `bottom-right` opens and closes the window overview
   when the pointer is pushed into that screen corner.
+- `URSShowDesktopEnabled` (default `YES`): F11 slides every window out
+  over the nearest edge of the screen until only a sliver of it is left,
+  so the desktop can be used: icons opened, files dragged. The menu bar
+  and the Dock stay; palettes fade out. F11 again brings the windows back with the one in
+  front focused again; a click on a sliver brings them back with that one
+  in front; a window becoming active (a new window, the Dock, Alt-Tab)
+  brings them back too. F9 opens the overview over it. Needs compositing.
+- `URSShowDesktopKey` (default `F11`): the X key name of the key that
+  shows the desktop and brings the windows back.
+- `URSShowDesktopHotCorner` (default `none`): `top-left`, `top-right`,
+  `bottom-left` or `bottom-right` does the same when the pointer is pushed
+  into that screen corner.
 - `URSWobblyWindows` (default `NO`): a window dragged by its titlebar
   bends and trails behind the pointer like jelly and wobbles back into
   shape when let go. Needs compositing. Takes effect on the next drag.

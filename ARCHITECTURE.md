@@ -66,6 +66,8 @@ WindowManager/
 ├── URSOverviewController.h/m       Window overview: input, selection
 ├── URSOverviewLayout.h/m           Window overview layout (pure geometry)
 ├── URSOverviewTitleLabel.h/m       Title of the window under the pointer
+├── URSShowDesktopController.h/m    Show Desktop: windows to the edges, slivers
+├── URSShowDesktopLayout.h/m        Show Desktop layout (pure geometry)
 ├── URSGlobalKey.h/m                A key grabbed on the root window
 ├── URSHotCorner.h/m                A screen corner watched for the pointer
 ├── URSPresentationTransition.h/m   Eased 0..1 progress of a presentation

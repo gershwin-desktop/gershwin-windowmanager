@@ -233,6 +233,10 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.overviewController = [[URSOverviewController alloc] initWithConnection:connection
                                                                     focusManager:self.focusManager
                                                                   windowSwitcher:self.windowSwitcher];
+    self.showDesktopController = [[URSShowDesktopController alloc] initWithConnection:connection
+                                                                         focusManager:self.focusManager
+                                                                       windowSwitcher:self.windowSwitcher
+                                                                      workareaManager:self.workareaManager];
 
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -283,6 +287,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         [self initializeCompositing];
         self.titlebarController.compositingManager = self.compositingManager;
         self.overviewController.compositingManager = self.compositingManager;
+        self.showDesktopController.compositingManager = self.compositingManager;
         self.wobblyWindowsController = [[URSWobblyWindowsController alloc] init];
         self.wobblyWindowsController.compositingManager = self.compositingManager;
     }
@@ -307,6 +312,7 @@ static CGFloat WMLastScaleFactor = 1.0;
     // Setup keyboard grabbing for Alt-Tab
     [self.keyboardManager setupKeyboardGrabbing];
     [self.overviewController setUp];
+    [self.showDesktopController setUp];
 
     /* Loading the desktop background and decorating every window go
        through tens of megabytes that are freed again, some of them only
@@ -960,6 +966,7 @@ static CGFloat WMLastScaleFactor = 1.0;
             if (focusInEvent->mode == XCB_NOTIFY_MODE_NORMAL ||
                 focusInEvent->mode == XCB_NOTIFY_MODE_WHILE_GRABBED) {
                 [self handleFocusChange:focusInEvent->event isActive:YES];
+                [self.showDesktopController windowGotFocus:focusInEvent->event];
             }
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 // A raise/lower only changes pixels inside the affected
@@ -981,7 +988,8 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_BUTTON_PRESS: {
             xcb_button_press_event_t *pressEvent = (xcb_button_press_event_t *)event;
-            if ([self.overviewController handleButtonPress:pressEvent]) {
+            if ([self.overviewController handleButtonPress:pressEvent] ||
+                [self.showDesktopController handleButtonPress:pressEvent]) {
                 break;
             }
 
@@ -1030,7 +1038,8 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_BUTTON_RELEASE: {
             xcb_button_release_event_t *releaseEvent = (xcb_button_release_event_t *)event;
-            if ([self.overviewController handleButtonRelease:releaseEvent]) {
+            if ([self.overviewController handleButtonRelease:releaseEvent] ||
+                [self.showDesktopController handleButtonRelease:releaseEvent]) {
                 break;
             }
 
@@ -1078,6 +1087,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_MAP_NOTIFY: {
             xcb_map_notify_event_t *notifyEvent = (xcb_map_notify_event_t *)event;
             [connection handleMapNotify:notifyEvent];
+            [self.showDesktopController windowMapped:notifyEvent->window];
             
             // Notify compositor of map event
             if (self.compositingManager && [self.compositingManager compositingActive]) {
@@ -1188,6 +1198,7 @@ static CGFloat WMLastScaleFactor = 1.0;
             xcb_unmap_notify_event_t *unmapNotifyEvent = (xcb_unmap_notify_event_t *)event;
             xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:unmapNotifyEvent->window];
             [connection handleUnMapNotify:unmapNotifyEvent];
+            [self.showDesktopController windowUnmapped:unmapNotifyEvent->window];
 
             // Notify compositor of unmap event. The compositor will remove the
             // entire logical window group atomically, including decorations,
@@ -1214,6 +1225,7 @@ static CGFloat WMLastScaleFactor = 1.0;
             }
             
             [connection handleDestroyNotify:destroyNotify];
+            [self.showDesktopController windowDestroyed:destroyNotify->window];
             [self.focusManager ensureFocusAfterWindowRemoval:removedClientId];
             break;
         }
@@ -1284,7 +1296,8 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_KEY_PRESS: {
             xcb_key_press_event_t *keyPressEvent = (xcb_key_press_event_t *)event;
-            if ([self.overviewController handleKeyPress:keyPressEvent]) {
+            if ([self.overviewController handleKeyPress:keyPressEvent] ||
+                [self.showDesktopController handleKeyPress:keyPressEvent]) {
                 break;
             }
             [self.keyboardManager handleKeyPress:keyPressEvent];
@@ -1292,7 +1305,8 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_KEY_RELEASE: {
             xcb_key_release_event_t *keyReleaseEvent = (xcb_key_release_event_t *)event;
-            if ([self.overviewController handleKeyRelease:keyReleaseEvent]) {
+            if ([self.overviewController handleKeyRelease:keyReleaseEvent] ||
+                [self.showDesktopController handleKeyRelease:keyReleaseEvent]) {
                 break;
             }
             [self.keyboardManager handleKeyRelease:keyReleaseEvent];
@@ -2558,6 +2572,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         //NSLog(@"[WindowManager] Step 1: Cleaning up keyboard grabs");
         [self.keyboardManager cleanupKeyboardGrabbing];
         [self.overviewController tearDown];
+        [self.showDesktopController tearDown];
         
         // Step 2: Undecorate and restore all client windows
         //NSLog(@"[WindowManager] Step 2: Restoring all client windows");
@@ -2966,6 +2981,7 @@ static CGFloat WMLastScaleFactor = 1.0;
     // Clean up keyboard grabs first
     [self.keyboardManager cleanupKeyboardGrabbing];
     [self.overviewController tearDown];
+    [self.showDesktopController tearDown];
 
     // Remove from run loop if integrated - must match all modes added in setupXCBEventIntegration
     [self teardownXCBEventIntegration];

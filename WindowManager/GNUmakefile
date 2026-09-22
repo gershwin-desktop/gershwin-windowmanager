@@ -34,6 +34,8 @@ $(APP_NAME)_OBJC_FILES = \
 		URSHotCorner.m \
 		URSPresentationTransition.m \
 		URSScreenWindow.m \
+		URSShowDesktopLayout.m \
+		URSShowDesktopController.m \
 		URSWobblyModel.m \
 		URSTriangleSpans.m \
 		URSWobblyWindowsController.m \
