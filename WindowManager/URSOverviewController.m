@@ -6,16 +6,17 @@
 
 #import "URSOverviewController.h"
 #import "URSOverviewLayout.h"
-#import "URSWindowListFilter.h"
 #import "URSOverviewTitleLabel.h"
+#import "URSGlobalKey.h"
+#import "URSHotCorner.h"
+#import "URSPresentationTransition.h"
+#import "URSScreenWindow.h"
 #import "URSCompositingManager.h"
 #import "URSFocusManager.h"
 #import "URSWindowSwitcher.h"
 #import "XCBConnection.h"
 #import "XCBScreen.h"
 #import "XCBFrame.h"
-#import "XCBTitleBar.h"
-#import <X11/Xlib.h>
 #import <X11/keysym.h>
 
 NSString * const URSOverviewEnabledKey = @"URSOverviewEnabled";
@@ -24,31 +25,8 @@ NSString * const URSOverviewHotCornerKey = @"URSOverviewHotCorner";
 
 static const NSTimeInterval URSOverviewTransitionDuration = 0.3;
 static const double URSOverviewBackdropDimming = 0.5;
-static const NSTimeInterval URSHotCornerPollInterval = 0.1;
-// The pointer must leave the corner by this much before it can fire again,
-// or resting against it would open and close the overview in turn.
-static const int16_t URSHotCornerRearmDistance = 8;
 
-static const uint16_t URSLockMasks[] = {
-    0, XCB_MOD_MASK_LOCK, XCB_MOD_MASK_2, XCB_MOD_MASK_LOCK | XCB_MOD_MASK_2
-};
-
-// Ease in and out, so windows neither jump off nor slam into place.
-static double URSOverviewEase(double t) {
-    return t < 0.5 ? 4.0 * t * t * t : 1.0 - pow(-2.0 * t + 2.0, 3.0) * 0.5;
-}
-
-static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
-    return NSMakeRect(NSMinX(from) + (NSMinX(to) - NSMinX(from)) * p,
-                      NSMinY(from) + (NSMinY(to) - NSMinY(from)) * p,
-                      NSWidth(from) + (NSWidth(to) - NSWidth(from)) * p,
-                      NSHeight(from) + (NSHeight(to) - NSHeight(from)) * p);
-}
-
-@interface URSOverviewItem : NSObject
-@property (strong, nonatomic) XCBFrame *frame;
-@property (copy, nonatomic) NSString *title;
-@property (assign, nonatomic) NSRect windowRect;
+@interface URSOverviewItem : URSScreenWindow
 @property (assign, nonatomic) NSRect slot;
 @end
 
@@ -60,11 +38,8 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 @property (weak, nonatomic) URSFocusManager *focusManager;
 @property (weak, nonatomic) URSWindowSwitcher *windowSwitcher;
 @property (assign, nonatomic) xcb_window_t root;
-@property (assign, nonatomic) xcb_keycode_t toggleKeycode;
-@property (strong, nonatomic) NSDictionary *keysymsByKeycode;
-@property (strong, nonatomic) NSTimer *hotCornerTimer;
-@property (copy, nonatomic) NSString *hotCorner;
-@property (assign, nonatomic) BOOL hotCornerArmed;
+@property (strong, nonatomic) URSGlobalKey *toggleKey;
+@property (strong, nonatomic) URSHotCorner *hotCorner;
 // Items by frame id while the overview is open or closing, else nil.
 @property (strong, nonatomic) NSDictionary *items;
 // Menu bar, Dock and other dock-type windows, faded out while it is open.
@@ -76,10 +51,7 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 @property (strong, nonatomic) NSSet *utilityPanelWindows;
 @property (strong, nonatomic) URSOverviewItem *selectedItem;
 @property (assign, nonatomic) BOOL open;
-@property (assign, nonatomic) double fromProgress;
-@property (assign, nonatomic) double toProgress;
-@property (assign, nonatomic) NSTimeInterval transitionStart;
-@property (strong, nonatomic) NSTimer *transitionTimer;
+@property (strong, nonatomic) URSPresentationTransition *transition;
 @property (strong, nonatomic) URSOverviewTitleLabel *titleLabel;
 @end
 
@@ -104,7 +76,9 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
         _focusManager = focusManager;
         _windowSwitcher = windowSwitcher;
         _root = [[[[connection screens] objectAtIndex:0] rootWindow] window];
-        _hotCornerArmed = YES;
+        _transition = [[URSPresentationTransition alloc] initWithDuration:URSOverviewTransitionDuration
+                                                                    target:self
+                                                              closedAction:@selector(transitionClosed:)];
     }
     return self;
 }
@@ -119,110 +93,27 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
         ![self.compositingManager compositingActive]) {
         return;
     }
-    [self readKeyboardMapping];
-    [self grabToggleKey:[defaults stringForKey:URSOverviewKeyKey]];
-
-    self.hotCorner = [defaults stringForKey:URSOverviewHotCornerKey];
-    NSArray *corners = @[@"top-left", @"top-right", @"bottom-left", @"bottom-right"];
-    if ([corners containsObject:self.hotCorner]) {
-        // Polled rather than watched through small windows in the corners:
-        // those would have to be kept above every window raised later.
-        self.hotCornerTimer = [NSTimer scheduledTimerWithTimeInterval:URSHotCornerPollInterval
-                                                               target:self
-                                                             selector:@selector(checkHotCorner:)
-                                                             userInfo:nil
-                                                              repeats:YES];
-    } else if (![self.hotCorner isEqualToString:@"none"]) {
-        NSLog(@"[Overview] ERROR: %@ is %@, expected none, %@",
-              URSOverviewHotCornerKey, self.hotCorner, [corners componentsJoinedByString:@", "]);
-    }
+    self.transition.compositingManager = self.compositingManager;
+    self.toggleKey = [[URSGlobalKey alloc] initWithConnection:self.connection];
+    [self.toggleKey grabKeyNamed:[defaults stringForKey:URSOverviewKeyKey]
+                         setting:URSOverviewKeyKey];
+    self.hotCorner = [[URSHotCorner alloc] initWithConnection:self.connection
+                                                   cornerName:[defaults stringForKey:URSOverviewHotCornerKey]
+                                                      setting:URSOverviewHotCornerKey
+                                                       target:self
+                                                       action:@selector(hotCornerHit:)];
+    [self.hotCorner start];
 }
 
 - (void)tearDown {
-    [self.hotCornerTimer invalidate];
-    self.hotCornerTimer = nil;
-    if (self.toggleKeycode != 0) {
-        xcb_connection_t *conn = [self.connection connection];
-        for (size_t i = 0; i < sizeof(URSLockMasks) / sizeof(URSLockMasks[0]); i++) {
-            xcb_ungrab_key(conn, self.toggleKeycode, self.root, URSLockMasks[i]);
-        }
-        self.toggleKeycode = 0;
-    }
+    [self.hotCorner stop];
+    self.hotCorner = nil;
+    [self.toggleKey ungrab];
+    self.toggleKey = nil;
 }
 
-- (void)readKeyboardMapping {
-    xcb_connection_t *conn = [self.connection connection];
-    const xcb_setup_t *setup = xcb_get_setup(conn);
-    xcb_get_keyboard_mapping_reply_t *reply = xcb_get_keyboard_mapping_reply(conn,
-        xcb_get_keyboard_mapping(conn, setup->min_keycode,
-                                 setup->max_keycode - setup->min_keycode + 1), NULL);
-    if (!reply) {
-        NSLog(@"[Overview] ERROR: could not read the keyboard mapping");
-        return;
-    }
-    xcb_keysym_t *keysyms = xcb_get_keyboard_mapping_keysyms(reply);
-    int length = xcb_get_keyboard_mapping_keysyms_length(reply);
-    NSMutableDictionary *map = [NSMutableDictionary dictionary];
-    for (int i = 0; i < length; i += reply->keysyms_per_keycode) {
-        if (keysyms[i] != XCB_NO_SYMBOL) {
-            map[@(setup->min_keycode + i / reply->keysyms_per_keycode)] = @(keysyms[i]);
-        }
-    }
-    free(reply);
-    self.keysymsByKeycode = map;
-}
-
-- (void)grabToggleKey:(NSString *)keyName {
-    KeySym keysym = XStringToKeysym([keyName UTF8String]);
-    if (keysym == NoSymbol) {
-        NSLog(@"[Overview] ERROR: %@ is %@, which is no X key name", URSOverviewKeyKey, keyName);
-        return;
-    }
-    for (NSNumber *keycode in self.keysymsByKeycode) {
-        if ([self.keysymsByKeycode[keycode] unsignedLongValue] == keysym) {
-            self.toggleKeycode = [keycode unsignedCharValue];
-            break;
-        }
-    }
-    if (self.toggleKeycode == 0) {
-        NSLog(@"[Overview] ERROR: no key on this keyboard sends %@", keyName);
-        return;
-    }
-    xcb_connection_t *conn = [self.connection connection];
-    for (size_t i = 0; i < sizeof(URSLockMasks) / sizeof(URSLockMasks[0]); i++) {
-        xcb_grab_key(conn, 0, self.root, URSLockMasks[i], self.toggleKeycode,
-                     XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC);
-    }
-    [self.connection flush];
-}
-
-#pragma mark - Hot corner
-
-- (void)checkHotCorner:(NSTimer *)timer {
-    xcb_connection_t *conn = [self.connection connection];
-    xcb_query_pointer_reply_t *pointer =
-        xcb_query_pointer_reply(conn, xcb_query_pointer(conn, self.root), NULL);
-    if (!pointer) {
-        return;
-    }
-    XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
-    int16_t maxX = [screen width] - 1;
-    int16_t maxY = [screen height] - 1;
-    int16_t cornerX = [self.hotCorner hasSuffix:@"left"] ? 0 : maxX;
-    int16_t cornerY = [self.hotCorner hasPrefix:@"top"] ? 0 : maxY;
-    int dx = abs(pointer->root_x - cornerX);
-    int dy = abs(pointer->root_y - cornerY);
-    // A drag into the corner (a window, a file) is not a request for the
-    // overview.
-    BOOL buttonDown = (pointer->mask & (XCB_BUTTON_MASK_1 | XCB_BUTTON_MASK_2 | XCB_BUTTON_MASK_3)) != 0;
-    free(pointer);
-
-    if (dx == 0 && dy == 0 && self.hotCornerArmed && !buttonDown) {
-        self.hotCornerArmed = NO;
-        [self toggle];
-    } else if (dx > URSHotCornerRearmDistance || dy > URSHotCornerRearmDistance) {
-        self.hotCornerArmed = YES;
-    }
+- (void)hotCornerHit:(URSHotCorner *)hotCorner {
+    [self toggle];
 }
 
 #pragma mark - Opening and closing
@@ -233,43 +124,6 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     } else {
         [self openOverview];
     }
-}
-
-// The windows the overview shows: the managed ones on the screen.
-- (NSArray *)collectItems {
-    xcb_connection_t *conn = [self.connection connection];
-    NSMutableArray *items = [NSMutableArray array];
-    for (id window in [[self.connection windowsMap] allValues]) {
-        if (![window isKindOfClass:[XCBFrame class]]) {
-            continue;
-        }
-        XCBFrame *frame = window;
-        // Palettes float above their document and stay out of the way of
-        // the user's eye on purpose; showing them here would just clutter
-        // the overview with windows that are not meant to be switched to.
-        BOOL hasTitlebar = [[frame childWindowForKey:TitleBar] isKindOfClass:[XCBTitleBar class]];
-        BOOL isUtilityPanel = [[frame childWindowForKey:ClientWindow] isUtilityPanel];
-        if (![URSWindowListFilter includesFrameNeedingDestroy:frame.needDestroy
-                                                   hasTitlebar:hasTitlebar
-                                                isUtilityPanel:isUtilityPanel] ||
-            [self.windowSwitcher isWindowMinimized:frame]) {
-            continue;
-        }
-        xcb_get_geometry_reply_t *geometry =
-            xcb_get_geometry_reply(conn, xcb_get_geometry(conn, [frame window]), NULL);
-        if (!geometry) {
-            continue;
-        }
-        URSOverviewItem *item = [[URSOverviewItem alloc] init];
-        item.frame = frame;
-        item.title = [self.windowSwitcher getTitleForFrame:frame];
-        item.windowRect = NSMakeRect(geometry->x, geometry->y,
-                                     geometry->width + 2 * geometry->border_width,
-                                     geometry->height + 2 * geometry->border_width);
-        free(geometry);
-        [items addObject:item];
-    }
-    return items;
 }
 
 // The Menu bar and the Dock fade out, so the whole screen is free.
@@ -321,28 +175,6 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     free(cookies);
     free(tree);
     return docks;
-}
-
-// Palettes are excluded from the grid (collectItems) but stay on screen at
-// their normal spot, still above their document per the raise rule; fading
-// them out here keeps the overview free of windows the user did not ask to
-// overview, the same way it already clears the Menu bar and Dock away.
-- (NSSet *)collectUtilityPanelWindows {
-    NSMutableSet *panels = [NSMutableSet set];
-    for (id window in [[self.connection windowsMap] allValues]) {
-        if (![window isKindOfClass:[XCBFrame class]]) {
-            continue;
-        }
-        XCBFrame *frame = window;
-        BOOL hasTitlebar = [[frame childWindowForKey:TitleBar] isKindOfClass:[XCBTitleBar class]];
-        BOOL isUtilityPanel = [[frame childWindowForKey:ClientWindow] isUtilityPanel];
-        if ([URSWindowListFilter isManagedUtilityPanelNeedingDestroy:frame.needDestroy
-                                                          hasTitlebar:hasTitlebar
-                                                       isUtilityPanel:isUtilityPanel]) {
-            [panels addObject:@([frame window])];
-        }
-    }
-    return panels;
 }
 
 - (void)layOutItems:(NSArray *)items {
@@ -408,11 +240,12 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
             return;
         }
         self.open = YES;
-        [self startTransitionTo:1.0];
+        [self.transition runTo:1.0];
         return;
     }
 
-    NSArray *items = [self collectItems];
+    NSArray *items = [URSOverviewItem windowsOnScreenOfConnection:self.connection
+                                                   windowSwitcher:self.windowSwitcher];
     if ([items count] == 0 || ![self grabInput]) {
         return;
     }
@@ -423,13 +256,11 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     }
     self.items = byFrame;
     self.dockWindows = [self collectDockWindows];
-    self.utilityPanelWindows = [self collectUtilityPanelWindows];
+    self.utilityPanelWindows = [URSScreenWindow utilityPanelsOfConnection:self.connection];
     self.selectedItem = nil;
     self.open = YES;
-    self.fromProgress = 0.0;
-    self.toProgress = 0.0;
     [self.compositingManager setPresentation:self];
-    [self startTransitionTo:1.0];
+    [self.transition runTo:1.0];
 }
 
 // frame nil closes without picking a window.
@@ -448,39 +279,15 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
         // Raised before the windows fly back, so the picked one lands on top.
         [self.focusManager activateFrame:frame];
     }
-    [self startTransitionTo:0.0];
+    [self.transition runTo:0.0];
 }
 
-- (double)progress {
-    NSTimeInterval elapsed = [NSDate timeIntervalSinceReferenceDate] - self.transitionStart;
-    double t = MIN(1.0, MAX(0.0, elapsed / URSOverviewTransitionDuration));
-    return self.fromProgress + (self.toProgress - self.fromProgress) * URSOverviewEase(t);
-}
-
-- (void)startTransitionTo:(double)target {
-    self.fromProgress = [self progress];
-    self.toProgress = target;
-    self.transitionStart = [NSDate timeIntervalSinceReferenceDate];
-    [self.transitionTimer invalidate];
-    self.transitionTimer = [NSTimer scheduledTimerWithTimeInterval:URSOverviewTransitionDuration
-                                                            target:self
-                                                          selector:@selector(transitionEnded:)
-                                                          userInfo:nil
-                                                           repeats:NO];
-    [self.compositingManager presentationChanged];
-}
-
-- (void)transitionEnded:(NSTimer *)timer {
-    self.transitionTimer = nil;
-    if (self.toProgress > 0.0) {
-        [self.compositingManager presentationChanged];
-        return;
-    }
+- (void)transitionClosed:(URSPresentationTransition *)transition {
     self.items = nil;
     self.dockWindows = nil;
     self.utilityPanelWindows = nil;
     self.selectedItem = nil;
-    [self.compositingManager setPresentation:nil];
+    [self.compositingManager removePresentation:self];
 }
 
 #pragma mark - URSWindowPresentation
@@ -492,7 +299,7 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     if (!item) {
         return NO;
     }
-    *paintRect = URSInterpolateRect(windowRect, item.slot, [self progress]);
+    *paintRect = URSInterpolateRect(windowRect, item.slot, [self.transition progress]);
     return YES;
 }
 
@@ -503,16 +310,15 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     // fade-out finishes - the instant progress heads back to 0.
     BOOL fadesOut = [self.dockWindows containsObject:@(windowId)] ||
                     [self.utilityPanelWindows containsObject:@(windowId)];
-    return fadesOut ? 1.0 - [self progress] : 1.0;
+    return fadesOut ? 1.0 - [self.transition progress] : 1.0;
 }
 
 - (double)backdropDimming {
-    return URSOverviewBackdropDimming * [self progress];
+    return URSOverviewBackdropDimming * [self.transition progress];
 }
 
 - (BOOL)isAnimating {
-    return [NSDate timeIntervalSinceReferenceDate] - self.transitionStart
-           < URSOverviewTransitionDuration;
+    return [self.transition isAnimating];
 }
 
 #pragma mark - Selection
@@ -594,14 +400,14 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 #pragma mark - Input
 
 - (BOOL)handleKeyPress:(xcb_key_press_event_t *)event {
-    if (event->detail == self.toggleKeycode && self.toggleKeycode != 0) {
+    if (self.toggleKey.keycode != 0 && event->detail == self.toggleKey.keycode) {
         [self toggle];
         return YES;
     }
     if (!self.open) {
         return NO;
     }
-    xcb_keysym_t keysym = [self.keysymsByKeycode[@(event->detail)] unsignedIntValue];
+    xcb_keysym_t keysym = [self.toggleKey keysymForKeycode:event->detail];
     switch (keysym) {
         case XK_Escape:
             [self closeActivating:nil];
@@ -624,7 +430,7 @@ static NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 }
 
 - (BOOL)handleKeyRelease:(xcb_key_release_event_t *)event {
-    return self.open || event->detail == self.toggleKeycode;
+    return self.open || (self.toggleKey.keycode != 0 && event->detail == self.toggleKey.keycode);
 }
 
 - (BOOL)handleButtonPress:(xcb_button_press_event_t *)event {

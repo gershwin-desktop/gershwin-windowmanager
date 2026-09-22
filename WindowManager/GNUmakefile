@@ -30,6 +30,10 @@ $(APP_NAME)_OBJC_FILES = \
 		URSOverviewController.m \
 		URSWindowListFilter.m \
 		URSOverviewTitleLabel.m \
+		URSGlobalKey.m \
+		URSHotCorner.m \
+		URSPresentationTransition.m \
+		URSScreenWindow.m \
 		URSWobblyModel.m \
 		URSTriangleSpans.m \
 		URSWobblyWindowsController.m \

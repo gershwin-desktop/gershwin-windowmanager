@@ -87,6 +87,10 @@ typedef void (^dispatch_block_t)(void);
 // While installed, the presentation decides where windows are painted
 // (nil removes it).  Tell the compositor when its answers change.
 - (void)setPresentation:(id<URSWindowPresentation>)presentation;
+- (id<URSWindowPresentation>)presentation;
+// Removes the presentation only if it is still the one installed: another
+// may have replaced it while it was closing.
+- (void)removePresentation:(id<URSWindowPresentation>)presentation;
 - (void)presentationChanged;
 
 // Play an effect on the window where it stands.  Ignored while the window

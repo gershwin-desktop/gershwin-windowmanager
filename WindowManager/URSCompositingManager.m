@@ -3644,8 +3644,19 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
 #pragma mark - Presentation
 
 - (void)setPresentation:(id<URSWindowPresentation>)presentation {
+    id<URSWindowPresentation> replaced = _presentation;
     _presentation = presentation;
+    if (replaced && replaced != presentation &&
+        [replaced respondsToSelector:@selector(presentationWasReplaced)]) {
+        [replaced presentationWasReplaced];
+    }
     [self presentationChanged];
+}
+
+- (void)removePresentation:(id<URSWindowPresentation>)presentation {
+    if (_presentation == presentation) {
+        [self setPresentation:nil];
+    }
 }
 
 - (void)presentationChanged {

@@ -63,9 +63,13 @@ WindowManager/
 ├── URSWindowEffect.h               Effect played on a window where it stands
 ├── URSAttentionHopEffect.h/m       Hop effect for the window switched to
 ├── URSWindowPresentation.h         Shows windows elsewhere while installed
-├── URSOverviewController.h/m       Window overview: key, hot corner, input
+├── URSOverviewController.h/m       Window overview: input, selection
 ├── URSOverviewLayout.h/m           Window overview layout (pure geometry)
 ├── URSOverviewTitleLabel.h/m       Title of the window under the pointer
+├── URSGlobalKey.h/m                A key grabbed on the root window
+├── URSHotCorner.h/m                A screen corner watched for the pointer
+├── URSPresentationTransition.h/m   Eased 0..1 progress of a presentation
+├── URSScreenWindow.h/m             Decorated windows on the screen, stacked
 ├── URSWindowDeformation.h          Bends a window's picture over a mesh
 ├── URSWobblyModel.h/m              Spring mesh of a wobbly window (pure physics)
 ├── URSTriangleSpans.h/m            Watertight triangle spans for bent windows
