@@ -1928,6 +1928,17 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
             @"_NET_WM_SYNC_REQUEST_COUNTER",
             @"_NET_WM_SYNC_REQUEST",
             @"WM_STATE",                   // Window state - client-specific
+            // ICCCM 4.1.2.5: WM_CLASS names the application instance/class
+            // of a top-level client window, for tools that enumerate an
+            // app's windows (session managers, xdotool/wmctrl -class
+            // lookups). The frame is not that application window; copying
+            // WM_CLASS onto it makes every managed window look like two
+            // windows of the same class to such a tool, and the frame's
+            // geometry includes the titlebar the client's own does not -
+            // a query that resolves the frame instead of the client lands
+            // on the titlebar and reports the WM's own arrow cursor as if
+            // it were the client's.
+            @"WM_CLASS",
             @"WM_CLIENT_MACHINE",
             @"WM_WINDOW_ROLE",             // Client window role
             @"WM_NORMAL_HINTS",            // Size hints - client-specific
@@ -2127,8 +2138,11 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
  * 
  * Also applies atoms to the parent frame window so that interactive xprop clicking
  * on any part of the window (frame or client) will display the EWMH properties.
- * Additionally, copies critical client window properties (WM_CLASS, _NET_WM_NAME, _NET_WM_ICON, etc.)
+ * Additionally, copies critical client window properties (_NET_WM_NAME, _NET_WM_ICON, etc.)
  * from the client to frame window to maintain window property consistency.
+ * WM_CLASS is excluded from this copy (shouldExcludePropertyFromFrameSync): it is
+ * the ICCCM identity of the application's own top-level window, and a tool that
+ * enumerates windows by WM_CLASS must find only the client, not the frame too.
  */
 - (void) initializeClientWindowAtomsForWindow:(XCBWindow*)aWindow
 {
