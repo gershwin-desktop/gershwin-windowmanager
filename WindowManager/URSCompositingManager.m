@@ -1889,6 +1889,12 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     }
     // The id is free for reuse by a window of any class.
     [self.inputOnlyWindows removeObject:@(window)];
+    // ...and by a later window that happens to get the same id: leaving a
+    // shadow radius keyed by this id would give that unrelated window a
+    // corner radius it never asked for. Only set for the overview title
+    // label and window-switcher overlay, but both are created and
+    // destroyed repeatedly over a session, so their ids do get reused.
+    [self.shadowCornerRadii removeObjectForKey:@(window)];
 
     NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:window destroyed:destroyed];
     if ([group count] == 0) {
