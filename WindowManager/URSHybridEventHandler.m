@@ -1223,7 +1223,15 @@ static CGFloat WMLastScaleFactor = 1.0;
             if ([self.workareaManager removeStrutForWindow:destroyNotify->window]) {
                 [self.workareaManager recalculateWorkarea];
             }
-            
+
+            // X recycles client window ids once a connection closes, so a
+            // registration left behind here would attach to whatever
+            // unrelated, later window happens to get the same id - hiding
+            // its zoom button even though it is genuinely resizable (seen
+            // live: a destroyed fixed-size probe window's id was reused by
+            // the next EauTest launch, which then had no zoom button).
+            [URSThemeIntegration unregisterFixedSizeWindow:destroyNotify->window];
+
             [connection handleDestroyNotify:destroyNotify];
             [self.showDesktopController windowDestroyed:destroyNotify->window];
             [self.focusManager ensureFocusAfterWindowRemoval:removedClientId];
