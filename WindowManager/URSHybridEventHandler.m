@@ -1286,6 +1286,16 @@ static CGFloat WMLastScaleFactor = 1.0;
             [self.workareaManager handleStrutPropertyChange:propEvent];
             [self handleWindowTitlePropertyChange:propEvent];
             [connection handlePropertyNotify:propEvent];
+            // Re-evaluate fixed-size status: a client's WM_NORMAL_HINTS can
+            // be published as a placeholder at map time (see
+            // -adjustBorderForFixedSizeWindow:) and corrected afterward once
+            // its real style is known - re-check so a genuinely resizable
+            // window's zoom button reflects that, instead of a stale
+            // snapshot taken before the correction arrived.
+            if ([[[XCBAtomService sharedInstanceWithConnection:connection]
+                    atomNameFromAtom:propEvent->atom] isEqualToString:@"WM_NORMAL_HINTS"]) {
+                [self adjustBorderForFixedSizeWindow:propEvent->window];
+            }
             // App-signal content activity (gershwin-terminal sets this).  Fires
             // regardless of visibility, so it covers WindowShaded windows whose
             // client is clipped and thus emits no X Damage.
@@ -1908,11 +1918,32 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                  xcb_icccm_get_wm_normal_hints([connection connection], clientWindowId),
                                                  &sizeHints,
                                                  NULL)) {
-            if ((sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
+            BOOL isFixedSize = (sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
                 (sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_MAX_SIZE) &&
                 sizeHints.min_width == sizeHints.max_width &&
-                sizeHints.min_height == sizeHints.max_height) {
+                sizeHints.min_height == sizeHints.max_height;
 
+            if (!isFixedSize) {
+                // A client's WM_NORMAL_HINTS can briefly say "fixed size" for
+                // a window that is really resizable - gnustep-back publishes
+                // that as a workaround for window managers that ignore other
+                // non-resizable signals, before the client's real style is
+                // known, and this method is called as early as MapRequest.
+                // Once corrected hints arrive (this method is called again
+                // from the WM_NORMAL_HINTS PropertyNotify handler below),
+                // undo the registration - otherwise a window that was only
+                // ever momentarily fixed-size stayed registered forever,
+                // since nothing else ever reverses it, and Eau's zoom button
+                // (URSThemeIntegration isFixedSizeWindow:) never came back.
+                [URSThemeIntegration unregisterFixedSizeWindow:clientWindowId];
+                XCBWindow *resizableClientW = [connection windowForXCBId:clientWindowId];
+                if (resizableClientW) {
+                    [resizableClientW setCanResize:YES];
+                }
+                return;
+            }
+
+            {
                 //NSLog(@"Fixed-size window %u detected - removing border and extra buttons", clientWindowId);
 
                 // Register as fixed-size window (for button hiding in GSTheme rendering)
