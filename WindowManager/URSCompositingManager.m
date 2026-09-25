@@ -2986,6 +2986,27 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     return r;
 }
 
+/* Is this root child the Menu.app menu bar?  The bar spans the whole screen
+ * at y==0 and is only tens of pixels high, but its width must NOT be
+ * compared for exact equality: Menu.app divides the screen width by
+ * GSScaleFactor and NSWindow multiplies the frame back by the same float32
+ * factor, so at e.g. GSScaleFactor 1.2 the round trip comes out as
+ * 1919.9999999999998 and the X server stores a window 1 pixel narrower than
+ * the screen (Workspace's Desktop window has the same off-by-one).  An
+ * exact match then never finds the bar, so paintWindow: drew the bar's
+ * shadow at the bar's own z-order near the top of the stack and it overlapped
+ * other windows' decorations.  The y and height tests make the window
+ * unambiguous, so allow a few pixels of slack on the width. */
+static inline BOOL URSWindowLooksLikeMenuBar(int16_t y, uint16_t width,
+                                             uint16_t height,
+                                             uint16_t screenWidth) {
+    if (y != 0 || height >= 50) {
+        return NO;
+    }
+    int32_t diff = (int32_t)width - (int32_t)screenWidth;
+    return (diff >= -4 && diff <= 4);
+}
+
 // CPU-side rectangle intersection test (no X round-trip).  Used to skip
 // windows whose extents cannot overlap the repaint region.
 static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
@@ -4061,7 +4082,8 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
         if (!cw) {
             continue;
         }
-        if (!menuCW && cw.y == 0 && cw.width == screenWidth && cw.height < 50) {
+        if (!menuCW && URSWindowLooksLikeMenuBar(cw.y, cw.width, cw.height,
+                                                 screenWidth)) {
             menuCW = cw;
         }
         if (!cw.viewable && !cw.animating) {
@@ -5216,7 +5238,8 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
         }
     }
 
-    BOOL isMenuApp = (cw.y == 0 && cw.width == self.screenWidth && cw.height < 50);
+    BOOL isMenuApp = URSWindowLooksLikeMenuBar(cw.y, cw.width, cw.height,
+                                               self.screenWidth);
     BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
 
     if (animating && cw.deformation && cw.picture != XCB_NONE) {
