@@ -26,7 +26,6 @@ int main(void)
 {
   NSAutoreleasePool *arp = [NSAutoreleasePool new];
 
-  START_SET("utility restack order")
   {
     NSArray *serverOrder = @[ @(note1), @(note2), @(note3) ];
 
