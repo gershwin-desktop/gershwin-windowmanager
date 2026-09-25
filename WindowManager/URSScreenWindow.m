@@ -11,6 +11,16 @@
 #import "XCBScreen.h"
 #import "XCBFrame.h"
 #import "XCBTitleBar.h"
+#import "EWMHService.h"
+
+// A window declares floating level through the same GNUstep attribute a
+// utility panel's style bit lives in; read live rather than cached, since
+// nothing in this file owns the window's lifecycle the way XCBConnection
+// does for isUtilityPanel.
+static BOOL URSScreenWindowIsFloating(XCBConnection *connection, XCBWindow *clientWindow) {
+    return [[EWMHService sharedInstanceWithConnection:connection]
+                clientDeclaresFloatingOrAboveLevel:clientWindow];
+}
 
 static xcb_atom_t URSScreenWindowAtomNamed(xcb_connection_t *conn, const char *name) {
     xcb_intern_atom_reply_t *reply =
@@ -42,11 +52,14 @@ static xcb_atom_t URSScreenWindowAtomNamed(xcb_connection_t *conn, const char *n
             continue;
         }
         XCBFrame *frame = window;
+        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
         BOOL hasTitlebar = [[frame childWindowForKey:TitleBar] isKindOfClass:[XCBTitleBar class]];
-        BOOL isUtilityPanel = [[frame childWindowForKey:ClientWindow] isUtilityPanel];
+        BOOL isUtilityPanel = [clientWindow isUtilityPanel];
+        BOOL isFloatingWindow = URSScreenWindowIsFloating(connection, clientWindow);
         if (![URSWindowListFilter includesFrameNeedingDestroy:frame.needDestroy
                                                    hasTitlebar:hasTitlebar
-                                                isUtilityPanel:isUtilityPanel] ||
+                                                isUtilityPanel:isUtilityPanel
+                                              isFloatingWindow:isFloatingWindow] ||
             [windowSwitcher isWindowMinimized:frame]) {
             continue;
         }
@@ -84,6 +97,27 @@ static xcb_atom_t URSScreenWindowAtomNamed(xcb_connection_t *conn, const char *n
         }
     }
     return panels;
+}
+
++ (NSSet *)floatingWindowsOfConnection:(XCBConnection *)connection {
+    NSMutableSet *floating = [NSMutableSet set];
+    for (id window in [[connection windowsMap] allValues]) {
+        if (![window isKindOfClass:[XCBFrame class]]) {
+            continue;
+        }
+        XCBFrame *frame = window;
+        XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+        BOOL hasTitlebar = [[frame childWindowForKey:TitleBar] isKindOfClass:[XCBTitleBar class]];
+        BOOL isUtilityPanel = [clientWindow isUtilityPanel];
+        BOOL isFloatingWindow = URSScreenWindowIsFloating(connection, clientWindow);
+        if ([URSWindowListFilter isManagedFloatingWindowNeedingDestroy:frame.needDestroy
+                                                             hasTitlebar:hasTitlebar
+                                                          isUtilityPanel:isUtilityPanel
+                                                        isFloatingWindow:isFloatingWindow]) {
+            [floating addObject:@([frame window])];
+        }
+    }
+    return floating;
 }
 
 // Found by their type rather than by name so any panel of that kind gets

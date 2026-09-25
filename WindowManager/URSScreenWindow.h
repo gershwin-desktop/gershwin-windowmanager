@@ -28,6 +28,13 @@
 // presentation fades away rather than leaving them over its scene.
 + (NSSet *)utilityPanelsOfConnection:(XCBConnection *)connection;
 
+// Frame ids (NSNumber) of floating windows the list above also leaves out -
+// Stickies notes and any other client window that asks for
+// NSFloatingWindowLevel without the GNUstep utility style bit.  Distinct
+// from the palette set above: whether a presentation fades these out or
+// leaves them in place is a user choice (URSOverviewUtilityWindowsKey).
++ (NSSet *)floatingWindowsOfConnection:(XCBConnection *)connection;
+
 // Top-level windows typed _NET_WM_WINDOW_TYPE_DOCK (the Menu bar and the
 // Dock), as frame ids (NSNumber), which a presentation fades away so the
 // whole screen is free.

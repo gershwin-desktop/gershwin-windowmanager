@@ -118,12 +118,16 @@ NSString * const URSWindowSwitcherStyleKey = @"URSWindowSwitcherStyle";
                 
                 // Check if the frame has a titlebar (managed window)
                 XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
-                // Palettes are auxiliary to their document window and are
-                // meant to stay out of the switcher entirely, the same way
-                // they are excluded from the F9 overview.
+                XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+                // Palettes and floating windows (Stickies notes) are
+                // auxiliary, not documents to switch to, and are meant to
+                // stay out of the switcher entirely, the same way they are
+                // excluded from the F9 overview.
                 if ([URSWindowListFilter includesFrameNeedingDestroy:frame.needDestroy
                                                           hasTitlebar:[titlebarWindow isKindOfClass:[XCBTitleBar class]]
-                                                       isUtilityPanel:[[frame childWindowForKey:ClientWindow] isUtilityPanel]]) {
+                                                       isUtilityPanel:[clientWindow isUtilityPanel]
+                                                     isFloatingWindow:[[EWMHService sharedInstanceWithConnection:self.connection]
+                                                                           clientDeclaresFloatingOrAboveLevel:clientWindow]]) {
                     BOOL isMinimized = [self isWindowMinimized:frame];
                     NSString *title = [self getTitleForFrame:frame];
 

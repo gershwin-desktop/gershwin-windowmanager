@@ -21,6 +21,12 @@ extern NSString * const URSOverviewKeyKey;
 // String, default "none": the screen corner that opens it when the pointer
 // goes there - "top-left", "top-right", "bottom-left" or "bottom-right".
 extern NSString * const URSOverviewHotCornerKey;
+// String, "hide" or "keep", default "hide": how the overview treats a
+// floating window that is not a GNUstep utility panel - a Stickies note and
+// the like.  "hide" fades it out for the duration of the overview, the same
+// way a utility panel always does; "keep" leaves it untouched in place.
+// Either way it is never laid into the tiled grid (URSWindowListFilter).
+extern NSString * const URSOverviewUtilityWindowsKey;
 
 // The window overview: every window on the screen, shrunk and spread out
 // side by side over a darkened desktop while the Menu bar and Dock fade
