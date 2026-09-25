@@ -12,6 +12,14 @@
 #import "XCBFrame.h"
 #import "XCBTitleBar.h"
 
+static xcb_atom_t URSScreenWindowAtomNamed(xcb_connection_t *conn, const char *name) {
+    xcb_intern_atom_reply_t *reply =
+        xcb_intern_atom_reply(conn, xcb_intern_atom(conn, 1, strlen(name), name), NULL);
+    xcb_atom_t atom = reply ? reply->atom : XCB_NONE;
+    free(reply);
+    return atom;
+}
+
 @implementation URSScreenWindow
 
 + (NSArray *)windowsOnScreenOfConnection:(XCBConnection *)connection
@@ -76,6 +84,47 @@
         }
     }
     return panels;
+}
+
+// Found by their type rather than by name so any panel of that kind gets
+// out of the way.
++ (NSSet *)dockWindowsOfConnection:(XCBConnection *)connection {
+    xcb_connection_t *conn = [connection connection];
+    xcb_window_t root = [[[[connection screens] objectAtIndex:0] rootWindow] window];
+    xcb_atom_t typeAtom = URSScreenWindowAtomNamed(conn, "_NET_WM_WINDOW_TYPE");
+    xcb_atom_t dockAtom = URSScreenWindowAtomNamed(conn, "_NET_WM_WINDOW_TYPE_DOCK");
+    NSMutableSet *docks = [NSMutableSet set];
+    if (typeAtom == XCB_NONE || dockAtom == XCB_NONE) {
+        return docks;
+    }
+    xcb_query_tree_reply_t *tree = xcb_query_tree_reply(conn, xcb_query_tree(conn, root), NULL);
+    if (!tree) {
+        return docks;
+    }
+    xcb_window_t *children = xcb_query_tree_children(tree);
+    int count = xcb_query_tree_children_length(tree);
+    xcb_get_property_cookie_t *cookies = malloc(sizeof(xcb_get_property_cookie_t) * MAX(count, 1));
+    for (int i = 0; i < count; i++) {
+        cookies[i] = xcb_get_property(conn, 0, children[i], typeAtom, XCB_ATOM_ATOM, 0, 16);
+    }
+    for (int i = 0; i < count; i++) {
+        xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, cookies[i], NULL);
+        if (!reply) {
+            continue;
+        }
+        xcb_atom_t *types = xcb_get_property_value(reply);
+        int typeCount = xcb_get_property_value_length(reply) / (int)sizeof(xcb_atom_t);
+        for (int j = 0; j < typeCount; j++) {
+            if (types[j] == dockAtom) {
+                [docks addObject:@(children[i])];
+                break;
+            }
+        }
+        free(reply);
+    }
+    free(cookies);
+    free(tree);
+    return docks;
 }
 
 @end

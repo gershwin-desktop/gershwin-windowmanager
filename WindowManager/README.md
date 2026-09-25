@@ -96,6 +96,15 @@ starts.
 - `URSHopOnWindowSwitch` (default `NO`): the window Alt-Tab switches to
   hops in place to lead the eye to it. Needs compositing. Takes effect
   on the next switch, without restarting the window manager.
+- `URSWindowSwitcherStyle` (default `flow`): how Alt-Tab shows the
+  windows while Alt is held. `flow` flies the windows themselves into a
+  row across the darkened screen, the chosen one big in the middle and
+  the others turned away to both sides; Tab and Shift-Tab slide the row,
+  releasing Alt flies the chosen window back and raises it, Escape flies
+  everything back. Minimized windows are left out of the row. Without
+  compositing, with fewer than two windows on the screen, or with `list`,
+  a strip of application icons and names is shown instead. Takes effect
+  on the next switch.
 
 **Note:** The display number `:1` is what you set for Xephyr. It cannot run on the same display where X11 is already running.
 

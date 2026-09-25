@@ -79,6 +79,8 @@ WindowManager/
 │
 ├── URSWindowSwitcher.h/m           Alt-Tab window switcher logic
 ├── URSWindowSwitcherOverlay.h/m    Window switcher overlay rendering
+├── URSWindowFlowController.h/m     Alt-Tab flow: windows flown into a row
+├── URSFlowLayout.h/m               Alt-Tab flow layout (pure geometry)
 ├── URSSnapPreviewOverlay.h/m       Snap preview overlay rendering
 ├── URSThemeIntegration.h/m         GSTheme titlebar decoration bridge
 └── GSThemeTitleBar.h/m             GSTheme drawing surface adapter

@@ -50,11 +50,12 @@
 #import "URSThemeIntegration.h"
 #import "GSThemeTitleBar.h"
 #import "URSWindowSwitcher.h"
+#import "URSWindowFlowController.h"
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
 
-@interface URSHybridEventHandler ()
+@interface URSHybridEventHandler () <URSXCBEventProcessing>
 // Read end of the pipe a termination signal writes to; -1 while unset.
 @property (assign, nonatomic) int terminationReadFD;
 @end
@@ -224,6 +225,7 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.keyboardManager = [[URSKeyboardManager alloc] initWithConnection:connection
                                                           windowSwitcher:self.windowSwitcher];
     self.keyboardManager.focusManager = self.focusManager;
+    self.keyboardManager.eventProcessor = self;
     self.windowSwitcher.focusManager = self.focusManager;
     self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
     self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
@@ -233,6 +235,8 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.overviewController = [[URSOverviewController alloc] initWithConnection:connection
                                                                     focusManager:self.focusManager
                                                                   windowSwitcher:self.windowSwitcher];
+    self.windowSwitcher.flowController = [[URSWindowFlowController alloc] initWithConnection:connection
+                                                                               windowSwitcher:self.windowSwitcher];
     self.showDesktopController = [[URSShowDesktopController alloc] initWithConnection:connection
                                                                          focusManager:self.focusManager
                                                                        windowSwitcher:self.windowSwitcher
@@ -287,6 +291,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         [self initializeCompositing];
         self.titlebarController.compositingManager = self.compositingManager;
         self.overviewController.compositingManager = self.compositingManager;
+        self.windowSwitcher.flowController.compositingManager = self.compositingManager;
         self.showDesktopController.compositingManager = self.compositingManager;
         self.wobblyWindowsController = [[URSWobblyWindowsController alloc] init];
         self.wobblyWindowsController.compositingManager = self.compositingManager;

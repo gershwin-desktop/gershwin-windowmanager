@@ -3696,6 +3696,20 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     }
 }
 
+- (NSMutableArray *)paintListInPresentationOrder:(NSArray *)paintList {
+    NSMutableArray *ids = [NSMutableArray arrayWithCapacity:[paintList count]];
+    NSMutableDictionary *byId = [NSMutableDictionary dictionaryWithCapacity:[paintList count]];
+    for (URSCompositeWindow *cw in paintList) {
+        [ids addObject:@(cw.windowId)];
+        byId[@(cw.windowId)] = cw;
+    }
+    NSMutableArray *ordered = [NSMutableArray arrayWithCapacity:[paintList count]];
+    for (NSNumber *windowId in [self.presentation paintOrderForWindows:ids]) {
+        [ordered addObject:byId[windowId]];
+    }
+    return ordered;
+}
+
 - (void)presentationChanged {
     if (!self.compositingActive) {
         return;
@@ -4112,6 +4126,9 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
             continue;
         }
         [paintList addObject:cw];
+    }
+    if ([self.presentation respondsToSelector:@selector(paintOrderForWindows:)]) {
+        paintList = [self paintListInPresentationOrder:paintList];
     }
     // Ensure shadow exists before the main loop (paintWindow: skips
     // shadow creation for the Menu.app due to the skip condition).

@@ -36,4 +36,9 @@
 // anything and must let go of whatever it holds without removing the new one.
 - (void)presentationWasReplaced;
 
+// The frame ids (NSNumber) about to be painted, bottom to top; answers the
+// same ids in the order to paint them, for a presentation that shows a
+// window in front of others stacked above it.
+- (NSArray *)paintOrderForWindows:(NSArray *)windowIds;
+
 @end
