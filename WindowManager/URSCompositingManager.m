@@ -14,6 +14,7 @@
 #import "URSTriangleSpans.h"
 #import "URSImageUpload.h"
 #import "URSShapePath.h"
+#import "URSShadowOverrides.h"
 #import "URSProfiler.h"
 #import "XCBScreen.h"
 #import <xcb/xcb.h>
@@ -297,13 +298,13 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 @property (assign, nonatomic) void *shmAddr;
 @property (assign, nonatomic) size_t shmSize;
 
-// Windows that should not have drop shadows rendered (e.g. snap preview overlay)
-@property (strong, nonatomic) NSMutableSet<NSNumber *> *noShadowWindows;
+// Windows without a drop shadow (e.g. snap preview overlay) and shadow
+// corner radii
+@property (strong, nonatomic) URSShadowOverrides *shadowOverrides;
 // Root children that can never be tracked: every paint pass offers each
 // untracked root child to addWindow:, and asking the server about the same
 // InputOnly window again was a round trip per frame.
 @property (strong, nonatomic) NSMutableSet<NSNumber *> *inputOnlyWindows;
-@property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSNumber *> *shadowCornerRadii;
 // Frame window -> @[URSShapePath, client x, client y] of its client's outline
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSArray *> *shapePaths;
 @property (assign, nonatomic) xcb_render_pictformat_t a8Format;
@@ -387,10 +388,8 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 
         _parentFrameCache = [[NSMutableDictionary alloc] init];
         
-        // Initialize no-shadow windows set
-        _noShadowWindows = [[NSMutableSet alloc] init];
+        _shadowOverrides = [[URSShadowOverrides alloc] init];
         _inputOnlyWindows = [[NSMutableSet alloc] init];
-        _shadowCornerRadii = [[NSMutableDictionary alloc] init];
         _shapePaths = [[NSMutableDictionary alloc] init];
 
         // OPTIMIZATION: Initialize MIT-SHM (will be checked during extension query)
@@ -1688,13 +1687,13 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 
 - (void)setSkipShadowForWindow:(xcb_window_t)windowId {
     if (windowId != XCB_NONE) {
-        [self.noShadowWindows addObject:@(windowId)];
+        [self.shadowOverrides setSkipsShadow:YES forWindow:windowId];
     }
 }
 
 - (void)clearSkipShadowForWindow:(xcb_window_t)windowId {
     if (windowId != XCB_NONE) {
-        [self.noShadowWindows removeObject:@(windowId)];
+        [self.shadowOverrides setSkipsShadow:NO forWindow:windowId];
     }
 }
 
@@ -1702,14 +1701,8 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     if (windowId == XCB_NONE) {
         return;
     }
-    NSNumber *key = @(windowId);
-    if ([self.shadowCornerRadii[key] doubleValue] == radius) {
+    if (![self.shadowOverrides setCornerRadius:radius forWindow:windowId]) {
         return;
-    }
-    if (radius > 0) {
-        self.shadowCornerRadii[key] = @(radius);
-    } else {
-        [self.shadowCornerRadii removeObjectForKey:key];
     }
 
     // A shadow built for the previous radius no longer matches the corners.
@@ -1894,7 +1887,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     // corner radius it never asked for. Only set for the overview title
     // label and window-switcher overlay, but both are created and
     // destroyed repeatedly over a session, so their ids do get reused.
-    [self.shadowCornerRadii removeObjectForKey:@(window)];
+    [self.shadowOverrides forgetWindow:window];
 
     NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:window destroyed:destroyed];
     if ([group count] == 0) {
@@ -4268,7 +4261,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
         // rootBuffer are still valid and repainting them is wasted work.
         if (!menuShadowPainted && menuCW
             && menuCW.shadowPicture != XCB_NONE
-            && ![self.noShadowWindows containsObject:@(menuCW.windowId)]) {
+            && ![self.shadowOverrides skipsShadowForWindow:menuCW.windowId]) {
             xcb_rectangle_t menuBBox = [self windowExtentsRect:menuCW];
             if (URSRectIntersects(menuBBox, paintedBBox)) {
                 xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, freshRegion, 0, 0);
@@ -4698,7 +4691,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     }
     
     // Skip shadow for explicitly excluded windows (e.g. snap preview overlay)
-    if ([self.noShadowWindows containsObject:@(cw.windowId)]) {
+    if ([self.shadowOverrides skipsShadowForWindow:cw.windowId]) {
         return;
     }
 
@@ -4744,7 +4737,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
                 // would outline their full transparent rectangle.
                 if (self.wmTypeNotificationAtom != XCB_NONE
                     && atoms[i] == self.wmTypeNotificationAtom) {
-                    [self.noShadowWindows addObject:@(cw.windowId)];
+                    [self.shadowOverrides setSkipsShadow:YES forWindow:cw.windowId];
                     free(typeReply);
                     return;
                 }
@@ -4764,7 +4757,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
                     }
                     free(nameReply);
                     if (isDockPanel) {
-                        [self.noShadowWindows addObject:@(cw.windowId)];
+                        [self.shadowOverrides setSkipsShadow:YES forWindow:cw.windowId];
                         free(typeReply);
                         return;
                     }
@@ -4778,7 +4771,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     // Generate shadow image in memory
     int swidth, sheight;
     uint8_t *shadow_data;
-    double cornerRadius = [self.shadowCornerRadii[@(cw.windowId)] doubleValue];
+    double cornerRadius = [self.shadowOverrides cornerRadiusForWindow:cw.windowId];
     // A window with an outline (a curved edge) casts the shadow of the
     // outline, smooth edges included, not of its rectangle
     NSData *outlineCoverage = [self outlineCoverageForWindow:cw.windowId
@@ -5240,7 +5233,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
 
     BOOL isMenuApp = URSWindowLooksLikeMenuBar(cw.y, cw.width, cw.height,
                                                self.screenWidth);
-    BOOL skipShadow = [self.noShadowWindows containsObject:@(cw.windowId)] || isMenuApp;
+    BOOL skipShadow = [self.shadowOverrides skipsShadowForWindow:cw.windowId] || isMenuApp;
 
     if (animating && cw.deformation && cw.picture != XCB_NONE) {
         xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clipRegion, 0, 0);
