@@ -55,7 +55,7 @@
 #include <malloc.h>
 #endif
 
-@interface URSHybridEventHandler ()
+@interface URSHybridEventHandler () <URSXCBEventProcessing>
 // Read end of the pipe a termination signal writes to; -1 while unset.
 @property (assign, nonatomic) int terminationReadFD;
 @end
@@ -225,6 +225,7 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.keyboardManager = [[URSKeyboardManager alloc] initWithConnection:connection
                                                           windowSwitcher:self.windowSwitcher];
     self.keyboardManager.focusManager = self.focusManager;
+    self.keyboardManager.eventProcessor = self;
     self.windowSwitcher.focusManager = self.focusManager;
     self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
     self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
