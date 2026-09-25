@@ -12,6 +12,8 @@
  * The titlebars the theme integration draws: the set it walks to re-render
  * every titlebar and to find the one an Expose is for.  Foundation only, so
  * its ownership rules can be tested without an X server.
+ *
+ * It does not own the titlebars: one freed with its frame drops out.
  */
 @interface URSTitlebarRegistry : NSObject
 

@@ -8,33 +8,36 @@
 
 @implementation URSTitlebarRegistry
 {
-    NSMutableArray *titlebars;
+    // Weak: a titlebar's frame owns it, and the titlebar points back at that
+    // frame, so a strong reference here kept every closed window alive.
+    NSHashTable *titlebars;
 }
 
 - (instancetype)init
 {
     self = [super init];
     if (self) {
-        titlebars = [[NSMutableArray alloc] init];
+        titlebars = [NSHashTable weakObjectsHashTable];
     }
     return self;
 }
 
 - (void)addTitlebar:(XCBTitleBar *)titlebar
 {
-    if (titlebar != nil && ![titlebars containsObject:titlebar]) {
+    if (titlebar != nil) {
         [titlebars addObject:titlebar];
     }
 }
 
 - (NSUInteger)count
 {
-    return [titlebars count];
+    // Counts only the titlebars that are still alive
+    return [[titlebars allObjects] count];
 }
 
 - (NSArray *)titlebars
 {
-    return [titlebars copy];
+    return [titlebars allObjects];
 }
 
 @end

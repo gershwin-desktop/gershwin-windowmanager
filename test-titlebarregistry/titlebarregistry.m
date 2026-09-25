@@ -35,11 +35,12 @@ int main(void)
   FakeTitlebar *kept = [FakeTitlebar new];
   FakeTitlebar *closed = [FakeTitlebar new];
 
+  // Reading the list may autorelease what it lists, so every read happens
+  // in a pool that is gone before a titlebar is expected to be freed
+  NSAutoreleasePool *inner = [NSAutoreleasePool new];
   [registry addTitlebar: (XCBTitleBar *)kept];
   [registry addTitlebar: (XCBTitleBar *)kept];
   PASS([registry count] == 1, "adding the same titlebar twice registers it once");
-
-  NSAutoreleasePool *inner = [NSAutoreleasePool new];
   [registry addTitlebar: (XCBTitleBar *)closed];
   PASS([registry count] == 2, "a second titlebar is registered");
   [inner release];
