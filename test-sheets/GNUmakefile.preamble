@@ -1,0 +1,6 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+# Sheet placement and the slide are pure geometry, so they are compiled into
+# the tests directly.
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+# The slide effect asks the layout for its curve; one .m is included per test.
+sheetslide_OBJC_FILES += ../WindowManager/URSSheetLayout.m
