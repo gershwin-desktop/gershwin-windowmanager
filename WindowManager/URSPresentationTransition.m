@@ -66,6 +66,14 @@ NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
     [self.compositingManager presentationChanged];
 }
 
+- (void)jumpTo:(double)target {
+    [self.timer invalidate];
+    self.timer = nil;
+    self.fromProgress = target;
+    self.targetProgress = target;
+    [self.compositingManager presentationChanged];
+}
+
 - (void)cancel {
     [self.timer invalidate];
     self.timer = nil;

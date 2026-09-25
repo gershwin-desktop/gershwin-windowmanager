@@ -28,4 +28,9 @@
 // presentation fades away rather than leaving them over its scene.
 + (NSSet *)utilityPanelsOfConnection:(XCBConnection *)connection;
 
+// Top-level windows typed _NET_WM_WINDOW_TYPE_DOCK (the Menu bar and the
+// Dock), as frame ids (NSNumber), which a presentation fades away so the
+// whole screen is free.
++ (NSSet *)dockWindowsOfConnection:(XCBConnection *)connection;
+
 @end

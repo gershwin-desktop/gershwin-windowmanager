@@ -42,6 +42,8 @@ $(APP_NAME)_OBJC_FILES = \
 		URSRenderingContext.m \
 		URSWindowSwitcher.m \
 		URSWindowSwitcherOverlay.m \
+		URSFlowLayout.m \
+		URSWindowFlowController.m \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \
 		URSProfiler.m \

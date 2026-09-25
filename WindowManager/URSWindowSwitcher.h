@@ -25,8 +25,14 @@
 
 // Defaults key (BOOL, default NO): the window switched to hops in place.
 extern NSString * const URSHopOnWindowSwitchKey;
+// Defaults key (string, default "flow"): how Alt-Tab shows the windows -
+// "flow" flies the windows themselves into a row (it needs compositing and
+// two windows on the screen; otherwise, and with "list", a strip of icons
+// and names is shown).
+extern NSString * const URSWindowSwitcherStyleKey;
 
 @class URSFocusManager;
+@class URSWindowFlowController;
 
 @interface URSWindowSwitcher : NSObject
 
@@ -36,6 +42,7 @@ extern NSString * const URSHopOnWindowSwitchKey;
 @property (assign, nonatomic) NSInteger currentIndex;          // Current position during switching
 @property (assign, nonatomic) BOOL isSwitching;               // Whether we're in the middle of switching
 @property (strong, nonatomic) URSWindowSwitcherOverlay *overlay;  // Visual overlay
+@property (strong, nonatomic) URSWindowFlowController *flowController;
 
 // Singleton access
 + (instancetype)sharedSwitcherWithConnection:(XCBConnection *)connection;

@@ -23,6 +23,8 @@
                     closedAction:(SEL)closedAction;
 
 - (void)runTo:(double)target;
+// Goes to target at once, without telling the target object.
+- (void)jumpTo:(double)target;
 // Stops at once without telling the target, for a presentation taken away.
 - (void)cancel;
 

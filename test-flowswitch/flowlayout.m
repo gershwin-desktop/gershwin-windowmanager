@@ -78,12 +78,6 @@ int main(void)
       if (fabs(NSMidY(slotAt(slots, i)) - NSMidY(chosen)) > 0.5) oneRow = NO;
     }
     PASS(oneRow, "all windows sit on one row");
-    PASS(NSMinX(slotAt(slots, 3)) < NSMaxX(chosen)
-         && NSMaxX(slotAt(slots, 3)) > NSMaxX(chosen),
-         "the right neighbour tucks under the chosen window yet shows beside it");
-    PASS(NSMaxX(slotAt(slots, 1)) > NSMinX(chosen)
-         && NSMinX(slotAt(slots, 1)) < NSMinX(chosen),
-         "the left neighbour tucks under the chosen window yet shows beside it");
     NSArray *order = [URSFlowLayout paintOrderForCount: 6 position: 2];
     PASS([order count] == 6, "every window is painted");
     PASS([[order lastObject] unsignedIntegerValue] == 2,
@@ -109,6 +103,16 @@ int main(void)
       NSRect nearer = slotAt(slots, 3 + k - 1);
       if (areaOf(r) > areaOf(nearer) + 0.5) receding = NO;
     }
+    NSRect chosen = slotAt(slots, 3);
+    PASS(NSMinX(slotAt(slots, 4)) < NSMaxX(chosen)
+         && NSMaxX(slotAt(slots, 4)) > NSMaxX(chosen),
+         "the right neighbour tucks under the chosen window yet shows beside it");
+    PASS(NSMaxX(slotAt(slots, 2)) > NSMinX(chosen)
+         && NSMinX(slotAt(slots, 2)) < NSMinX(chosen),
+         "the left neighbour tucks under the chosen window yet shows beside it");
+    PASS(NSMinX(slotAt(slots, 5)) < NSMaxX(slotAt(slots, 4))
+         && NSMaxX(slotAt(slots, 5)) > NSMaxX(slotAt(slots, 4)),
+         "farther windows overlap like a stack of covers");
     PASS(mirrored, "the row is mirrored around the chosen window");
     PASS(receding, "windows get no bigger away from the chosen one");
     PASS(NSHeight(slotAt(slots, 4)) < NSHeight(slotAt(slots, 3)),

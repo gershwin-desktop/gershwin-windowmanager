@@ -50,6 +50,7 @@
 #import "URSThemeIntegration.h"
 #import "GSThemeTitleBar.h"
 #import "URSWindowSwitcher.h"
+#import "URSWindowFlowController.h"
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
@@ -233,6 +234,8 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.overviewController = [[URSOverviewController alloc] initWithConnection:connection
                                                                     focusManager:self.focusManager
                                                                   windowSwitcher:self.windowSwitcher];
+    self.windowSwitcher.flowController = [[URSWindowFlowController alloc] initWithConnection:connection
+                                                                               windowSwitcher:self.windowSwitcher];
     self.showDesktopController = [[URSShowDesktopController alloc] initWithConnection:connection
                                                                          focusManager:self.focusManager
                                                                        windowSwitcher:self.windowSwitcher
@@ -287,6 +290,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         [self initializeCompositing];
         self.titlebarController.compositingManager = self.compositingManager;
         self.overviewController.compositingManager = self.compositingManager;
+        self.windowSwitcher.flowController.compositingManager = self.compositingManager;
         self.showDesktopController.compositingManager = self.compositingManager;
         self.wobblyWindowsController = [[URSWobblyWindowsController alloc] init];
         self.wobblyWindowsController.compositingManager = self.compositingManager;
