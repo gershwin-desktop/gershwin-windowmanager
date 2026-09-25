@@ -39,6 +39,9 @@ WM_COLLABORATORS = \
 	../WindowManager/URSProfiler.m \
 	../WindowManager/URSImageUpload.m \
 	../WindowManager/URSShapePath.m \
+	../WindowManager/URSShadowOverrides.m \
+	../WindowManager/URSTitlebarRegistry.m \
+	../WindowManager/URSFramePacer.m \
 	../WindowManager/GSThemeTitleBar.m \
 	../WindowManager/xcb/XCBConnection.m \
 	../WindowManager/xcb/XCBWindow.m \

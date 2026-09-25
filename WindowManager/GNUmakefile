@@ -48,6 +48,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSImageUpload.m \
 		URSShapePath.m \
 		URSShadowOverrides.m \
+		URSFramePacer.m \
 		URSTitlebarRegistry.m \
 		GSThemeTitleBar.m \
 		xcb/XCBConnection.m \

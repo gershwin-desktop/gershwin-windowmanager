@@ -40,7 +40,7 @@ extern const NSTimeInterval URSFramePacerWaitForPresentation;
 - (void)notePresentationCompleted;
 
 // Forgets the frame in flight, for when the buffers it was presented from
-// are replaced (screen size change, compositing restarted).
+// are destroyed (compositing stopped) and the next start must not wait for it.
 - (void)reset;
 
 @end

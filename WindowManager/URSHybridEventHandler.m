@@ -1527,15 +1527,9 @@ static CGFloat WMLastScaleFactor = 1.0;
     }
 
     uint8_t damageEventBase = [self.compositingManager damageEventBase];
-    uint8_t presentEventBase = [self.compositingManager presentEventBase];
 
-    // X Present extension: vblank-synced composite complete
-    if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_COMPLETE_NOTIFY) {
-        [self.compositingManager handlePresentComplete:event];
-        return;
-    }
-    if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_IDLE_NOTIFY) {
-        [self.compositingManager handlePresentIdle];
+    // Present has no core events; its notifications are generic events.
+    if ([self.compositingManager handlePresentEvent:event]) {
         return;
     }
 

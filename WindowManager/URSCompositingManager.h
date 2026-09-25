@@ -190,12 +190,10 @@ typedef void (^dispatch_block_t)(void);
 
 // A window's bounding shape changed
 - (void)handleShapeNotify:(xcb_window_t)window;
-- (uint8_t)presentEventBase;
 - (uint8_t)randrEventBase;
 
-// X Present extension events (vblank sync)
-- (void)handlePresentComplete:(void *)event;
-- (void)handlePresentIdle;
+// X Present extension events: YES when the event was one (and is handled).
+- (BOOL)handlePresentEvent:(xcb_generic_event_t *)event;
 
 // Redirect a window individually — needed for windows created after the
 // initial redirect_subwindows(root) call which only captures existing

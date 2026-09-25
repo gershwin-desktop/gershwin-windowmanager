@@ -23,6 +23,7 @@
 #import <xcb/render.h>
 #import <xcb/damage.h>
 #import <xcb/present.h>
+#import "URSFramePacer.h"
 #import <xcb/shm.h>
 #import <xcb/randr.h>
 #import <xcb/shape.h>
@@ -34,10 +35,10 @@
 #import <sys/ipc.h>
 #import <math.h>
 
-// Minimum interval between two paint passes (~60 Hz).  Damage arriving
-// faster is coalesced into the next frame instead of triggering an uncapped
-// series of paints.  This applies everywhere; interactive drags previously
-// had this throttle while event-driven paints ran uncapped.
+// Minimum interval between two paint passes (~60 Hz) on a server without
+// the Present extension.  Damage arriving faster is coalesced into the next
+// frame instead of triggering an uncapped series of paints.  With Present,
+// the display's refresh paces painting instead (see URSFramePacer).
 static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 
 // While the window manager starts, every window already on screen is put
@@ -241,7 +242,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 
 // Throttling to prevent excessive recomposites
 @property (assign, nonatomic) BOOL repairScheduled;
-@property (assign, nonatomic) NSTimeInterval lastRepairTime;
+@property (strong, nonatomic) URSFramePacer *framePacer;
 @property (assign, nonatomic) BOOL paintingHeld;
 // 0 until -releasePaintingWhenSettled; the latest time the hold may end.
 @property (assign, nonatomic) NSTimeInterval paintingHoldDeadline;
@@ -276,13 +277,12 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 
 // X Present extension for vblank-synced compositing (flip chain)
 @property (assign, nonatomic) BOOL presentAvailable;
-@property (assign, nonatomic) uint8_t presentEventBase;
+@property (assign, nonatomic) uint8_t presentOpcode;
 @property (assign, nonatomic) xcb_pixmap_t presentPixmap0;
 @property (assign, nonatomic) xcb_pixmap_t presentPixmap1;
 @property (assign, nonatomic) xcb_render_picture_t presentPicture0;
 @property (assign, nonatomic) xcb_render_picture_t presentPicture1;
 @property (assign, nonatomic) int currentPresentIndex;
-@property (assign, nonatomic) BOOL presentInFlight;
 // Damage each flip pixmap is still missing (everything drawn since its last
 // presentation).  Because the two flip pixmaps persist, the final composite
 // into a buffer only needs to cover its own pending region, not the whole
@@ -373,7 +373,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         _allDamage = XCB_NONE;
         _screenRegion = XCB_NONE;
         _repairScheduled = NO;
-        _lastRepairTime = 0;
+        _framePacer = [[URSFramePacer alloc] initWithMinimumInterval:URSMinPaintInterval];
         _repairFrameCounter = 0;
         _stackingDamageScheduled = NO;
         _cwindows = [[NSMutableDictionary alloc] init];
@@ -395,7 +395,6 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         // OPTIMIZATION: Initialize MIT-SHM (will be checked during extension query)
         _shmAvailable = NO;
         _presentAvailable = NO;
-        _presentEventBase = 0;
         _randrEventBase = 0;
         _desktopBgPixmap = XCB_NONE;
         _desktopBgPicture = XCB_NONE;
@@ -409,7 +408,6 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         _presentPicture0 = XCB_NONE;
         _presentPicture1 = XCB_NONE;
         _currentPresentIndex = 0;
-        _presentInFlight = NO;
         _presentPendingDamage0 = XCB_NONE;
         _presentPendingDamage1 = XCB_NONE;
         _shmSeg = XCB_NONE;
@@ -659,10 +657,8 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         const xcb_query_extension_reply_t *present_ext =
             xcb_get_extension_data(conn, &xcb_present_id);
         if (present_ext && present_ext->present) {
-            self.presentEventBase = present_ext->first_event;
+            self.presentOpcode = present_ext->major_opcode;
             self.presentAvailable = YES;
-            //NSLog(@"[CompositingManager] X Present vblank sync available (event base: %u)",
-                  //self.presentEventBase);
         } else {
             //NSLog(@"[CompositingManager] X Present not available — using direct composite");
         }
@@ -1136,6 +1132,14 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
                          0, NULL);
         
         xcb_map_window(conn, self.outputWindow);
+
+        // Being told when each presented frame has reached the screen is
+        // what lets the refresh pace painting; see performRepair.
+        if (self.presentAvailable) {
+            xcb_present_select_input(conn, xcb_generate_id(conn), self.outputWindow,
+                                     XCB_PRESENT_EVENT_MASK_COMPLETE_NOTIFY);
+            self.framePacer.pacedByPresentation = YES;
+        }
         [self.connection flush];
         
         //NSLog(@"[CompositingManager] Overlay window created with output child: overlay=%u, output=%u", 
@@ -3064,22 +3068,27 @@ static inline BOOL URSRectIntersects(xcb_rectangle_t a, xcb_rectangle_t b) {
         return;
     }
 
-    // Frame cap: while the previous paint is younger than one frame
-    // interval, reschedule this pass for the remaining time.  The damage
-    // stays in allDamage so nothing is lost; more damage may accumulate
-    // meanwhile and is painted in the same pass.
+    // Frame cap.  The damage stays in allDamage so nothing is lost; more
+    // damage may accumulate meanwhile and is painted in the same pass.
+    // While a frame waits for the screen, its completion event runs the
+    // next pass (handlePresentEvent:), so nothing is scheduled here.
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-    NSTimeInterval elapsed = now - self.lastRepairTime;
-    if (self.lastRepairTime > 0 && elapsed < URSMinPaintInterval) {
+    NSTimeInterval delay = [self.framePacer delayBeforePaintAt:now];
+    if (delay == URSFramePacerWaitForPresentation) {
+        self.repairScheduled = NO;
+        URS_PROFILE_END(performRepair);
+        return;
+    }
+    if (delay > 0) {
         self.repairScheduled = YES;
         [self performSelector:@selector(performRepair)
                    withObject:nil
-                   afterDelay:(URSMinPaintInterval - elapsed)];
+                   afterDelay:delay];
         URS_PROFILE_END(performRepair);
         return;
     }
 
-    self.lastRepairTime = now;
+    [self.framePacer notePaintAt:now];
 
     // Stepped before the damage is taken, so the area of the new mesh is
     // part of what this pass repaints.
@@ -4291,13 +4300,9 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     if (self.presentAvailable) {
         // Vblank-synced presentation via X Present extension, using a flip
         // chain of 2 persistent pixmaps.  Every paint pass presents exactly
-        // once — gating on CompleteNotify instead made updates skip frames
-        // (paint cadence ≈ vblank period) and could orphan the last burst
-        // of damage until an unrelated later event.  The flip-chain race is
-        // prevented by the frame cap in performRepair: paints are at most
-        // one per frame interval, so the same buffer is always rewritten at
-        // least two intervals after its previous flip completed, while a
-        // flip is scanned out for at most one interval.
+        // once, and the next pass waits for this frame's CompleteNotify
+        // (URSFramePacer), so a buffer is only rewritten after the frame
+        // presented from the other one has reached the screen.
         int idx = self.currentPresentIndex;
         xcb_pixmap_t pixmap = (idx == 0) ? self.presentPixmap0 : self.presentPixmap1;
         xcb_render_picture_t picture = (idx == 0) ? self.presentPicture0 : self.presentPicture1;
@@ -4363,7 +4368,7 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
                           0, 0,
                           0,
                           NULL);
-        self.presentInFlight = YES;
+        [self.framePacer notePresentationQueued];
         [self.connection flush];
     } else {
         // Non-vblank-synced path: direct copy to screen (fallback).
@@ -5707,10 +5712,6 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     }
 }
 
-- (uint8_t)presentEventBase {
-    return _presentEventBase;
-}
-
 - (uint8_t)randrEventBase {
     return _randrEventBase;
 }
@@ -5811,12 +5812,26 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     }
 }
 
-- (void)handlePresentComplete:(void *)event {
-    self.presentInFlight = NO;
-}
-
-- (void)handlePresentIdle {
-    self.presentInFlight = NO;
+- (BOOL)handlePresentEvent:(xcb_generic_event_t *)event {
+    xcb_ge_generic_event_t *ge = (xcb_ge_generic_event_t *)event;
+    if ((event->response_type & ~0x80) != XCB_GE_GENERIC ||
+        !self.presentAvailable || ge->extension != self.presentOpcode) {
+        return NO;
+    }
+    if (ge->event_type == XCB_PRESENT_EVENT_COMPLETE_NOTIFY) {
+        xcb_present_complete_notify_event_t *complete =
+            (xcb_present_complete_notify_event_t *)event;
+        if (complete->window == self.outputWindow &&
+            complete->kind == XCB_PRESENT_COMPLETE_KIND_PIXMAP) {
+            [self.framePacer notePresentationCompleted];
+            // Painting right after the refresh samples every client's newest
+            // frame and leaves a whole refresh period for the paint.
+            if (self.allDamage != XCB_NONE) {
+                [self scheduleRepair];
+            }
+        }
+    }
+    return YES;
 }
 
 #pragma mark - Deactivation & Cleanup
@@ -5935,7 +5950,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
             xcb_xfixes_destroy_region(conn, self.presentPendingDamage1);
             self.presentPendingDamage1 = XCB_NONE;
         }
-        self.presentInFlight = NO;
+        [self.framePacer reset];
         if (self.presentPicture0 != XCB_NONE) {
             xcb_render_free_picture(conn, self.presentPicture0);
             self.presentPicture0 = XCB_NONE;
