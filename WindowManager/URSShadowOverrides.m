@@ -50,6 +50,7 @@
 }
 
 - (void)forgetWindow:(uint32_t)windowId {
+    [_shadowless removeObject:@(windowId)];
     [_cornerRadii removeObjectForKey:@(windowId)];
 }
 

@@ -1882,11 +1882,12 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     }
     // The id is free for reuse by a window of any class.
     [self.inputOnlyWindows removeObject:@(window)];
-    // ...and by a later window that happens to get the same id: leaving a
-    // shadow radius keyed by this id would give that unrelated window a
-    // corner radius it never asked for. Only set for the overview title
-    // label and window-switcher overlay, but both are created and
-    // destroyed repeatedly over a session, so their ids do get reused.
+    // ...and by a later window that happens to get the same id: a shadow
+    // setting left keyed by this id would give that unrelated window a
+    // corner radius it never asked for, or no shadow at all.  The next
+    // client to connect gets a gone client's id base, so its first window
+    // usually reuses the id of the Dock panel or notification overlay that
+    // was shadowless before it.
     [self.shadowOverrides forgetWindow:window];
 
     NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:window destroyed:destroyed];
