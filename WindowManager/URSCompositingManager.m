@@ -2768,8 +2768,15 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         cw.damaged = YES;
     }
 
-    // Flush to ensure damage events are processed
-    [self.connection flush];
+    // No flush here on purpose.  repairWindow: runs once per DamageNotify,
+    // and on a busy client (a scrolling terminal) that is many times a
+    // second; addDamage: above always schedules a repair pass, and the
+    // caller's event loop (URSHybridEventHandler processAvailableXCBEvents)
+    // already flushes once for the whole batch of events it just processed
+    // and then runs performRepairNow synchronously whenever damage is
+    // pending, which flushes again after painting.  A synchronous flush
+    // here defeated that batching and cost one extra xcb_flush() per
+    // damage event instead of one per event burst.
 }
 
 - (void)damageScreen {
