@@ -12,6 +12,7 @@
 #import "XCBTitleBar.h"
 #import "XCBFrame.h"
 #import "ETitleBarColor.h"
+#import "URSTitlebarRegistry.h"
 
 @interface URSThemeIntegration : NSObject
 
@@ -59,7 +60,7 @@
 
 // Configuration
 @property (assign, nonatomic) BOOL enabled;
-@property (strong, nonatomic) NSMutableArray *managedTitlebars;
+@property (strong, nonatomic, readonly) URSTitlebarRegistry *managedTitlebars;
 
 // Fixed-size window tracking (for hiding buttons except close)
 + (void)registerFixedSizeWindow:(xcb_window_t)windowId;

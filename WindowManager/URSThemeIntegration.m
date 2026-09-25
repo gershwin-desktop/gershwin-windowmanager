@@ -749,7 +749,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     self = [super init];
     if (self) {
         self.enabled = YES;
-        self.managedTitlebars = [[NSMutableArray alloc] init];
+        _managedTitlebars = [[URSTitlebarRegistry alloc] init];
         //NSLog(@"GSTheme titlebar integration initialized");
     }
     return self;
@@ -1969,7 +1969,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         return;
     }
 
-    for (XCBTitleBar *titlebar in integration.managedTitlebars) {
+    for (XCBTitleBar *titlebar in [integration.managedTitlebars titlebars]) {
         // Determine if window has keyboard focus by comparing its client
         // window against the focus manager's lastFocusedWindowId.
         XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
@@ -2044,10 +2044,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 
     // Add to managed windows list
-    if (![self.managedTitlebars containsObject:titlebar]) {
-        [self.managedTitlebars addObject:titlebar];
-        //NSLog(@"Added titlebar to GSTheme management: %@", titlebar.windowTitle);
-    }
+    [self.managedTitlebars addTitlebar:titlebar];
 
     // Newly mapped windows almost always become the active (focused) window,
     // so render them as active.  The focus manager will correct them later

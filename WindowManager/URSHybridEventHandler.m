@@ -1840,9 +1840,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
                 // Add to managed list
                 URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
-                if (![integration.managedTitlebars containsObject:titlebar]) {
-                    [integration.managedTitlebars addObject:titlebar];
-                }
+                [integration.managedTitlebars addTitlebar:titlebar];
             } else {
                 //NSLog(@"GSTheme-only decoration failed");
             }
@@ -1865,7 +1863,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         xcb_window_t exposedWindow = exposeEvent->window;
 
         // Check if the exposed window is a titlebar we're managing
-        for (XCBTitleBar *titlebar in integration.managedTitlebars) {
+        for (XCBTitleBar *titlebar in [integration.managedTitlebars titlebars]) {
             if ([titlebar window] == exposedWindow) {
                 // This titlebar was exposed, re-apply GSTheme to override XCBKit redrawing
                 // Find the frame by checking the titlebar's parent window
@@ -2213,9 +2211,7 @@ static CGFloat WMLastScaleFactor = 1.0;
                         if (success) {
                             // Add to managed list so we can handle expose events
                             URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
-                            if (![integration.managedTitlebars containsObject:titlebar]) {
-                                [integration.managedTitlebars addObject:titlebar];
-                            }
+                            [integration.managedTitlebars addTitlebar:titlebar];
 
                             //NSLog(@"Successfully applied GSTheme to titlebar for window %u: %@",
                                   //windowId, titlebar.windowTitle ?: @"(untitled)");
