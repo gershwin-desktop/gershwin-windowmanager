@@ -211,6 +211,14 @@
 // the level): catches a floating panel that never set
 // NSUtilityWindowMask too.
 - (BOOL) clientDeclaresFloatingOrAboveLevel:(XCBWindow*)aWindow;
+
+// YES when the window's own _NET_WM_STATE property lists
+// _NET_WM_STATE_MODAL.  A modal dialog must end up above every other
+// window of its application, including its utility/floating panels, no
+// matter which of them last asked to be raised - reading the live
+// property (rather than caching the flag from a ClientMessage) keeps this
+// correct whether MODAL was set before the first map or added afterwards.
+- (BOOL) windowDeclaresModalState:(XCBWindow*)aWindow;
 - (void) updateNetWmWindowTypeDockForWindow:(XCBWindow*)aWindow;
 - (BOOL) ewmhClientMessage:(NSString*)anAtomMessageName;
 - (void) handleClientMessage:(NSString*)anAtomMessageName forWindow:(XCBWindow*)aWindow data:(xcb_client_message_data_t)someData;

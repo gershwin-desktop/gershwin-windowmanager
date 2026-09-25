@@ -826,6 +826,33 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
     return isFloatingOrAbove;
 }
 
+- (BOOL)windowDeclaresModalState:(XCBWindow *)aWindow
+{
+    if (!aWindow)
+        return NO;
+
+    void *reply = [self getProperty:EWMHWMState
+                        propertyType:XCB_ATOM_ATOM
+                           forWindow:aWindow
+                              delete:NO
+                              length:UINT32_MAX];
+    if (!reply)
+        return NO;
+
+    xcb_atom_t modalAtom = [atomService atomFromCachedAtomsWithKey:EWMHWMStateModal];
+
+    BOOL isModal = NO;
+    int count = xcb_get_property_value_length((xcb_get_property_reply_t *)reply) / sizeof(xcb_atom_t);
+    xcb_atom_t *atoms = (xcb_atom_t *)xcb_get_property_value(reply);
+    for (int i = 0; i < count && !isModal; i++)
+    {
+        if (atoms[i] == modalAtom)
+            isModal = YES;
+    }
+    free(reply);
+    return isModal;
+}
+
 - (void)updateNetWmWindowTypeDockForWindow:(XCBWindow *)aWindow
 {
     xcb_atom_t atom = [atomService atomFromCachedAtomsWithKey:EWMHWMWindowTypeDock];
