@@ -50,6 +50,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSImageUpload.m \
 		URSShapePath.m \
 		URSShadowOverrides.m \
+		URSUtilityRestackOrder.m \
 		URSFramePacer.m \
 		URSTitlebarRegistry.m \
 		GSThemeTitleBar.m \

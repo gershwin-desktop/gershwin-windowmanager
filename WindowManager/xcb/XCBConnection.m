@@ -19,6 +19,7 @@
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
+#import "URSUtilityRestackOrder.h"
 #import <GNUstepGUI/GSTheme.h>
 #import <AppKit/NSColor.h>
 #import <AppKit/NSGraphics.h>
@@ -463,7 +464,61 @@ static XCBConnection *sharedInstance;
              [type isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]]);
 }
 
+// windowIds, reordered to match how the X server currently stacks them
+// (bottom-most first), for feeding into URSUtilityRestackOrder.  A real,
+// queried order - never NSDictionary/NSSet enumeration order - is the
+// only way "keep the other siblings where they were" means anything.
+// Any id not found as a root child (not expected for a mapped top-level
+// window) is appended at the end, in the order it was given, so it is
+// never silently dropped from the restack.
+- (NSArray<NSNumber *> *)currentStackingOrderForWindowIds:(NSArray<NSNumber *> *)windowIds
+{
+    NSMutableSet<NSNumber *> *remaining = [NSMutableSet setWithArray:windowIds];
+    NSMutableArray<NSNumber *> *order = [NSMutableArray arrayWithCapacity:[windowIds count]];
+
+    xcb_window_t rootWin = [[[[self screens] firstObject] rootWindow] window];
+    xcb_query_tree_cookie_t treeCookie = xcb_query_tree(connection, rootWin);
+    xcb_query_tree_reply_t *treeReply = xcb_query_tree_reply(connection, treeCookie, NULL);
+    if (treeReply)
+    {
+        int n = xcb_query_tree_children_length(treeReply);
+        xcb_window_t *kids = xcb_query_tree_children(treeReply);
+        for (int i = 0; i < n; i++)
+        {
+            NSNumber *kidId = @(kids[i]);
+            if ([remaining containsObject:kidId])
+            {
+                [order addObject:kidId];
+                [remaining removeObject:kidId];
+            }
+        }
+        free(treeReply);
+    }
+
+    for (NSNumber *windowId in windowIds)
+    {
+        if ([remaining containsObject:windowId])
+            [order addObject:windowId];
+    }
+
+    return order;
+}
+
+// Most callers have no particular window to favor - they just want the
+// dock/above-state/transient invariants re-asserted after something else
+// changed.  Only a raise ConfigureRequest (stack_mode=Above) knows which
+// window the user actually asked to come out on top.
 - (void)restackDockWindowsAbove
+{
+    [self restackDockWindowsAboveForRaisedWindow:0];
+}
+
+// raisedWindowId: the window whose own ConfigureRequest asked for
+// stack_mode=Above, i.e. the window that must end up topmost among its
+// same-application utility/transient siblings; 0 when this restack was
+// not triggered by such a request, so those siblings just keep whatever
+// order the server already has them in.
+- (void)restackDockWindowsAboveForRaisedWindow:(uint32_t)raisedWindowId
 {
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
     NSString *dockType = [ewmhService EWMHWMWindowTypeDock];
@@ -587,12 +642,39 @@ static XCBConnection *sharedInstance;
 
     // All undecorated (auxiliary) windows of the focused application must
     // stay above their parent after any restack operation.  Broad check:
-    // any window with the same PID that is not itself an XCBFrame.
+    // any window with the same PID that is not itself an XCBFrame.  This
+    // loop runs on EVERY restack (not only a raise request), so several
+    // same-app undecorated siblings (e.g. several Stickies notes) sitting
+    // here too would otherwise have their order reshuffled by dictionary
+    // order on every single focus change/map, undoing the deterministic
+    // order the transient-window loop below works out - same fix, same
+    // reason: never let windowsMap's enumeration order decide.
     if (fpid > 0) {
+        NSMutableDictionary<NSNumber *, XCBWindow *> *auxCandidatesById =
+            [NSMutableDictionary dictionary];
         for (XCBWindow *aWindow in [windowsMap allValues]) {
             if ([aWindow pid] != fpid) continue;
             if ([aWindow isKindOfClass:[XCBFrame class]]) continue;
-            if (![aWindow decorated]) {
+            if ([aWindow decorated]) continue;
+            [auxCandidatesById setObject:aWindow forKey:@([aWindow window])];
+        }
+
+        if ([auxCandidatesById count] > 0) {
+            NSMutableSet<NSNumber *> *auxModalIds = [NSMutableSet set];
+            for (NSNumber *windowIdNumber in [auxCandidatesById allKeys]) {
+                if ([ewmhService windowDeclaresModalState:[auxCandidatesById objectForKey:windowIdNumber]])
+                    [auxModalIds addObject:windowIdNumber];
+            }
+
+            NSArray<NSNumber *> *auxServerOrder =
+                [self currentStackingOrderForWindowIds:[auxCandidatesById allKeys]];
+            NSArray<NSNumber *> *auxRaiseOrder =
+                [URSUtilityRestackOrder raiseOrderForRequestedWindow:raisedWindowId
+                                                 currentStackingOrder:auxServerOrder
+                                                        modalWindowIds:auxModalIds];
+            for (NSNumber *windowIdNumber in auxRaiseOrder) {
+                XCBWindow *aWindow = [auxCandidatesById objectForKey:windowIdNumber];
+                if (!aWindow) continue;
                 [aWindow stackAbove];
                 if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
                 {
@@ -615,6 +697,13 @@ static XCBConnection *sharedInstance;
             [ewmhService EWMHWMWindowTypeSplash],
             nil];
         [self flush];
+
+        // Collect the candidates first rather than raising as we go: two
+        // or more utility windows of the same app (e.g. several Stickies
+        // notes) must come out in a deterministic order, not whatever
+        // order -allValues happens to hand back.
+        NSMutableDictionary<NSNumber *, XCBWindow *> *candidatesById =
+            [NSMutableDictionary dictionary];
         for (XCBWindow *aWindow in [windowsMap allValues]) {
             if (![transientTypes containsObject:[aWindow windowType]]) continue;
             if (fpid == 0 || [aWindow pid] != fpid) continue;
@@ -622,10 +711,35 @@ static XCBConnection *sharedInstance;
             // is nothing to raise at the root level.
             if ([aWindow parentWindow] &&
                 [[aWindow parentWindow] isKindOfClass:[XCBFrame class]]) continue;
-            [aWindow stackAbove];
-            if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
-            {
-                [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+            [candidatesById setObject:aWindow forKey:@([aWindow window])];
+        }
+
+        if ([candidatesById count] > 0) {
+            // A modal dialog blocks the rest of its own application, so it
+            // must never end up buried under a plain utility/floating panel
+            // that happens to raise itself afterwards (found live in
+            // Keychain: its password prompt is DIALOG+MODAL, and its own
+            // utility panel kept stealing the top spot from it here).
+            NSMutableSet<NSNumber *> *modalIds = [NSMutableSet set];
+            for (NSNumber *windowIdNumber in [candidatesById allKeys]) {
+                if ([ewmhService windowDeclaresModalState:[candidatesById objectForKey:windowIdNumber]])
+                    [modalIds addObject:windowIdNumber];
+            }
+
+            NSArray<NSNumber *> *serverOrder =
+                [self currentStackingOrderForWindowIds:[candidatesById allKeys]];
+            NSArray<NSNumber *> *raiseOrder =
+                [URSUtilityRestackOrder raiseOrderForRequestedWindow:raisedWindowId
+                                                 currentStackingOrder:serverOrder
+                                                        modalWindowIds:modalIds];
+            for (NSNumber *windowIdNumber in raiseOrder) {
+                XCBWindow *aWindow = [candidatesById objectForKey:windowIdNumber];
+                if (!aWindow) continue;
+                [aWindow stackAbove];
+                if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+                {
+                    [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+                }
             }
         }
         [self flush];
@@ -2815,7 +2929,10 @@ static XCBConnection *sharedInstance;
         xcb_configure_window(connection, anEvent->window, config_win_mask, config_win_vals);
 
         if (restackDocksAfterConfigure) {
-            [self restackDockWindowsAbove];
+            // anEvent->window itself asked for stack_mode=Above: it is the
+            // one restackDockWindowsAbove must leave on top of its
+            // same-application utility/transient siblings.
+            [self restackDockWindowsAboveForRaisedWindow:anEvent->window];
         }
 
         /* Do NOT send a synthetic ConfigureNotify here.  The
