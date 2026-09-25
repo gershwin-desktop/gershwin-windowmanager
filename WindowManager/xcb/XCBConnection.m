@@ -1360,7 +1360,14 @@ static XCBConnection *sharedInstance;
         [self unregisterWindow:frameWindow];
         XCBTitleBar *titleBar = (XCBTitleBar *) [frameWindow childWindowForKey:TitleBar];
         if (titleBar != nil) {
+            [self unregisterWindow:[titleBar hideWindowButton]];
+            [self unregisterWindow:[titleBar minimizeWindowButton]];
+            [self unregisterWindow:[titleBar maximizeWindowButton]];
             [self unregisterWindow:titleBar];
+            // See the matching comment in -handleDestroyNotify:: without this,
+            // the buttons' -parentWindow back-references keep titleBar (and
+            // through it, frameWindow) retained forever.
+            [titleBar releaseButtons];
         }
         [[frameWindow getChildren] removeAllObjects];
         [frameWindow destroy];
@@ -4607,6 +4614,11 @@ static XCBConnection *sharedInstance;
         [self unregisterWindow:[titleBarWindow minimizeWindowButton]];
         [self unregisterWindow:[titleBarWindow maximizeWindowButton]];
         [self unregisterWindow:titleBarWindow];
+        // Each button's -parentWindow strongly points back at titleBarWindow,
+        // so unregistering them above (which only drops windowsMap's own
+        // reference) does not free titleBarWindow or the frame it in turn
+        // points back at: -releaseButtons breaks that cycle explicitly.
+        [titleBarWindow releaseButtons];
         // Client is going away for good: remove it from the save-set so the
         // X server no longer reparents it if this WM later dies.
         if (clientWindow != nil) {

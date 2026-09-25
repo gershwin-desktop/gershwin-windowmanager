@@ -82,6 +82,11 @@ XCB_EVENT_MASK_KEY_PRESS
 - (void) drawTitleBarComponents;
 - (void) drawTitleBarComponentsPixmaps;
 - (void) generateButtons;
+// Breaks the titlebar<->button retain cycle (each button's -parentWindow
+// strongly points back at this titlebar).  Call from window teardown, not
+// only from -dealloc: as long as any button keeps this titlebar retained,
+// -dealloc itself never runs to release them.
+- (void) releaseButtons;
 - (void) setButtonsAbove:(BOOL)aValue;
 - (void) putButtonsBackgroundPixmaps:(BOOL)aValue;
 

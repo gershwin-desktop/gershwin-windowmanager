@@ -321,11 +321,19 @@ static inline CGFloat ShadeScaleFactor(void)
     return arcs;
 }
 
-- (void) dealloc
+- (void) releaseButtons
 {
     hideWindowButton = nil;
     minimizeWindowButton = nil;
     maximizeWindowButton = nil;
+}
+
+- (void) dealloc
+{
+    // Normally a no-op: -releaseButtons already ran from window teardown.
+    // Kept here as a safety net for the rare titlebar that never went
+    // through that teardown (never mapped, e.g.).
+    [self releaseButtons];
     ewmhService = nil;
 }
 
