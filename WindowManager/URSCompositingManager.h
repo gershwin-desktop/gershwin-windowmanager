@@ -96,6 +96,11 @@ typedef void (^dispatch_block_t)(void);
 // Play an effect on the window where it stands.  Ignored while the window
 // already animates.
 - (void)playEffect:(id<URSWindowEffect>)effect onWindow:(xcb_window_t)windowId;
+// Keeps the window's last picture when its client unmaps it, so that an
+// effect started just before the unmap can play to its end on it (a sheet
+// sliding back under its parent's titlebar).  Costs a named pixmap per
+// window, so it is only for windows that need it.
+- (void)setKeepsContentAfterUnmap:(BOOL)keep forWindow:(xcb_window_t)windowId;
 - (void)animateWindowTransition:(xcb_window_t)windowId
                                                 fromRect:(XCBRect)startRect
                                                     toRect:(XCBRect)endRect

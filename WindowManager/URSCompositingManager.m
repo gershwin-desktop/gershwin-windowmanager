@@ -135,6 +135,11 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // Effect played on the window where it stands (see playEffect:onWindow:);
 // it follows the window's live rect, not the start/end rects.
 @property (strong, nonatomic) id<URSWindowEffect> effect;
+// See setKeepsContentAfterUnmap:forWindow:.  The picture is then made from
+// namedPixmap, which the X server keeps, contents and all, after the
+// window's own backing pixmap is released at unmap.
+@property (assign, nonatomic) BOOL keepsContentAfterUnmap;
+@property (assign, nonatomic) xcb_pixmap_t namedPixmap;
 // Mesh the window's picture is bent over (see setDeformation:forWindow:),
 // and the area it covered when last painted, which must be repainted too.
 @property (strong, nonatomic) id<URSWindowDeformation> deformation;
@@ -1995,6 +2000,10 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         xcb_free_pixmap(conn, cw.snapshotPixmap);
         cw.snapshotPixmap = XCB_NONE;
     }
+    if (cw.namedPixmap != XCB_NONE) {
+        xcb_free_pixmap(conn, cw.namedPixmap);
+        cw.namedPixmap = XCB_NONE;
+    }
 
     // Reset dimensions so windowExtents: falls through to the geometric
     // estimation block.  Without this, unionExtentsForCompositeWindows:
@@ -2476,7 +2485,11 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         cw.viewable = NO;
         cw.damaged = NO;
 
-        if (cw.effect || cw.deformation) {
+        if (cw.effect && cw.keepsContentAfterUnmap && cw.picture != XCB_NONE) {
+            // The effect was started for this very unmap (a window leaving
+            // with an animation); its picture lives on in the named pixmap.
+            cw.closeAnimating = YES;
+        } else if (cw.effect || cw.deformation) {
             // An effect has nothing to show once the window is gone; playing
             // it on would paint the last picture of a window no longer there.
             [self finishAnimationForWindow:cw];
@@ -3430,8 +3443,13 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     URSCompositeWindow *cw = [self findCWindow:windowId];
     // A window that is already animating (restored from the Dock, just born)
     // draws the eye by itself, and the effect must not cut that short.
-    if (!cw || !cw.viewable || cw.animating) {
+    // An effect may replace another one, though: a sheet dismissed while
+    // still sliding out must start sliding back at once.
+    if (!cw || !cw.viewable || (cw.animating && !cw.effect)) {
         return;
+    }
+    if (!cw.animating) {
+        self.activeAnimations += 1;
     }
 
     cw.animationStartRect = XCBInvalidRect;
@@ -3440,10 +3458,20 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     cw.animationDuration = [effect duration];
     cw.animating = YES;
     cw.effect = effect;
-    self.activeAnimations += 1;
 
     [self startAnimationTimerIfNeeded];
     [self scheduleComposite];
+}
+
+- (void)setKeepsContentAfterUnmap:(BOOL)keep forWindow:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw || cw.keepsContentAfterUnmap == keep) {
+        return;
+    }
+    cw.keepsContentAfterUnmap = keep;
+    // The picture has to be remade from (or no longer from) a named pixmap.
+    cw.pictureValid = NO;
+    cw.needsPictureCreation = YES;
 }
 
 static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
@@ -3462,6 +3490,26 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     return XCBMakeRect(XCBMakePoint(x, y),
                        XCBMakeSize((uint16_t)URSClampDouble(w, 1.0, 65535.0),
                                    (uint16_t)URSClampDouble(h, 1.0, 65535.0)));
+}
+
+// The paint clip of a window whose effect limits where it may be seen, or
+// XCB_NONE when it does not; the caller destroys it.
+- (xcb_xfixes_region_t)newEffectClipForWindow:(URSCompositeWindow *)cw
+                                       within:(xcb_xfixes_region_t)region {
+    if (!cw.effect || ![cw.effect respondsToSelector:@selector(clipRectForWindowRect:)]) {
+        return XCB_NONE;
+    }
+    NSRect limit = NSIntersectionRect([cw.effect clipRectForWindowRect:URSWindowRectOf(cw)],
+                                      NSMakeRect(0, 0, self.screenWidth, self.screenHeight));
+    xcb_rectangle_t r = { (int16_t)floor(NSMinX(limit)), (int16_t)floor(NSMinY(limit)),
+                          (uint16_t)ceil(NSWidth(limit)), (uint16_t)ceil(NSHeight(limit)) };
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_xfixes_region_t clip = xcb_generate_id(conn);
+    xcb_xfixes_create_region(conn, clip, NSIsEmptyRect(limit) ? 0 : 1, &r);
+    if (region != XCB_NONE) {
+        xcb_xfixes_intersect_region(conn, clip, region, clip);
+    }
+    return clip;
 }
 
 #pragma mark - Deformation
@@ -4269,9 +4317,15 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
             if (!URSRectIntersects(animBBox, paintedBBox)) {
                 continue;
             }
-            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, freshRegion, 0, 0);
-            [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:freshRegion
+            xcb_xfixes_region_t effectClip = presented ? XCB_NONE
+                : [self newEffectClipForWindow:cw within:freshRegion];
+            xcb_xfixes_region_t clip = effectClip != XCB_NONE ? effectClip : freshRegion;
+            xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clip, 0, 0);
+            [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:clip
                 presentedRect:presented ? &presentedRect : NULL];
+            if (effectClip != XCB_NONE) {
+                xcb_xfixes_destroy_region(conn, effectClip);
+            }
 
             // This window now owns its animation range in the root buffer, so
             // any higher window overlapping it must also be repainted this
@@ -5092,6 +5146,13 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
         destW = NSWidth(*presentedRect);
         destH = NSHeight(*presentedRect);
     } else if (animating && cw.effect) {
+        if (cw.viewable && !cw.damaged && cw.mappedAt > 0 && (now - cw.mappedAt) < 3.0) {
+            // An effect started at map time would move a still empty picture;
+            // it starts over once the client has drawn.
+            cw.animationStart = now;
+            URS_PROFILE_END(paintWindow);
+            return NO;
+        }
         double t = (now - cw.animationStart) / cw.animationDuration;
         if (t >= 1.0) {
             [self finishAnimationForWindow:cw];
@@ -5556,6 +5617,17 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     // content.  The NameWindowPixmap may be a static snapshot that goes stale
     // and produces half-height artifacts when sub-regions are redrawn.
     xcb_drawable_t draw = cw.windowId;
+    if (cw.keepsContentAfterUnmap) {
+        // Named while mapped, the pixmap is the live backing pixmap, so the
+        // picture shows every redraw; renamed whenever the picture is remade
+        // (map, resize), which is when the server swaps the backing pixmap.
+        if (cw.namedPixmap != XCB_NONE) {
+            xcb_free_pixmap(conn, cw.namedPixmap);
+        }
+        cw.namedPixmap = xcb_generate_id(conn);
+        xcb_composite_name_window_pixmap(conn, cw.windowId, cw.namedPixmap);
+        draw = cw.namedPixmap;
+    }
 
     // Find appropriate format for this window's visual
     xcb_render_pictformat_t format = [self findVisualFormat:cw.visual];

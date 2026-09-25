@@ -241,6 +241,7 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                                          focusManager:self.focusManager
                                                                        windowSwitcher:self.windowSwitcher
                                                                       workareaManager:self.workareaManager];
+    self.sheetController = [[URSSheetController alloc] initWithConnection:connection];
 
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -293,6 +294,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         self.overviewController.compositingManager = self.compositingManager;
         self.windowSwitcher.flowController.compositingManager = self.compositingManager;
         self.showDesktopController.compositingManager = self.compositingManager;
+        self.sheetController.compositingManager = self.compositingManager;
         self.wobblyWindowsController = [[URSWobblyWindowsController alloc] init];
         self.wobblyWindowsController.compositingManager = self.compositingManager;
     }
@@ -1100,10 +1102,23 @@ static CGFloat WMLastScaleFactor = 1.0;
                 // Track mapped child windows (e.g., GPU/GL subwindows) to receive damage events
                 [self registerChildWindowsForCompositor:notifyEvent->window depth:2];
             }
+            [self.sheetController windowMapped:notifyEvent->window];
             break;
         }
         case XCB_MAP_REQUEST: {
             xcb_map_request_event_t *mapRequestEvent = (xcb_map_request_event_t *)event;
+
+            if ([self.sheetController handleMapRequest:mapRequestEvent]) {
+                if (self.compositingManager && [self.compositingManager compositingActive]) {
+                    [self.compositingManager registerWindow:mapRequestEvent->window];
+                }
+                // The sheet is what the user answers now; the delay is the
+                // same as for any new window, so its map has been processed.
+                [self performSelector:@selector(focusNewlyMappedWindow:)
+                           withObject:[connection windowForXCBId:mapRequestEvent->window]
+                           afterDelay:0.1];
+                break;
+            }
 
             // Check if this is a dock window with struts
             EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
@@ -1202,6 +1217,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_UNMAP_NOTIFY: {
             xcb_unmap_notify_event_t *unmapNotifyEvent = (xcb_unmap_notify_event_t *)event;
             xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:unmapNotifyEvent->window];
+            [self.sheetController windowWillUnmap:unmapNotifyEvent->window];
             [connection handleUnMapNotify:unmapNotifyEvent];
             [self.showDesktopController windowUnmapped:unmapNotifyEvent->window];
 
@@ -1239,6 +1255,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
             [connection handleDestroyNotify:destroyNotify];
             [self.showDesktopController windowDestroyed:destroyNotify->window];
+            [self.sheetController windowDestroyed:destroyNotify->window];
             [self.focusManager ensureFocusAfterWindowRemoval:removedClientId];
             break;
         }
@@ -1249,6 +1266,9 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_CONFIGURE_REQUEST: {
             xcb_configure_request_event_t *configRequest = (xcb_configure_request_event_t *)event;
+            if ([self.sheetController handleConfigureRequest:configRequest]) {
+                break;
+            }
             [connection handleConfigureWindowRequest:configRequest];
             break;
         }
@@ -1265,7 +1285,8 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_CONFIGURE_NOTIFY: {
             xcb_configure_notify_event_t *configureNotify = (xcb_configure_notify_event_t *)event;
             [connection handleConfigureNotify:configureNotify];
-            
+            [self.sheetController windowConfigured:configureNotify];
+
             // Notify compositor of window resize/move
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager resizeWindow:configureNotify->window 

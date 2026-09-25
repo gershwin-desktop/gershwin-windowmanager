@@ -25,6 +25,7 @@
 #import "URSSnappingMenuController.h"
 #import "URSOverviewController.h"
 #import "URSShowDesktopController.h"
+#import "URSSheetController.h"
 #import "URSWobblyWindowsController.h"
 
 @interface URSHybridEventHandler : NSObject <NSApplicationDelegate, RunLoopEvents>
@@ -60,6 +61,7 @@
 @property (strong, nonatomic) URSOverviewController *overviewController;
 @property (strong, nonatomic) URSShowDesktopController *showDesktopController;
 @property (strong, nonatomic) URSWobblyWindowsController *wobblyWindowsController;
+@property (strong, nonatomic) URSSheetController *sheetController;
 
 // Window manager lifecycle
 - (BOOL)registerAsWindowManager;

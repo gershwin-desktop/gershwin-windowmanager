@@ -36,6 +36,9 @@ $(APP_NAME)_OBJC_FILES = \
 		URSScreenWindow.m \
 		URSShowDesktopLayout.m \
 		URSShowDesktopController.m \
+		URSSheetLayout.m \
+		URSSheetSlideEffect.m \
+		URSSheetController.m \
 		URSWobblyModel.m \
 		URSTriangleSpans.m \
 		URSWobblyWindowsController.m \

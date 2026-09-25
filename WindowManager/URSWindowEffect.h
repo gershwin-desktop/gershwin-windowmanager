@@ -18,8 +18,15 @@
 // (0 at the start, 1 at the end).
 - (NSRect)paintRectAtProgress:(double)t forWindowRect:(NSRect)windowRect;
 
-// Every rect paintRectAtProgress:forWindowRect: can return during the run;
-// the compositor repaints this much on every frame.
+// Every rect paintRectAtProgress:forWindowRect: can return during the run,
+// as far as the clip below lets it be seen; the compositor repaints this
+// much on every frame.
 - (NSRect)reachOfWindowRect:(NSRect)windowRect;
+
+@optional
+// The only part of the screen the window's picture and shadow may cover
+// while the effect runs, for effects that make the window come out from
+// behind something (a sheet from under its parent's titlebar).
+- (NSRect)clipRectForWindowRect:(NSRect)windowRect;
 
 @end
