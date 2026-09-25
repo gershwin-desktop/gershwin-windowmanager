@@ -47,6 +47,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSProfiler.m \
 		URSImageUpload.m \
 		URSShapePath.m \
+		URSTitlebarRegistry.m \
 		GSThemeTitleBar.m \
 		xcb/XCBConnection.m \
 		xcb/XCBWindow.m \
