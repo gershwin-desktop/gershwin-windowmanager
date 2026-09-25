@@ -642,12 +642,39 @@ static XCBConnection *sharedInstance;
 
     // All undecorated (auxiliary) windows of the focused application must
     // stay above their parent after any restack operation.  Broad check:
-    // any window with the same PID that is not itself an XCBFrame.
+    // any window with the same PID that is not itself an XCBFrame.  This
+    // loop runs on EVERY restack (not only a raise request), so several
+    // same-app undecorated siblings (e.g. several Stickies notes) sitting
+    // here too would otherwise have their order reshuffled by dictionary
+    // order on every single focus change/map, undoing the deterministic
+    // order the transient-window loop below works out - same fix, same
+    // reason: never let windowsMap's enumeration order decide.
     if (fpid > 0) {
+        NSMutableDictionary<NSNumber *, XCBWindow *> *auxCandidatesById =
+            [NSMutableDictionary dictionary];
         for (XCBWindow *aWindow in [windowsMap allValues]) {
             if ([aWindow pid] != fpid) continue;
             if ([aWindow isKindOfClass:[XCBFrame class]]) continue;
-            if (![aWindow decorated]) {
+            if ([aWindow decorated]) continue;
+            [auxCandidatesById setObject:aWindow forKey:@([aWindow window])];
+        }
+
+        if ([auxCandidatesById count] > 0) {
+            NSMutableSet<NSNumber *> *auxModalIds = [NSMutableSet set];
+            for (NSNumber *windowIdNumber in [auxCandidatesById allKeys]) {
+                if ([ewmhService windowDeclaresModalState:[auxCandidatesById objectForKey:windowIdNumber]])
+                    [auxModalIds addObject:windowIdNumber];
+            }
+
+            NSArray<NSNumber *> *auxServerOrder =
+                [self currentStackingOrderForWindowIds:[auxCandidatesById allKeys]];
+            NSArray<NSNumber *> *auxRaiseOrder =
+                [URSUtilityRestackOrder raiseOrderForRequestedWindow:raisedWindowId
+                                                 currentStackingOrder:auxServerOrder
+                                                        modalWindowIds:auxModalIds];
+            for (NSNumber *windowIdNumber in auxRaiseOrder) {
+                XCBWindow *aWindow = [auxCandidatesById objectForKey:windowIdNumber];
+                if (!aWindow) continue;
                 [aWindow stackAbove];
                 if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
                 {
