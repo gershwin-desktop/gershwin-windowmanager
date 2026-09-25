@@ -688,11 +688,23 @@ static XCBConnection *sharedInstance;
         }
 
         if ([candidatesById count] > 0) {
+            // A modal dialog blocks the rest of its own application, so it
+            // must never end up buried under a plain utility/floating panel
+            // that happens to raise itself afterwards (found live in
+            // Keychain: its password prompt is DIALOG+MODAL, and its own
+            // utility panel kept stealing the top spot from it here).
+            NSMutableSet<NSNumber *> *modalIds = [NSMutableSet set];
+            for (NSNumber *windowIdNumber in [candidatesById allKeys]) {
+                if ([ewmhService windowDeclaresModalState:[candidatesById objectForKey:windowIdNumber]])
+                    [modalIds addObject:windowIdNumber];
+            }
+
             NSArray<NSNumber *> *serverOrder =
                 [self currentStackingOrderForWindowIds:[candidatesById allKeys]];
             NSArray<NSNumber *> *raiseOrder =
                 [URSUtilityRestackOrder raiseOrderForRequestedWindow:raisedWindowId
-                                                 currentStackingOrder:serverOrder];
+                                                 currentStackingOrder:serverOrder
+                                                        modalWindowIds:modalIds];
             for (NSNumber *windowIdNumber in raiseOrder) {
                 XCBWindow *aWindow = [candidatesById objectForKey:windowIdNumber];
                 if (!aWindow) continue;

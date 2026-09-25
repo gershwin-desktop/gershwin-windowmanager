@@ -843,10 +843,10 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
 
     BOOL isModal = NO;
     int count = xcb_get_property_value_length((xcb_get_property_reply_t *)reply) / sizeof(xcb_atom_t);
-    xcb_atom_t *atoms = (xcb_atom_t *)xcb_get_property_value(reply);
+    xcb_atom_t *stateAtoms = (xcb_atom_t *)xcb_get_property_value(reply);
     for (int i = 0; i < count && !isModal; i++)
     {
-        if (atoms[i] == modalAtom)
+        if (stateAtoms[i] == modalAtom)
             isModal = YES;
     }
     free(reply);
