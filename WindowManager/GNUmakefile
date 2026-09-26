@@ -37,6 +37,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSShowDesktopLayout.m \
 		URSShowDesktopController.m \
 		URSSheetLayout.m \
+		URSAttachmentSlideEffect.m \
 		URSSheetSlideEffect.m \
 		URSSheetController.m \
 		URSAttachmentRegistry.m \

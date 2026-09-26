@@ -4,3 +4,4 @@ GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
 ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
 # The slide effect asks the layout for its curve; one .m is included per test.
 sheetslide_OBJC_FILES += ../WindowManager/URSSheetLayout.m
+sheetslide_OBJC_FILES += ../WindowManager/URSAttachmentSlideEffect.m
