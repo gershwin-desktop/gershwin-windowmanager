@@ -57,6 +57,10 @@ $(APP_NAME)_OBJC_FILES = \
 		URSUtilityRestackOrder.m \
 		URSFramePacer.m \
 		URSTitlebarRegistry.m \
+		URSProjection.m \
+		URSFlipGeometry.m \
+		URSWindowFlipEffect.m \
+		URSCompositingManager+WindowFlip.m \
 		GSThemeTitleBar.m \
 		xcb/XCBConnection.m \
 		xcb/XCBWindow.m \

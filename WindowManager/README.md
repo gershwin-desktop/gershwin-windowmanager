@@ -105,6 +105,11 @@ starts.
   compositing, with fewer than two windows on the screen, or with `list`,
   a strip of application icons and names is shown instead. Takes effect
   on the next switch.
+- `URSWindowFlipEnabled` (default `YES`): "Flip Window" in the titlebar's
+  context menu turns the window over, in perspective, to its plain back;
+  choosing it again turns it back. Only the picture turns: the window
+  stays where it is and keeps working. Needs compositing. Takes effect
+  the next time the menu is opened.
 
 **Note:** The display number `:1` is what you set for Xephyr. It cannot run on the same display where X11 is already running.
 

@@ -5,6 +5,7 @@
  */
 
 #import <Foundation/Foundation.h>
+#import "URSProjection.h"
 
 // A short effect the compositor plays on a window where it stands.  The
 // window itself is never moved or resized: an effect only decides where,
@@ -29,10 +30,23 @@
 // behind something (a sheet from under its parent's titlebar).
 - (NSRect)clipRectForWindowRect:(NSRect)windowRect;
 
-// YES when the effect may cut short an effect still running on the window.
-// Without it a new effect is ignored while one runs, so that repeating an
-// attention effect (an Alt-Tab hop) does not restart it; a sheet dismissed
-// while still sliding in has to start sliding back at once, though.
+// An effect that turns the window in depth rather than moving it: fills in
+// the frame at progress t for a window of this size (borders included), or
+// returns NO when there is nothing to see (the window edge-on).  The
+// compositor then paints through the projection and ignores
+// paintRectAtProgress:forWindowRect:.
+- (BOOL)getProjection:(URSWindowProjection *)projection
+           atProgress:(double)t
+           windowSize:(NSSize)size;
+
+// YES keeps the effect's last frame on screen once it has run, until the
+// window unmaps or another effect replaces it (a window left turned over).
+- (BOOL)holdsFinalFrame;
+
+// YES when the effect may cut short an effect still running or held on the
+// window.  Without it a new effect is ignored meanwhile, so that repeating
+// an attention effect (an Alt-Tab hop) does not restart it; turning a
+// window back while it is still turning over has to start at once, though.
 - (BOOL)replacesRunningEffect;
 
 @end

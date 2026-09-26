@@ -140,6 +140,9 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // window's own backing pixmap is released at unmap.
 @property (assign, nonatomic) BOOL keepsContentAfterUnmap;
 @property (assign, nonatomic) xcb_pixmap_t namedPixmap;
+// An effect that has run but whose last frame stays on screen (a window
+// left turned over); painted while the window does not animate otherwise.
+@property (strong, nonatomic) id<URSWindowEffect> heldEffect;
 // Mesh the window's picture is bent over (see setDeformation:forWindow:),
 // and the area it covered when last painted, which must be repainted too.
 @property (strong, nonatomic) id<URSWindowDeformation> deformation;
@@ -2494,6 +2497,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
             // it on would paint the last picture of a window no longer there.
             [self finishAnimationForWindow:cw];
         }
+        cw.heldEffect = nil;
 
         if (cw.animating) {
             /* Keep resources AND the cached picture alive so a close/shrink
@@ -3445,10 +3449,13 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     // draws the eye by itself, and the effect must not cut that short.
     // Only an effect that says so replaces a running effect (see
     // -replacesRunningEffect); a repeated hop must not restart itself.
-    BOOL replaces = cw.effect != nil
-        && [effect respondsToSelector:@selector(replacesRunningEffect)]
+    // A held effect counts as running: a hop would show the front for a
+    // moment and then snap back to what is held.
+    BOOL mayReplace = [effect respondsToSelector:@selector(replacesRunningEffect)]
         && [effect replacesRunningEffect];
-    if (!cw || !cw.viewable || (cw.animating && !replaces)) {
+    BOOL replaces = cw.effect != nil && mayReplace;
+    if (!cw || !cw.viewable || (cw.animating && !replaces) ||
+        (cw.heldEffect && !mayReplace)) {
         return;
     }
     if (!cw.animating) {
@@ -3461,6 +3468,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     cw.animationDuration = [effect duration];
     cw.animating = YES;
     cw.effect = effect;
+    cw.heldEffect = nil;
 
     [self startAnimationTimerIfNeeded];
     [self scheduleComposite];
@@ -3475,6 +3483,11 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     // The picture has to be remade from (or no longer from) a named pixmap.
     cw.pictureValid = NO;
     cw.needsPictureCreation = YES;
+}
+
+- (id<URSWindowEffect>)effectOnWindow:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    return cw.effect ?: cw.heldEffect;
 }
 
 static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
@@ -3727,6 +3740,103 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     free(source);
     free(shadowDest);
     free(shadowSource);
+}
+
+#pragma mark - Projection
+
+// The back of a turned window: a neutral panel in the window's light grey.
+static const double URSWindowBackFaceGrey = 0.9;
+
+static xcb_render_transform_t URSRenderTransformFromMatrix(URSProjectiveMatrix m) {
+    URSProjectiveMatrix f = URSProjectiveMatrixForFixedPoint(m);
+    xcb_render_transform_t t = {
+        (xcb_render_fixed_t)lround(f.m[0][0] * 65536.0),
+        (xcb_render_fixed_t)lround(f.m[0][1] * 65536.0),
+        (xcb_render_fixed_t)lround(f.m[0][2] * 65536.0),
+        (xcb_render_fixed_t)lround(f.m[1][0] * 65536.0),
+        (xcb_render_fixed_t)lround(f.m[1][1] * 65536.0),
+        (xcb_render_fixed_t)lround(f.m[1][2] * 65536.0),
+        (xcb_render_fixed_t)lround(f.m[2][0] * 65536.0),
+        (xcb_render_fixed_t)lround(f.m[2][1] * 65536.0),
+        (xcb_render_fixed_t)lround(f.m[2][2] * 65536.0),
+    };
+    return t;
+}
+
+// Composites source through mask over area (window-local), one of the two
+// sampled through toPicture.  Source and mask origins are the area's
+// window-local origin, so the map receives window-local screen points and
+// its entries stay small enough for 16.16 fixed point; outside the picture
+// nothing is sampled, which cuts the projected outline out of the area.
+- (void)compositeProjectedSource:(xcb_render_picture_t)source
+                            mask:(xcb_render_picture_t)mask
+                     transformed:(xcb_render_picture_t)transformed
+                       toPicture:(URSProjectiveMatrix)toPicture
+                            area:(NSRect)area
+                        ofWindow:(URSCompositeWindow *)cw {
+    // One more pixel for the filtered edge.
+    NSRect r = NSIntegralRect(NSInsetRect(area, -1.0, -1.0));
+    if (NSIsEmptyRect(r)) {
+        return;
+    }
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_render_set_picture_transform(conn, transformed, URSRenderTransformFromMatrix(toPicture));
+    int16_t x = (int16_t)NSMinX(r);
+    int16_t y = (int16_t)NSMinY(r);
+    xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER, source, mask, self.rootBuffer,
+                         x, y, x, y, (int16_t)(cw.x + x), (int16_t)(cw.y + y),
+                         (uint16_t)NSWidth(r), (uint16_t)NSHeight(r));
+    xcb_render_set_picture_transform(conn, transformed, URSIdentityTransform());
+}
+
+// The window turned in depth: shadow first, in the same plane, then the
+// front (shaded as it turns away) or the back, both cut to the window's
+// outline by its own picture.  XRender divides by w itself, so the
+// perspective is exact, not approximated by triangles.
+- (void)paintProjectedWindow:(URSCompositeWindow *)cw
+                  projection:(const URSWindowProjection *)projection
+                  withShadow:(BOOL)withShadow {
+    xcb_connection_t *conn = [self.connection connection];
+    if (withShadow) {
+        // Filtered only while it is turned: at rest the shadow is copied
+        // pixel for pixel, as everywhere else.
+        const char *bilinear = "bilinear";
+        const char *nearest = "nearest";
+        xcb_render_set_picture_filter(conn, cw.shadowPicture, strlen(bilinear), bilinear, 0, NULL);
+        NSRect shadowFace = NSMakeRect(cw.shadowOffsetX, cw.shadowOffsetY,
+                                       cw.shadowWidth, cw.shadowHeight);
+        URSProjectiveMatrix toShadow = URSProjectiveMatrixMultiply(
+            URSProjectiveMatrixTranslation(-cw.shadowOffsetX, -cw.shadowOffsetY), projection->toFace);
+        [self compositeProjectedSource:cw.shadowPicture
+                                  mask:XCB_NONE
+                           transformed:cw.shadowPicture
+                             toPicture:toShadow
+                                  area:URSProjectiveMatrixMapRectBounds(projection->toScreen, shadowFace)
+                              ofWindow:cw];
+        xcb_render_set_picture_filter(conn, cw.shadowPicture, strlen(nearest), nearest, 0, NULL);
+    }
+
+    // The window picture already filters ("good", bilinear) for the scaled
+    // animations, so it needs no filter change here.
+    NSRect window = NSMakeRect(0.0, 0.0, (double)cw.width + 2.0 * cw.borderWidth,
+                               (double)cw.height + 2.0 * cw.borderWidth);
+    NSRect face = URSProjectiveMatrixMapRectBounds(projection->toScreen, window);
+    if (projection->backFace) {
+        double grey = URSWindowBackFaceGrey * (1.0 - projection->shading);
+        xcb_render_picture_t panel = [self createSolidPicture:grey g:grey b:grey a:1.0];
+        [self compositeProjectedSource:panel mask:cw.picture transformed:cw.picture
+                             toPicture:projection->toFace area:face ofWindow:cw];
+        xcb_render_free_picture(conn, panel);
+        return;
+    }
+    [self compositeProjectedSource:cw.picture mask:XCB_NONE transformed:cw.picture
+                         toPicture:projection->toFace area:face ofWindow:cw];
+    if (projection->shading > 0.001) {
+        xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0 a:projection->shading];
+        [self compositeProjectedSource:veil mask:cw.picture transformed:cw.picture
+                             toPicture:projection->toFace area:face ofWindow:cw];
+        xcb_render_free_picture(conn, veil);
+    }
 }
 
 #pragma mark - Presentation
@@ -5158,9 +5268,13 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
         }
         double t = (now - cw.animationStart) / cw.animationDuration;
         if (t >= 1.0) {
+            id<URSWindowEffect> ended = cw.effect;
             [self finishAnimationForWindow:cw];
             animating = NO;
-        } else {
+            if ([ended respondsToSelector:@selector(holdsFinalFrame)] && [ended holdsFinalFrame]) {
+                cw.heldEffect = ended;
+            }
+        } else if (![cw.effect respondsToSelector:@selector(getProjection:atProgress:windowSize:)]) {
             NSRect paint = [cw.effect paintRectAtProgress:t
                                             forWindowRect:NSMakeRect(screenX, screenY, destW, destH)];
             destX = NSMinX(paint);
@@ -5337,8 +5451,30 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
         return YES;
     }
 
-    BOOL composited = NO;
-    if (cw.picture != XCB_NONE) {
+    // A window turned in depth, while turning or left turned over.  While it
+    // turns its shadow turns with it; once held (at rest, e.g. on its back)
+    // it lies where the window is, so the ordinary shadow below fits.
+    id<URSWindowEffect> turning = presented ? nil : (animating ? cw.effect : cw.heldEffect);
+    BOOL turned = cw.picture != XCB_NONE &&
+        [turning respondsToSelector:@selector(getProjection:atProgress:windowSize:)];
+    if (turned) {
+        double t = animating ? URSClampDouble((now - cw.animationStart) / cw.animationDuration, 0.0, 1.0)
+                             : 1.0;
+        URSWindowProjection projection;
+        if ([turning getProjection:&projection atProgress:t windowSize:NSMakeSize(destW, destH)]) {
+            [self paintProjectedWindow:cw
+                            projection:&projection
+                            withShadow:animating && cw.shadowPicture != XCB_NONE && !skipShadow &&
+                                       cw.pictureValid];
+        }
+        if (animating) {
+            URS_PROFILE_END(paintWindow);
+            return YES;
+        }
+    }
+
+    BOOL composited = turned;
+    if (cw.picture != XCB_NONE && !turned) {
         composited = YES;
         int16_t destXInt = (int16_t)llround(destX);
         int16_t destYInt = (int16_t)llround(destY);
