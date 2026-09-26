@@ -56,6 +56,61 @@ Options:
 - Automatically falls back to non-compositing on any errors
 - Requires COMPOSITE, RENDER, DAMAGE, and XFIXES X extensions
 
+### Settings
+
+```
+defaults write WindowManager URSHopOnWindowSwitch YES
+defaults write WindowManager URSOverviewHotCorner top-left
+defaults write WindowManager URSWobblyWindows YES
+```
+
+The overview and Show Desktop settings take effect when the window manager
+starts.
+
+- `URSOverviewEnabled` (default `YES`): F9 shows every window on the
+  screen side by side, shrunk, over a darkened desktop; the menu bar, the
+  Dock and any other window of type `_NET_WM_WINDOW_TYPE_DOCK` fade out
+  meanwhile. Click a window,
+  or pick one with the arrow keys and Return, to bring it to the front;
+  Escape, F9 or a click beside the windows goes back. Needs compositing.
+- `URSOverviewKey` (default `F9`): the X key name of the key that opens
+  and closes the window overview.
+- `URSOverviewHotCorner` (default `none`): `top-left`, `top-right`,
+  `bottom-left` or `bottom-right` opens and closes the window overview
+  when the pointer is pushed into that screen corner.
+- `URSShowDesktopEnabled` (default `YES`): F11 slides every window out
+  over the nearest edge of the screen until only a sliver of it is left,
+  so the desktop can be used: icons opened, files dragged. The menu bar
+  and the Dock stay; palettes fade out. F11 again brings the windows back with the one in
+  front focused again; a click on a sliver brings them back with that one
+  in front; a window becoming active (a new window, the Dock, Alt-Tab)
+  brings them back too. F9 opens the overview over it. Needs compositing.
+- `URSShowDesktopKey` (default `F11`): the X key name of the key that
+  shows the desktop and brings the windows back.
+- `URSShowDesktopHotCorner` (default `none`): `top-left`, `top-right`,
+  `bottom-left` or `bottom-right` does the same when the pointer is pushed
+  into that screen corner.
+- `URSWobblyWindows` (default `NO`): a window dragged by its titlebar
+  bends and trails behind the pointer like jelly and wobbles back into
+  shape when let go. Needs compositing. Takes effect on the next drag.
+- `URSHopOnWindowSwitch` (default `NO`): the window Alt-Tab switches to
+  hops in place to lead the eye to it. Needs compositing. Takes effect
+  on the next switch, without restarting the window manager.
+- `URSWindowSwitcherStyle` (default `flow`): how Alt-Tab shows the
+  windows while Alt is held. `flow` flies the windows themselves into a
+  row across the darkened screen, the chosen one big in the middle and
+  the others turned away to both sides; Tab and Shift-Tab slide the row,
+  releasing Alt flies the chosen window back and raises it, Escape flies
+  everything back. Minimized windows are left out of the row. Without
+  compositing, with fewer than two windows on the screen, or with `list`,
+  a strip of application icons and names is shown instead. Takes effect
+  on the next switch.
+- `URSWindowFlipEnabled` (default `YES`): "Flip Window" in the titlebar's
+  context menu turns the window over, in perspective, to its plain back;
+  choosing it again turns it back. Only the picture turns: the window
+  stays where it is and keeps working. Needs compositing. Takes effect
+  the next time the menu is opened.
+
 **Note:** The display number `:1` is what you set for Xephyr. It cannot run on the same display where X11 is already running.
 
 Distributions may set the `DISPLAY` environment variable differently based on their needs. For example:

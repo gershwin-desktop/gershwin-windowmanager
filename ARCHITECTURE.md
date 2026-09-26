@@ -60,9 +60,37 @@ WindowManager/
 │
 ├── URSCompositingManager.h/m       XRender compositing manager
 ├── URSRenderingContext.h/m         Per-window rendering state
+├── URSWindowEffect.h               Effect played on a window where it stands
+├── URSAttentionHopEffect.h/m       Hop effect for the window switched to
+├── URSWindowPresentation.h         Shows windows elsewhere while installed
+├── URSOverviewController.h/m       Window overview: input, selection
+├── URSOverviewLayout.h/m           Window overview layout (pure geometry)
+├── URSOverviewTitleLabel.h/m       Title of the window under the pointer
+├── URSShowDesktopController.h/m    Show Desktop: windows to the edges, slivers
+├── URSShowDesktopLayout.h/m        Show Desktop layout (pure geometry)
+├── URSGlobalKey.h/m                A key grabbed on the root window
+├── URSHotCorner.h/m                A screen corner watched for the pointer
+├── URSPresentationTransition.h/m   Eased 0..1 progress of a presentation
+├── URSScreenWindow.h/m             Decorated windows on the screen, stacked
+├── URSWindowDeformation.h          Bends a window's picture over a mesh
+├── URSWobblyModel.h/m              Spring mesh of a wobbly window (pure physics)
+├── URSTriangleSpans.h/m            Watertight triangle spans for bent windows
+├── URSWobblyWindowsController.h/m  Wobbly windows while dragging
+├── URSAttachmentController.h/m     Sheets and drawers attached to a parent
+├── URSSheetController.h/m          Sheets attached to their parent (SHEETS.md)
+├── URSDrawerController.h/m         Drawers attached to their parent (DRAWERS.md)
+├── URSDrawerLayout.h/m             Drawer placement (pure geometry)
+├── URSAttachedDeformation.h/m      Attached window bending with a wobbling parent
+├── URSAttachmentRegistry.h/m       Which sheet or drawer hangs from which window
+├── URSSheetLayout.h/m              Sheet placement and slide (pure geometry)
+├── URSAttachmentSlideEffect.h/m    Slide of an attached window out from under its parent
+├── URSSheetSlideEffect.h/m         Slide of a sheet out of the titlebar
+├── URSWindowRole.h/m               WM_WINDOW_ROLE (sheet, drawer) of a window
 │
 ├── URSWindowSwitcher.h/m           Alt-Tab window switcher logic
 ├── URSWindowSwitcherOverlay.h/m    Window switcher overlay rendering
+├── URSWindowFlowController.h/m     Alt-Tab flow: windows flown into a row
+├── URSFlowLayout.h/m               Alt-Tab flow layout (pure geometry)
 ├── URSSnapPreviewOverlay.h/m       Snap preview overlay rendering
 ├── URSThemeIntegration.h/m         GSTheme titlebar decoration bridge
 └── GSThemeTitleBar.h/m             GSTheme drawing surface adapter

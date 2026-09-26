@@ -9,6 +9,7 @@
 #import "URSSnappingMenuController.h"
 #import "XCBScreen.h"
 #import "XCBWindow.h"
+#import "URSCompositingManager+WindowFlip.h"
 
 @implementation URSSnappingMenuController
 
@@ -107,26 +108,33 @@
 {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Window"];
 
-    struct { NSString *title; SEL action; } items[] = {
-        { @"Center",                   @selector(snapMenuCenter:) },
-        { @"Maximize Vertically",      @selector(snapMenuMaximizeVertically:) },
-        { @"Maximize Horizontally",    @selector(snapMenuMaximizeHorizontally:) },
-        { nil, nil },  // separator
-        { @"Snap Left",                @selector(snapMenuSnapLeft:) },
-        { @"Snap Right",               @selector(snapMenuSnapRight:) },
-        { nil, nil },  // separator
-        { @"Snap Top Left",            @selector(snapMenuSnapTopLeft:) },
-        { @"Snap Top Right",           @selector(snapMenuSnapTopRight:) },
-        { @"Snap Bottom Left",         @selector(snapMenuSnapBottomLeft:) },
-        { @"Snap Bottom Right",        @selector(snapMenuSnapBottomRight:) },
-        { nil, nil },  // separator
-        { @"Window Properties",        @selector(snapMenuInformation:) },
-        { @"Close",                    @selector(snapMenuClose:) },
+    // Utility panels (palettes) are never maximized - matches the missing
+    // titlebar zoom button, so the menu offers no way to do it either.
+    BOOL isUtility = [[frame childWindowForKey:ClientWindow] isUtilityPanel];
+
+    struct { NSString *title; SEL action; BOOL skipForUtility; } items[] = {
+        { @"Center",                   @selector(snapMenuCenter:),                NO },
+        { @"Maximize Vertically",      @selector(snapMenuMaximizeVertically:),    YES },
+        { @"Maximize Horizontally",    @selector(snapMenuMaximizeHorizontally:),  YES },
+        { nil, nil, NO },  // separator
+        { @"Snap Left",                @selector(snapMenuSnapLeft:),              NO },
+        { @"Snap Right",               @selector(snapMenuSnapRight:),             NO },
+        { nil, nil, NO },  // separator
+        { @"Snap Top Left",            @selector(snapMenuSnapTopLeft:),           NO },
+        { @"Snap Top Right",           @selector(snapMenuSnapTopRight:),          NO },
+        { @"Snap Bottom Left",         @selector(snapMenuSnapBottomLeft:),        NO },
+        { @"Snap Bottom Right",        @selector(snapMenuSnapBottomRight:),       NO },
+        { nil, nil, NO },  // separator
+        { @"Window Properties",        @selector(snapMenuInformation:),           NO },
+        { @"Close",                    @selector(snapMenuClose:),                 NO },
     };
 
     for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
         if (!items[i].title) {
             [menu addItem:[NSMenuItem separatorItem]];
+            continue;
+        }
+        if (isUtility && items[i].skipForUtility) {
             continue;
         }
         NSMenuItem *item =
@@ -136,6 +144,20 @@
         [item setTarget:self];
         [item setRepresentedObject:frame];
         [menu addItem:item];
+    }
+
+    // Only the composited picture turns, so without compositing (or with
+    // the effect turned off) there is nothing to offer.
+    if ([[URSCompositingManager sharedManager] canFlipWindows]) {
+        NSInteger index = [menu indexOfItemWithTarget:self
+                                            andAction:@selector(snapMenuInformation:)];
+        NSMenuItem *flip = [[NSMenuItem alloc] initWithTitle:@"Flip Window"
+                                                      action:@selector(snapMenuFlipWindow:)
+                                               keyEquivalent:@""];
+        [flip setTarget:self];
+        [flip setRepresentedObject:frame];
+        [menu insertItem:flip atIndex:index];
+        [menu insertItem:[NSMenuItem separatorItem] atIndex:index + 1];
     }
 
     return menu;
@@ -247,6 +269,14 @@
     XCBFrame *frame = [sender representedObject];
     if (frame && [self.connection windowForXCBId:[frame window]]) {
         [self.connection executeSnapForZone:SnapZoneBottomRight frame:frame];
+    }
+}
+
+- (void)snapMenuFlipWindow:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [self.connection windowForXCBId:[frame window]]) {
+        [[URSCompositingManager sharedManager] flipWindow:[frame window]];
     }
 }
 

@@ -80,7 +80,7 @@
     // Use GSTheme to draw window titlebar
     NSRect drawRect = NSMakeRect(0, 0, size.width, size.height);
     NSUInteger styleMask = [self windowStyleMask];
-    GSThemeControlState state = [self themeStateForActive:isActive];
+    int state = [self titleBarInputStateForActive:isActive];
 
     [theme drawWindowBorder:drawRect
                   withFrame:drawRect
@@ -243,18 +243,16 @@
     return styleMask;
 }
 
-- (GSThemeControlState)themeStateForActive:(BOOL)isActive {
-    return isActive ? GSThemeNormalState : GSThemeSelectedState;
+/* -drawWindowBorder:...state: wants an input state, not a control state; a
+ * GSThemeSelectedState (6) indexes past the end of the three-element arrays
+ * GSTheme's own implementation keeps and kills the process. */
+- (int)titleBarInputStateForActive:(BOOL)isActive {
+    return isActive ? GSTitleBarKey : GSTitleBarNormal;
 }
 
 #pragma mark - Button Hit Detection
 
 // Edge buttons are square: width == titlebarRect.size.height (queried at hit-test time)
-
-// Orb button metrics
-static const CGFloat TB_ORB_SIZE = 15.0;
-static const CGFloat TB_ORB_PAD_LEFT = 10.5;
-static const CGFloat TB_ORB_SPACING = 4.0;
 
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point {
     XCBRect titlebarRect = [self windowRect];
@@ -262,27 +260,11 @@ static const CGFloat TB_ORB_SPACING = 4.0;
     CGFloat titlebarHeight = titlebarRect.size.height;
     NSUInteger styleMask = [self windowStyleMask];
 
-    if ([URSThemeIntegration isOrbButtonStyle]) {
-        // Orb layout: all buttons on left, 15x15, vertically centered
-        CGFloat buttonY = (titlebarHeight - TB_ORB_SIZE) / 2.0;
-        CGFloat closeX = TB_ORB_PAD_LEFT;
-        CGFloat miniX = closeX + TB_ORB_SIZE + TB_ORB_SPACING;
-        CGFloat zoomX = miniX + TB_ORB_SIZE + TB_ORB_SPACING;
-
-        NSRect closeRect = NSMakeRect(closeX, buttonY, TB_ORB_SIZE, TB_ORB_SIZE);
-        NSRect miniRect = NSMakeRect(miniX, buttonY, TB_ORB_SIZE, TB_ORB_SIZE);
-        NSRect zoomRect = NSMakeRect(zoomX, buttonY, TB_ORB_SIZE, TB_ORB_SIZE);
-
-        if ((styleMask & NSClosableWindowMask) && NSPointInRect(point, closeRect)) {
-            return GSThemeTitleBarButtonClose;
-        }
-        if ((styleMask & NSMiniaturizableWindowMask) && NSPointInRect(point, miniRect)) {
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-        if ((styleMask & NSResizableWindowMask) && NSPointInRect(point, zoomRect)) {
-            return GSThemeTitleBarButtonZoom;
-        }
-        return GSThemeTitleBarButtonNone;
+    if ([URSThemeIntegration themeDrawsTitlebarButtons]) {
+        NSInteger index = [URSThemeIntegration buttonIndexAtPoint:point
+                                                     titlebarSize:NSMakeSize(titlebarWidth, titlebarHeight)
+                                                        styleMask:styleMask];
+        return GSThemeTitleBarButtonForIndex(index);
     }
 
     // Edge layout - buttons are square

@@ -25,13 +25,48 @@ $(APP_NAME)_OBJC_FILES = \
 		URSTitlebarController.m \
 		URSSnappingMenuController.m \
 		URSCompositingManager.m \
+		URSAttentionHopEffect.m \
+		URSOverviewLayout.m \
+		URSOverviewController.m \
+		URSWindowListFilter.m \
+		URSOverviewTitleLabel.m \
+		URSGlobalKey.m \
+		URSHotCorner.m \
+		URSPresentationTransition.m \
+		URSScreenWindow.m \
+		URSShowDesktopLayout.m \
+		URSShowDesktopController.m \
+		URSSheetLayout.m \
+		URSAttachmentSlideEffect.m \
+		URSSheetSlideEffect.m \
+		URSAttachmentController.m \
+		URSSheetController.m \
+		URSDrawerController.m \
+		URSDrawerLayout.m \
+		URSAttachedDeformation.m \
+		URSAttachmentRegistry.m \
+		URSWindowRole.m \
+		URSWobblyModel.m \
+		URSTriangleSpans.m \
+		URSWobblyWindowsController.m \
 		URSRenderingContext.m \
 		URSWindowSwitcher.m \
 		URSWindowSwitcherOverlay.m \
+		URSFlowLayout.m \
+		URSWindowFlowController.m \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \
 		URSProfiler.m \
 		URSImageUpload.m \
+		URSShapePath.m \
+		URSShadowOverrides.m \
+		URSUtilityRestackOrder.m \
+		URSFramePacer.m \
+		URSTitlebarRegistry.m \
+		URSProjection.m \
+		URSFlipGeometry.m \
+		URSWindowFlipEffect.m \
+		URSCompositingManager+WindowFlip.m \
 		GSThemeTitleBar.m \
 		xcb/XCBConnection.m \
 		xcb/XCBWindow.m \

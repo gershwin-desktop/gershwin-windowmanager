@@ -12,6 +12,9 @@
 #import "TitleBarSettingsService.h"
 #import "EWMHService.h"
 #import "XCBTypes.h"
+#import "URSThemeIntegration.h"
+#import "XCBAtomService.h"
+#import "URSShapePath.h"
 
 // Loose typing for the compositor, mirroring the NSClassFromString lookup
 // the xcb layer uses everywhere; keeps URSCompositingManager.h out of here.
@@ -35,6 +38,22 @@
 
 // Informal protocol for theme-driven resize zones
 // Themes implementing these methods enable the resize zone protocol
+// What the frame asks of the compositor, which it finds by name
+@protocol URSShapePathCompositing <NSObject>
+- (BOOL)compositingActive;
+- (void)setShapePath:(URSShapePath *)path
+       clientOriginX:(int16_t)x
+                   y:(int16_t)y
+           forWindow:(xcb_window_t)windowId;
+@end
+
+@interface XCBFrame ()
+// The outline the client asked for with _WM_SHAPE_PATH, if any
+@property (nonatomic, strong) URSShapePath *clientShapePath;
+// The frame's shape was last cut to the client's
+@property (nonatomic, assign) BOOL clientShapeApplied;
+@end
+
 @interface NSObject (GSThemeResizeZones)
 - (CGFloat)resizeZoneCornerSize;
 - (CGFloat)resizeZoneEdgeThickness;
@@ -140,20 +159,39 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     ICCCMService* icccmService = [ICCCMService sharedInstanceWithConnection:connection];
     xcb_size_hints_t *sizeHints = [icccmService wmNormalHintsForWindow:aClientWindow];
 
-    [self setMinHeightHint:sizeHints->min_height];
-    [self setMinWidthHint:sizeHints->min_width];
+    /* A client need not set WM_NORMAL_HINTS, and then there is nothing to
+     * read: -wmNormalHintsForWindow: hands back NULL for it.  No hints means
+     * no minimum of the client's own and a window that may be resized, which
+     * is what the defaults below say. */
+    [self setMinHeightHint: sizeHints ? sizeHints->min_height : 0];
+    [self setMinWidthHint: sizeHints ? sizeHints->min_width : 0];
+
+    BOOL isUtilityPanel = [aClientWindow isUtilityPanel];
 
     // Enforce an absolute minimum client area so windows can never collapse
     // to just the titlebar height. Clients that don't set WM_NORMAL_HINTS
     // get minHeightHint=0 which previously caused uint32_t underflows
     // in the resize functions and allowed 0-height client areas.
-    if (minHeightHint < WM_MIN_CLIENT_HEIGHT)
-        minHeightHint = WM_MIN_CLIENT_HEIGHT;
-    if (minWidthHint < WM_MIN_CLIENT_WIDTH)
-        minWidthHint = WM_MIN_CLIENT_WIDTH;
+    // Utility panels (palettes) are exempt: a control strip may legitimately
+    // be smaller than 100x100, so only guard against an actual zero size.
+    if (isUtilityPanel)
+    {
+        if (minHeightHint < 1)
+            minHeightHint = 1;
+        if (minWidthHint < 1)
+            minWidthHint = 1;
+    }
+    else
+    {
+        if (minHeightHint < WM_MIN_CLIENT_HEIGHT)
+            minHeightHint = WM_MIN_CLIENT_HEIGHT;
+        if (minWidthHint < WM_MIN_CLIENT_WIDTH)
+            minWidthHint = WM_MIN_CLIENT_WIDTH;
+    }
 
     // Respect ICCCM WM_NORMAL_HINTS: if min == max for both dimensions, treat as non-resizable
-    if ((sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
+    if (sizeHints != NULL &&
+        (sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
         (sizeHints->flags & XCB_ICCCM_SIZE_HINT_P_MAX_SIZE) &&
         sizeHints->min_width == sizeHints->max_width &&
         sizeHints->min_height == sizeHints->max_height)
@@ -164,22 +202,9 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    titleHeight = [settings heightForUtility:isUtilityPanel];
 
-    // Determine client border: 0 in compositor mode (drop shadow handles visual separation),
-    // 1 (scaled by GSScaleFactor) in non-compositor mode (thin strip of frame background as border).
-    // Stored on self for use in resize functions and queried again in decorateClientWindow.
-    {
-        Class compositorClass = NSClassFromString(@"URSCompositingManager");
-        CGFloat sf = [[TitleBarSettingsService sharedInstance] scaleFactor];
-        int cb = (int)sf;
-        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-            id manager = [compositorClass sharedManager];
-            if ([manager respondsToSelector:@selector(compositingActive)])
-                cb = [manager compositingActive] ? 0 : (int)sf;
-        }
-        self.clientBorder = cb;
-    }
+    [self updateClientBorder];
 
     if (minWidthHint > [aClientWindow windowRect].size.width)
     {
@@ -246,6 +271,27 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     key = nil;
 }
 
+/* Pixels of frame left around the client: none in compositor mode, where the
+ * drop shadow separates the window from what is behind it, one scaled pixel
+ * otherwise - unless the theme draws a window frame of its own and says how
+ * wide it is. Read again whenever the theme or the scale factor changes. */
+- (void) updateClientBorder
+{
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    CGFloat sf = [[TitleBarSettingsService sharedInstance] scaleFactor];
+    int cb = (int)sf;
+
+    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+        id manager = [compositorClass sharedManager];
+        if ([manager respondsToSelector:@selector(compositingActive)])
+            cb = [manager compositingActive] ? 0 : (int)sf;
+    }
+    if ([URSThemeIntegration frameBorderWidth] > 0)
+        cb = (int)[URSThemeIntegration frameBorderWidth];
+
+    self.clientBorder = cb;
+}
+
 - (void) decorateClientWindow
 {
     NSNumber* key = [NSNumber numberWithInteger:ClientWindow];
@@ -266,13 +312,9 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         }
     }
 
-    // Update clientBorder now that we have definitive compositor state.
-    // 0 = compositor mode (client flush with frame; drop shadow separates visually)
-    // scaled (1 * scaleFactor) = non-compositor mode (border on left, right, bottom)
-    {
-        CGFloat sf = [[TitleBarSettingsService sharedInstance] scaleFactor];
-        self.clientBorder = compositorActive ? 0 : (int)sf;
-    }
+    // Now that the compositor state is definitive, and again on every theme
+    // change, since the theme has the last word on it.
+    [self updateClientBorder];
 
     uint32_t values[4];  // May need up to 4 values for ARGB (back_pixel, colormap, border_pixel, event_mask)
     uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK;
@@ -316,7 +358,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
 
-    uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t height = [settings heightForUtility:[clientWindow isUtilityPanel]];
 
     XCBCreateWindowTypeRequest* request = [[XCBCreateWindowTypeRequest alloc] initForWindowType:XCBTitleBarRequest];
     [request setDepth:depth];
@@ -417,8 +459,8 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         [self createResizeZonesFromTheme];
     }
 
-    // Apply rounded top corners shape mask
-    [self applyRoundedCornersShapeMask];
+    // Apply rounded top corners shape mask, and the client's own outline
+    [self clientShapePathChanged];
 
     titleBar = nil;
     clientWindow = nil;
@@ -524,7 +566,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
      * match the rendered titlebar even after a GSScaleFactor change (which
      * re-frames windows but must not leave the cached titleHeight stale). */
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    titleHeight = [settings heightForUtility:[[self childWindowForKey:ClientWindow] isUtilityPanel]];
 
     /*** width ***/
 
@@ -855,6 +897,54 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 }
 
+- (BOOL)leaveSnapForDragAtPointerX:(int16_t)pointerX
+{
+    if (![self isSnapped])
+        return NO;
+    [self setIsSnapped:NO];
+
+    XCBRect current = [self windowRect];
+    XCBRect restored = [self oldRect];
+    if (restored.size.width == 0 || restored.size.height == 0)
+        return NO;
+
+    // The window stays under the pointer at the same fraction of the
+    // titlebar's width where it was picked up.
+    XCBPoint grab = [self offset];
+    double fraction = (current.size.width > 0) ? (double)grab.x / current.size.width : 0.5;
+    int16_t grabX = (int16_t)lround(fraction * restored.size.width);
+    restored.position.x = pointerX - grabX;
+    restored.position.y = current.position.y;
+
+    [self programmaticResizeToRect:restored];
+    [self setIsMaximized:NO];
+    [self setOffset:XCBMakePoint(grabX, grab.y)];
+    [self updateAllResizeZonePositions];
+    [self applyRoundedCornersShapeMask];
+    return YES;
+}
+
+// Overrides XCBWindow's plain raise-to-top so the palette-above-document
+// invariant holds no matter which of the many call sites raised this frame
+// (map, a ConfigureRequest with stack_mode Above, _NET_ACTIVE_WINDOW,
+// click-to-front, unminimize...) instead of having to find and patch each
+// one to remember to call it. Only fires for a NORMAL (non-utility) frame:
+// an isAbove panel raising itself must not re-trigger this for every
+// sibling panel, which reassertAboveFramesForPid: already re-raises in one
+// pass and would otherwise be repeated once per panel for no benefit.
+- (void)stackAbove
+{
+    [super stackAbove];
+
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    if (client && ![client isAbove]) {
+        uint32_t pid = [client pid];
+        if (pid > 0) {
+            [[self connection] reassertAboveFramesForPid:pid];
+        }
+    }
+}
+
 - (void)clearShapeMasks
 {
     // Remove any XShape bounding mask from the frame and titlebar windows so that
@@ -877,6 +967,125 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
 - (void)applyRoundedCornersShapeMask
 {
+    // Utility panels (palettes) keep square corners - never round them,
+    // in any mode (compositor ARGB corner-zeroing is skipped separately
+    // in URSThemeIntegration transferImage:toPixmap:onTitlebar:).
+    if ([[self childWindowForKey:ClientWindow] isUtilityPanel]) {
+        [self clearShapeMasks];
+        return;
+    }
+
+    BOOL cornersShaped = [self applyCornerShapes];
+    [self applyClientShapeOverCorners:cornersShaped];
+}
+
+- (void)clientShapePathChanged
+{
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    self.clientShapePath = client ? [self readShapePathOfClient:client] : nil;
+    [[self activeCompositor] setShapePath:self.clientShapePath
+                            clientOriginX:(int16_t)self.clientBorder
+                                        y:(int16_t)titleHeight
+                                forWindow:window];
+    [self applyRoundedCornersShapeMask];
+}
+
+- (URSShapePath *)readShapePathOfClient:(XCBWindow *)client
+{
+    xcb_connection_t *conn = [connection connection];
+    xcb_atom_t atom = [[XCBAtomService sharedInstanceWithConnection:connection]
+                          cacheAtom:@"_WM_SHAPE_PATH"];
+    xcb_get_property_reply_t *reply =
+        xcb_get_property_reply(conn,
+            xcb_get_property(conn, 0, [client window], atom, XCB_ATOM_INTEGER, 0, 65536),
+            NULL);
+    URSShapePath *path = nil;
+    if (reply && reply->type == XCB_ATOM_INTEGER && reply->format == 32) {
+        path = [URSShapePath shapePathWithValues:(const int32_t *)xcb_get_property_value(reply)
+                                           count:(NSUInteger)xcb_get_property_value_length(reply) / 4];
+    }
+    free(reply);
+    return path;
+}
+
+- (id<URSShapePathCompositing>)activeCompositor
+{
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (![compositorClass respondsToSelector:@selector(sharedManager)]) {
+        return nil;
+    }
+    id<URSShapePathCompositing> manager = [compositorClass performSelector:@selector(sharedManager)];
+    return [manager compositingActive] ? manager : nil;
+}
+
+// A client with an outline of its own (_WM_SHAPE_PATH, e.g. a curved
+// bottom edge) must show nothing of the frame outside it: below the titlebar
+// the frame is cut to the outline.
+- (void)applyClientShapeOverCorners:(BOOL)cornersShaped
+{
+    xcb_connection_t *conn = [connection connection];
+    const xcb_query_extension_reply_t *ext = xcb_get_extension_data(conn, &xcb_shape_id);
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    XCBRect frameRect = [self windowRect];
+
+    if (!ext || !ext->present) {
+        return;
+    }
+    if (!self.clientShapePath || !client) {
+        if (self.clientShapeApplied && !cornersShaped) {
+            xcb_shape_mask(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                           window, 0, 0, XCB_NONE);
+        }
+        self.clientShapeApplied = NO;
+        return;
+    }
+
+    if (!cornersShaped) {
+        xcb_rectangle_t whole = { 0, 0, frameRect.size.width, frameRect.size.height };
+        xcb_shape_rectangles(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                             XCB_CLIP_ORDERING_UNSORTED, window, 0, 0, 1, &whole);
+    }
+    int16_t clientTop = (int16_t)titleHeight;
+    if (frameRect.size.height > clientTop) {
+        xcb_rectangle_t below = { 0, clientTop, frameRect.size.width,
+                                  (uint16_t)(frameRect.size.height - clientTop) };
+        xcb_shape_rectangles(conn, XCB_SHAPE_SO_SUBTRACT, XCB_SHAPE_SK_BOUNDING,
+                             XCB_CLIP_ORDERING_UNSORTED, window, 0, 0, 1, &below);
+    }
+    {
+        int cb = self.clientBorder;
+        int clientWidth = (int)frameRect.size.width - 2 * cb;
+        int clientHeight = (int)frameRect.size.height - clientTop - cb;
+        if (clientWidth > 0 && clientHeight > 0) {
+            // Worked out for the frame's size now, so the outline is right on
+            // every step of a resize, before the client has caught up
+            NSData *coverage = [self.clientShapePath coverageForWidth:clientWidth
+                                                               height:clientHeight];
+            // With compositing the compositor fades the edge through the
+            // outline's coverage, and a little more than the outline stays so
+            // a scaled window (overview, animations) blends its edge with the
+            // client's own pixels, not with whatever the frame holds outside
+            // its shape.  Without compositing a pixel shows when mostly
+            // covered.
+            BOOL composited = ([self activeCompositor] != nil);
+            NSData *rects = URSShapeRects(coverage, clientWidth, clientHeight,
+                                          composited ? 1 : 128);
+            if (composited) {
+                rects = URSShapeRectsGrown(rects, 2, clientWidth, clientHeight);
+            }
+            xcb_shape_rectangles(conn, XCB_SHAPE_SO_UNION, XCB_SHAPE_SK_BOUNDING,
+                                 XCB_CLIP_ORDERING_UNSORTED, window,
+                                 (int16_t)cb, clientTop,
+                                 (uint32_t)([rects length] / sizeof(URSShapeRect)),
+                                 (const xcb_rectangle_t *)[rects bytes]);
+        }
+    }
+    self.clientShapeApplied = YES;
+}
+
+// Returns YES when it gave the frame window a bounding shape.
+- (BOOL)applyCornerShapes
+{
     // Query theme for corner radii - default to 0 (square corners) if not provided
     GSTheme *theme = [GSTheme theme];
     CGFloat topRadius = 0;
@@ -891,7 +1100,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     if (topRadius <= 0 && bottomRadius <= 0)
-        return;
+        return NO;
 
     // Use internal windowRect rather than a blocking xcb_get_geometry round-trip.
     // The C resize functions always update windowRect via setWindowRect: before
@@ -900,19 +1109,12 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     int fw = (int)frameRect.size.width;
     int fh = (int)frameRect.size.height;
     if (fw <= 0 || fh <= 0)
-        return;
+        return NO;
 
-    // Check if compositor is active
-    Class compositorClass = NSClassFromString(@"URSCompositingManager");
-    BOOL compositorActive = NO;
-    if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-        id manager = [compositorClass sharedManager];
-        if ([manager respondsToSelector:@selector(compositingActive)]) {
-            compositorActive = [manager compositingActive];
-        }
-    }
+    BOOL compositorActive = ([self activeCompositor] != nil);
 
     // Apply bounding-shape to the FRAME window (always needed in non-compositor mode)
+    BOOL frameShaped = NO;
     if (!compositorActive) {
         XCBShape *shape = [[XCBShape alloc] initWithConnection:connection withWinId:window];
         if ([shape checkSupported]) {
@@ -923,6 +1125,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
             shape.orHeight = fh;
             [shape createPixmapsAndGCs];
             [shape createRoundedCornersWithTopRadius:(int)topRadius bottomRadius:(int)bottomRadius];
+            frameShaped = YES;
         }
         shape = nil;
     }
@@ -949,6 +1152,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
             titleBar = nil;
         }
     }
+    return frameShaped;
 }
 
 void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
@@ -1412,7 +1616,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     // tracked frame ends up desynced from the real window.
     XCBRect rect = [self windowRect];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t height = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t height = [settings heightForUtility:[clientWindow isUtilityPanel]];
 
     // While shaded the frame is clipped to the titlebar, so its cached rect
     // height is tiny.  Reporting that clipped height to the client would make
@@ -1458,7 +1662,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     if (!clientWindow) return;
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t titleHgt = [settings heightForUtility:[clientWindow isUtilityPanel]];
 
     // Use the static helper with explicit dimensions (same as manual resize)
     sendSyntheticConfigureNotify([connection connection], clientWindow,
@@ -1486,15 +1690,17 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     xcb_connection_t *conn = [connection connection];
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t titleHgt = [settings heightForUtility:[clientWindow isUtilityPanel]];
 
     // Calculate child window dimensions (same as manual resize functions)
     XCBRect titleBarRect = XCBMakeRect(XCBMakePoint(0, 0),
                                         XCBMakeSize(targetRect.size.width, titleHgt));
-    // Client fills frame below titlebar with 1px border on left, right, and bottom
-    XCBRect clientRect = XCBMakeRect(XCBMakePoint(1, titleHgt),
-                                      XCBMakeSize(targetRect.size.width - 2,
-                                                   targetRect.size.height - titleHgt - 1));
+    // Client fills the frame below the titlebar, inset by the border the
+    // theme asks for on left, right and bottom.
+    int cb = self.clientBorder;
+    XCBRect clientRect = XCBMakeRect(XCBMakePoint(cb, titleHgt),
+                                      XCBMakeSize(targetRect.size.width - 2 * cb,
+                                                   targetRect.size.height - titleHgt - cb));
 
     // Configure frame window (position + size)
     uint32_t frameValues[4] = {(uint32_t)targetRect.position.x, (uint32_t)targetRect.position.y,
@@ -1554,7 +1760,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 - (uint16_t)shadedFrameHeight
 {
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    uint16_t titleHgt = [settings heightForUtility:[[self childWindowForKey:ClientWindow] isUtilityPanel]];
     settings = nil;
     return titleHgt + (uint16_t)self.clientBorder;
 }

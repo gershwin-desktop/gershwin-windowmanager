@@ -17,6 +17,12 @@
 
 - (id) initWithReply:(xcb_query_tree_reply_t *)aReply andConnection:(XCBConnection*)aConnection
 {
+    /* A window that is already gone, or a connection that is shutting down,
+     * answers a query with no reply at all; reading the root and parent out of
+     * it crashed the window manager while windows were being closed. */
+    if (aReply == NULL)
+        return nil;
+
     self = [super initWithReply:aReply];
 
     if (self == nil)

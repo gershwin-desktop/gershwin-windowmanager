@@ -10,7 +10,12 @@
 #import <Foundation/Foundation.h>
 #import "XCBConnection.h"
 #import "XCBTypes.h"
+#import "URSWindowEffect.h"
+#import "URSWindowPresentation.h"
+#import "URSWindowDeformation.h"
 #import <xcb/randr.h>
+
+@class URSShapePath;
 
 // Replaces <dispatch/dispatch.h> dispatch_block_t without linking libdispatch
 typedef void (^dispatch_block_t)(void);
@@ -34,7 +39,8 @@ typedef void (^dispatch_block_t)(void);
 
 // Window management for compositing
 - (void)registerWindow:(xcb_window_t)window;
-- (void)unregisterWindow:(xcb_window_t)window;
+// destroyed: the server has already destroyed the window (DestroyNotify).
+- (void)unregisterWindow:(xcb_window_t)window destroyed:(BOOL)destroyed;
 - (void)updateWindow:(xcb_window_t)window;
 
 // Window state changes
@@ -58,6 +64,10 @@ typedef void (^dispatch_block_t)(void);
 // window is unknown, unviewable or unredirected.
 - (void)markStackingOrderDirtyForWindow:(xcb_window_t)windowId;
 
+// A window's ConfigureNotify reported the sibling it is stacked above.  Every
+// move and resize repeats it, so only a change is treated as a restack.
+- (void)noteStackPosition:(xcb_window_t)sibling forWindow:(xcb_window_t)windowId;
+
 // Window animations (compositing-only)
 - (void)animateWindowMinimize:(xcb_window_t)windowId
                                          fromRect:(XCBRect)startRect
@@ -69,6 +79,30 @@ typedef void (^dispatch_block_t)(void);
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
+// Bend the window's picture over the deformation's mesh until it reports
+// being flat (nil ends it at once).  Ignored while the window animates.
+- (void)setDeformation:(id<URSWindowDeformation>)deformation forWindow:(xcb_window_t)windowId;
+- (id<URSWindowDeformation>)deformationForWindow:(xcb_window_t)windowId;
+
+// While installed, the presentation decides where windows are painted
+// (nil removes it).  Tell the compositor when its answers change.
+- (void)setPresentation:(id<URSWindowPresentation>)presentation;
+- (id<URSWindowPresentation>)presentation;
+// Removes the presentation only if it is still the one installed: another
+// may have replaced it while it was closing.
+- (void)removePresentation:(id<URSWindowPresentation>)presentation;
+- (void)presentationChanged;
+
+// Play an effect on the window where it stands.  Ignored while the window
+// already animates, unless the effect replaces a running one.
+- (void)playEffect:(id<URSWindowEffect>)effect onWindow:(xcb_window_t)windowId;
+// Keeps the window's last picture when its client unmaps it, so that an
+// effect started just before the unmap can play to its end on it (a sheet
+// sliding back under its parent's titlebar).  Costs a named pixmap per
+// window, so it is only for windows that need it.
+- (void)setKeepsContentAfterUnmap:(BOOL)keep forWindow:(xcb_window_t)windowId;
+// The effect running on the window, or the one whose last frame it keeps.
+- (id<URSWindowEffect>)effectOnWindow:(xcb_window_t)windowId;
 - (void)animateWindowTransition:(xcb_window_t)windowId
                                                 fromRect:(XCBRect)startRect
                                                     toRect:(XCBRect)endRect
@@ -127,11 +161,24 @@ typedef void (^dispatch_block_t)(void);
 // rectangular shadow.
 - (void)setShadowCornerRadius:(CGFloat)radius forWindow:(xcb_window_t)windowId;
 
+// The outline (_WM_SHAPE_PATH) of a frame's client, the client lying at
+// (x, y) in the frame; nil when it has none.  The frame is then painted
+// with smooth edges along the outline and its shadow follows it.
+- (void)setShapePath:(URSShapePath *)path
+       clientOriginX:(int16_t)x
+                   y:(int16_t)y
+           forWindow:(xcb_window_t)windowId;
+
 // Fast check used by the event loop to avoid redundant performRepairNow calls
 - (BOOL)hasPendingDamage;
 
 // Damage the entire screen region (used after resize/expose to force full redraw)
 - (void)damageScreen;
+
+// Painting is held from activation so the windows already on screen can be
+// adopted without showing each step; call once they are.  The hold ends when
+// damage has been quiet for a moment, bounded by a short limit.
+- (void)releasePaintingWhenSettled;
 
 // Handle damage events
 - (void)handleDamageNotify:(xcb_window_t)window
@@ -146,12 +193,14 @@ typedef void (^dispatch_block_t)(void);
 
 // Extension event base access (for event routing)
 - (uint8_t)damageEventBase;
-- (uint8_t)presentEventBase;
+- (uint8_t)shapeEventBase;
+
+// A window's bounding shape changed
+- (void)handleShapeNotify:(xcb_window_t)window;
 - (uint8_t)randrEventBase;
 
-// X Present extension events (vblank sync)
-- (void)handlePresentComplete:(void *)event;
-- (void)handlePresentIdle;
+// X Present extension events: YES when the event was one (and is handled).
+- (BOOL)handlePresentEvent:(xcb_generic_event_t *)event;
 
 // Redirect a window individually — needed for windows created after the
 // initial redirect_subwindows(root) call which only captures existing

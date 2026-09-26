@@ -1,0 +1,97 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+
+# The unit under test (URSCompositingManager.m) is #included directly into
+# repairflush.m, giving the test access to the private URSCompositeWindow
+# class.  Its collaborators are linked as separate objects, mirroring
+# WindowManager/GNUmakefile's own file list minus main.m and
+# URSCompositingManager.m (already pulled in via the #include).
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager -I../WindowManager/xcb \
+	-I../WindowManager/xcb/services -I../WindowManager/xcb/enums \
+	-I../WindowManager/xcb/utils
+
+WM_COLLABORATORS = \
+	../WindowManager/UROSWMApplication.m \
+	../WindowManager/URSHybridEventHandler.m \
+	../WindowManager/URSFocusManager.m \
+	../WindowManager/URSKeyboardManager.m \
+	../WindowManager/URSWorkareaManager.m \
+	../WindowManager/URSTitlebarController.m \
+	../WindowManager/URSSnappingMenuController.m \
+	../WindowManager/URSAttentionHopEffect.m \
+	../WindowManager/URSOverviewLayout.m \
+	../WindowManager/URSOverviewController.m \
+	../WindowManager/URSWindowListFilter.m \
+	../WindowManager/URSOverviewTitleLabel.m \
+	../WindowManager/URSGlobalKey.m \
+	../WindowManager/URSHotCorner.m \
+	../WindowManager/URSPresentationTransition.m \
+	../WindowManager/URSScreenWindow.m \
+	../WindowManager/URSShowDesktopLayout.m \
+	../WindowManager/URSShowDesktopController.m \
+	../WindowManager/URSWobblyModel.m \
+	../WindowManager/URSTriangleSpans.m \
+	../WindowManager/URSWobblyWindowsController.m \
+	../WindowManager/URSRenderingContext.m \
+	../WindowManager/URSWindowSwitcher.m \
+	../WindowManager/URSWindowSwitcherOverlay.m \
+	../WindowManager/URSSnapPreviewOverlay.m \
+	../WindowManager/URSThemeIntegration.m \
+	../WindowManager/URSProfiler.m \
+	../WindowManager/URSImageUpload.m \
+	../WindowManager/URSShapePath.m \
+	../WindowManager/URSShadowOverrides.m \
+	../WindowManager/URSTitlebarRegistry.m \
+	../WindowManager/URSFramePacer.m \
+	../WindowManager/URSFlowLayout.m \
+	../WindowManager/URSWindowFlowController.m \
+	../WindowManager/URSUtilityRestackOrder.m \
+	../WindowManager/URSSheetLayout.m \
+	../WindowManager/URSAttachmentSlideEffect.m \
+	../WindowManager/URSSheetSlideEffect.m \
+	../WindowManager/URSAttachmentRegistry.m \
+	../WindowManager/URSWindowRole.m \
+	../WindowManager/URSAttachmentController.m \
+	../WindowManager/URSSheetController.m \
+	../WindowManager/URSDrawerController.m \
+	../WindowManager/URSDrawerLayout.m \
+	../WindowManager/URSAttachedDeformation.m \
+	../WindowManager/URSProjection.m \
+	../WindowManager/URSFlipGeometry.m \
+	../WindowManager/URSWindowFlipEffect.m \
+	../WindowManager/URSCompositingManager+WindowFlip.m \
+	../WindowManager/GSThemeTitleBar.m \
+	../WindowManager/xcb/XCBConnection.m \
+	../WindowManager/xcb/XCBWindow.m \
+	../WindowManager/xcb/XCBFrame.m \
+	../WindowManager/xcb/XCBTitleBar.m \
+	../WindowManager/xcb/XCBScreen.m \
+	../WindowManager/xcb/XCBVisual.m \
+	../WindowManager/xcb/XCBCursor.m \
+	../WindowManager/xcb/XCBSelection.m \
+	../WindowManager/xcb/XCBRegion.m \
+	../WindowManager/xcb/XCBShape.m \
+	../WindowManager/xcb/XCBReply.m \
+	../WindowManager/xcb/XCBAttributesReply.m \
+	../WindowManager/xcb/XCBGeometryReply.m \
+	../WindowManager/xcb/XCBQueryTreeReply.m \
+	../WindowManager/xcb/services/EWMHService.m \
+	../WindowManager/xcb/services/ICCCMService.m \
+	../WindowManager/xcb/services/XCBAtomService.m \
+	../WindowManager/xcb/services/TitleBarSettingsService.m \
+	../WindowManager/xcb/utils/XCBCreateWindowTypeRequest.m \
+	../WindowManager/xcb/utils/XCBWindowTypeResponse.m \
+	../WindowManager/xcb/utils/Comparators.m \
+	../WindowManager/xcb/utils/Transformers.m
+
+repairflush_OBJC_FILES += repairflush_unit.m $(WM_COLLABORATORS)
+
+# repairflush.m (Testing.h/PASS) stays non-ARC on purpose - see its header
+# comment.  Everything it calls into (the unit under test and its
+# collaborators) needs the same ARC mode as the real WindowManager build.
+ARCFLAGS = -std=c99 -fobjc-arc -fblocks -D_GNU_SOURCE
+$(foreach f,$(WM_COLLABORATORS) repairflush_unit.m,$(eval $(f)_FILE_FLAGS += $(ARCFLAGS)))
+
+ADDITIONAL_TOOL_LIBS += -lgnustep-gui \
+	$(shell pkg-config --libs xcb xcb-icccm xcb-xfixes xcb-aux xcb-cursor xcb-shape xcb-randr) \
+	-lxcb-util -lX11 -lXext \
+	-lxcb-composite -lxcb-render -lxcb-damage -lxcb-shm -lxcb-present
