@@ -40,6 +40,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSSheetSlideEffect.m \
 		URSSheetController.m \
 		URSSheetRegistry.m \
+		URSWindowRole.m \
 		URSWobblyModel.m \
 		URSTriangleSpans.m \
 		URSWobblyWindowsController.m \
