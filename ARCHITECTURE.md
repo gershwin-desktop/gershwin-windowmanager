@@ -76,6 +76,10 @@ WindowManager/
 ├── URSWobblyModel.h/m              Spring mesh of a wobbly window (pure physics)
 ├── URSTriangleSpans.h/m            Watertight triangle spans for bent windows
 ├── URSWobblyWindowsController.h/m  Wobbly windows while dragging
+├── URSSheetController.h/m          Sheets attached to their parent (SHEETS.md)
+├── URSSheetRegistry.h/m            Which sheet hangs from which window
+├── URSSheetLayout.h/m              Sheet placement and slide (pure geometry)
+├── URSSheetSlideEffect.h/m         Slide of a sheet out of the titlebar
 │
 ├── URSWindowSwitcher.h/m           Alt-Tab window switcher logic
 ├── URSWindowSwitcherOverlay.h/m    Window switcher overlay rendering
