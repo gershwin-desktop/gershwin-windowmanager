@@ -80,6 +80,7 @@ WindowManager/
 ├── URSSheetRegistry.h/m            Which sheet hangs from which window
 ├── URSSheetLayout.h/m              Sheet placement and slide (pure geometry)
 ├── URSSheetSlideEffect.h/m         Slide of a sheet out of the titlebar
+├── URSWindowRole.h/m               WM_WINDOW_ROLE (sheet, drawer) of a window
 │
 ├── URSWindowSwitcher.h/m           Alt-Tab window switcher logic
 ├── URSWindowSwitcherOverlay.h/m    Window switcher overlay rendering

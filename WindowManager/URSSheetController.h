@@ -10,12 +10,9 @@
 @class XCBConnection;
 @class URSCompositingManager;
 
-// The property a client puts on a window before mapping it to say that the
-// window is a sheet of the window its WM_TRANSIENT_FOR names (CARDINAL, 1).
-// The Eau theme sets it for every NSApp/NSWindow -beginSheet:...
-extern NSString * const URSSheetPropertyName;
-
-// Document-modal sheets: a window marked as a sheet of a decorated window
+// Document-modal sheets: a window whose WM_WINDOW_ROLE is "sheet" and whose
+// WM_TRANSIENT_FOR names its parent (see URSWindowRole; the Eau theme marks
+// every NSApp/NSWindow -beginSheet:...).  A window marked as a sheet of a decorated window
 // hangs from the bottom of that window's titlebar, centred on it, without a
 // titlebar of its own.  It moves and resizes along with its parent, stays
 // directly above it in the stacking order, and slides out from under the

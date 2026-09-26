@@ -8,18 +8,17 @@
 #import "URSSheetLayout.h"
 #import "URSSheetRegistry.h"
 #import "URSSheetSlideEffect.h"
+#import "URSWindowRole.h"
 #import "URSCompositingManager.h"
 #import "XCBConnection.h"
 #import "XCBWindow.h"
 #import "XCBFrame.h"
 #import "XCBScreen.h"
 
-NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
-
 @implementation URSSheetController
 {
     XCBConnection *_connection;
-    xcb_atom_t _sheetAtom;
+    xcb_atom_t _roleAtom;
     URSSheetRegistry *_registry;
 }
 
@@ -29,14 +28,14 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
     if (self) {
         _connection = connection;
         _registry = [URSSheetRegistry new];
-        const char *name = [URSSheetPropertyName UTF8String];
+        const char *name = [URSWindowRolePropertyName UTF8String];
         xcb_connection_t *c = [connection connection];
         xcb_intern_atom_reply_t *reply =
             xcb_intern_atom_reply(c, xcb_intern_atom(c, 0, strlen(name), name), NULL);
-        _sheetAtom = reply ? reply->atom : XCB_NONE;
+        _roleAtom = reply ? reply->atom : XCB_NONE;
         free(reply);
-        if (_sheetAtom == XCB_NONE) {
-            NSLog(@"[Sheets] Cannot intern %@; sheets are shown as dialogs", URSSheetPropertyName);
+        if (_roleAtom == XCB_NONE) {
+            NSLog(@"[Sheets] Cannot intern %@; sheets are shown as dialogs", URSWindowRolePropertyName);
         }
     }
     return self;
@@ -44,25 +43,27 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
 
 #pragma mark - Recognising a sheet
 
-// The window it is a sheet of, or XCB_NONE: both the sheet mark and
-// WM_TRANSIENT_FOR must be there, since the mark alone does not say whose
+// The window it is a sheet of, or XCB_NONE: both the sheet role and
+// WM_TRANSIENT_FOR must be there, since the role alone does not say whose
 // sheet it is and WM_TRANSIENT_FOR alone is any dialog or child window.
 - (xcb_window_t)markedParentOfWindow:(xcb_window_t)window
 {
-    if (_sheetAtom == XCB_NONE) {
+    if (_roleAtom == XCB_NONE) {
         return XCB_NONE;
     }
     xcb_connection_t *c = [_connection connection];
     xcb_get_property_cookie_t markCookie =
-        xcb_get_property(c, 0, window, _sheetAtom, XCB_ATOM_CARDINAL, 0, 1);
+        xcb_get_property(c, 0, window, _roleAtom, XCB_ATOM_STRING, 0, 16);
     xcb_get_property_cookie_t transientCookie =
         xcb_get_property(c, 0, window, XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW, 0, 1);
     xcb_get_property_reply_t *mark = xcb_get_property_reply(c, markCookie, NULL);
     xcb_get_property_reply_t *transient = xcb_get_property_reply(c, transientCookie, NULL);
 
     xcb_window_t parent = XCB_NONE;
-    if (mark && xcb_get_property_value_length(mark) >= 4 &&
-        *(uint32_t *)xcb_get_property_value(mark) != 0 &&
+    NSString *role = mark ? [URSWindowRole roleFromPropertyBytes:xcb_get_property_value(mark)
+                                                          length:xcb_get_property_value_length(mark)]
+                          : nil;
+    if ([role isEqualToString:URSWindowRoleSheet] &&
         transient && xcb_get_property_value_length(transient) >= 4) {
         parent = *(xcb_window_t *)xcb_get_property_value(transient);
     }

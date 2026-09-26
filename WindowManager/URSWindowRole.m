@@ -14,7 +14,15 @@ NSString * const URSWindowRoleDrawer = @"drawer";
 
 + (NSString *)roleFromPropertyBytes:(const void *)bytes length:(NSUInteger)length
 {
-    return nil;
+    const char *chars = bytes;
+    NSUInteger n = 0;
+    while (chars != NULL && n < length && chars[n] != '\0') {
+        n++;
+    }
+    if (n == 0) {
+        return nil;
+    }
+    return [[NSString alloc] initWithBytes:chars length:n encoding:NSISOLatin1StringEncoding];
 }
 
 @end

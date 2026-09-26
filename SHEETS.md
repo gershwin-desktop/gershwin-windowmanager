@@ -6,20 +6,21 @@ titlebar, centred on it, without a titlebar of its own, slides it out from
 under the titlebar when it is shown and back when it is dismissed, and keeps
 it attached to its parent.
 
-## The contract with clients: `_GERSHWIN_SHEET`
+## The contract with clients: `WM_WINDOW_ROLE` = `sheet`
 
-A client marks a window as a sheet with two properties, both set before the
-window is mapped:
+A client marks a window as a sheet with two standard ICCCM properties, both
+set before the window is mapped:
 
 | Property           | Type        | Value                               |
 |--------------------|-------------|-------------------------------------|
 | `WM_TRANSIENT_FOR` | `WINDOW`    | the client window it is a sheet of  |
-| `_GERSHWIN_SHEET`  | `CARDINAL/32` | `1`                               |
+| `WM_WINDOW_ROLE`   | `STRING`    | `sheet` (a trailing NUL is ignored) |
 
 Both are needed: `WM_TRANSIENT_FOR` alone is set for any dialog, drawer or
-child window, and `_GERSHWIN_SHEET` alone does not say whose sheet it is. A
-value of `0`, or a missing property, means "not a sheet". A client that shows
-the same window later as an ordinary dialog must delete the property first.
+child window, and the role alone does not say whose sheet it is. Any other
+role, or none, means "not a sheet". A client that shows the same window later
+as an ordinary dialog must remove the role first. No private property is
+used, so any toolkit can take part.
 
 The window is treated as a sheet only while its parent is decorated (framed);
 a sheet of an undecorated or unknown window is framed like any other dialog.
@@ -52,6 +53,7 @@ compositor; the slide needs it.
 | File | Role |
 |------|------|
 | `URSSheetController.h/m` | Recognises sheets, places, maps, follows, hides and focuses them; hooked into `URSHybridEventHandler` (map/configure requests, Map/Unmap/Configure/Destroy notify, FocusIn, start-up adoption). |
+| `URSWindowRole.h/m` | Reads `WM_WINDOW_ROLE` values (Foundation only). |
 | `URSSheetRegistry.h/m` | Which sheet hangs from which window, and whether it is hidden with its parent (Foundation only). |
 | `URSSheetLayout.h/m` | Where a sheet sits on its parent and how far it has slid out (pure geometry). |
 | `URSSheetSlideEffect.h/m` | The 0.25 s slide as a `URSWindowEffect`, clipped at the titlebar (`-clipRectForWindowRect:`); it may replace a running effect (`-replacesRunningEffect`), so a sheet dismissed mid-slide slides back at once. |
@@ -65,4 +67,5 @@ time waits for the client's first content.
 
 `gnustep-tests test-sheets` (headless): `sheetlayout.m` (placement and
 curve), `sheetslide.m` (the slide effect, its clip and reach, replacing a
-running effect), `sheetregistry.m` (attachment bookkeeping).
+running effect), `sheetregistry.m` (attachment bookkeeping), `windowrole.m` (reading the
+role).
