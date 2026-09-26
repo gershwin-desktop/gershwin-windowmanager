@@ -480,6 +480,48 @@ static CGFloat WMLastScaleFactor = 1.0;
 
 #pragma mark - Existing Windows Decoration
 
+// Frames a window that was mapped before this window manager started, as
+// the map request handler would have; returns its client when it can take
+// the focus.
+- (XCBWindow *)adoptExistingWindow:(xcb_window_t)winId {
+    XCBWindow *rootWindow = [[[connection screens] objectAtIndex:0] rootWindow];
+    XCBWindow *focusable = nil;
+
+    //NSLog(@"[WindowManager] Adopting existing window %u", winId);
+
+    // Synthesize a map request so normal decoration flow runs
+    xcb_map_request_event_t mapEvent = {0};
+    mapEvent.response_type = XCB_MAP_REQUEST;
+    mapEvent.parent = [rootWindow window];
+    mapEvent.window = winId;
+
+    [connection handleMapRequest:&mapEvent];
+
+    // Mirror the XCB_MAP_REQUEST handler's post-processing for startup-adopted windows.
+    // Without this, pre-existing windows miss compositor registration and fixed-size
+    // border adjustment that the normal map-request flow provides.
+    XCBWindow *mappedClient = [connection windowForXCBId:winId];
+    if (mappedClient && [[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
+        if (self.compositingManager && [self.compositingManager compositingActive]) {
+            [self.compositingManager registerWindow:winId];
+            [self registerChildWindowsForCompositor:winId depth:3];
+            XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
+            [self.compositingManager registerWindow:[frame window]];
+            [self registerChildWindowsForCompositor:[frame window] depth:3];
+        }
+        [self adjustBorderForFixedSizeWindow:winId];
+        if ([self.focusManager isWindowFocusable:mappedClient allowDesktop:NO]) {
+            focusable = mappedClient;
+        }
+    }
+
+    // Apply GSTheme rendering to the titlebar immediately after decoration.
+    // The normal XCB_MAP_REQUEST path calls this; we must replicate it for
+    // startup-adopted windows or they keep the unstyled placeholder titlebar.
+    [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:winId]];
+    return focusable;
+}
+
 - (void)decorateExistingWindowsOnStartup {
     @try {
         XCBScreen *screen = [[connection screens] objectAtIndex:0];
@@ -495,6 +537,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         // Focusing every adopted window in turn made each titlebar flash
         // active; only the topmost one (the tree is bottom-first) gets focus.
         XCBWindow *topmostAdopted = nil;
+        NSMutableArray<NSNumber *> *sheets = [NSMutableArray array];
 
         connection.adoptingExistingWindows = YES;
         for (uint32_t i = 0; i < childCount; i++) {
@@ -537,38 +580,31 @@ static CGFloat WMLastScaleFactor = 1.0;
                 continue;
             }
 
-            //NSLog(@"[WindowManager] Adopting existing window %u", winId);
-
-            // Synthesize a map request so normal decoration flow runs
-            xcb_map_request_event_t mapEvent = {0};
-            mapEvent.response_type = XCB_MAP_REQUEST;
-            mapEvent.parent = [rootWindow window];
-            mapEvent.window = winId;
-
-            [connection handleMapRequest:&mapEvent];
-
-            // Mirror the XCB_MAP_REQUEST handler's post-processing for startup-adopted windows.
-            // Without this, pre-existing windows miss compositor registration and fixed-size
-            // border adjustment that the normal map-request flow provides.
-            XCBWindow *mappedClient = [connection windowForXCBId:winId];
-            if (mappedClient && [[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
-                if (self.compositingManager && [self.compositingManager compositingActive]) {
-                    [self.compositingManager registerWindow:winId];
-                    [self registerChildWindowsForCompositor:winId depth:3];
-                    XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
-                    [self.compositingManager registerWindow:[frame window]];
-                    [self registerChildWindowsForCompositor:[frame window] depth:3];
-                }
-                [self adjustBorderForFixedSizeWindow:winId];
-                if ([self.focusManager isWindowFocusable:mappedClient allowDesktop:NO]) {
-                    topmostAdopted = mappedClient;
-                }
+            // A sheet hangs from its parent, which may come later in the
+            // stacking order and must be framed first.
+            if ([self.sheetController isSheet:winId]) {
+                [sheets addObject:@(winId)];
+                continue;
             }
 
-            // Apply GSTheme rendering to the titlebar immediately after decoration.
-            // The normal XCB_MAP_REQUEST path calls this; we must replicate it for
-            // startup-adopted windows or they keep the unstyled placeholder titlebar.
-            [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:winId]];
+            XCBWindow *adopted = [self adoptExistingWindow:winId];
+            if (adopted) {
+                topmostAdopted = adopted;
+            }
+        }
+        for (NSNumber *sheet in sheets) {
+            xcb_window_t sheetId = [sheet unsignedIntValue];
+            if ([self.sheetController adoptMappedSheet:sheetId]) {
+                if (self.compositingManager && [self.compositingManager compositingActive]) {
+                    [self.compositingManager registerWindow:sheetId];
+                }
+                continue;
+            }
+            // Its parent is undecorated: framed like any other dialog.
+            XCBWindow *adopted = [self adoptExistingWindow:sheetId];
+            if (adopted) {
+                topmostAdopted = adopted;
+            }
         }
         connection.adoptingExistingWindows = NO;
 
@@ -972,8 +1008,18 @@ static CGFloat WMLastScaleFactor = 1.0;
             // frames after the switch had drawn the new one active.
             if (focusInEvent->mode == XCB_NOTIFY_MODE_NORMAL ||
                 focusInEvent->mode == XCB_NOTIFY_MODE_WHILE_GRABBED) {
-                [self handleFocusChange:focusInEvent->event isActive:YES];
-                [self.showDesktopController windowGotFocus:focusInEvent->event];
+                // A sheet has no titlebar of its own: its parent shows as
+                // the active window while the sheet has the focus, and the
+                // parent passes on a focus it gets while its sheet is up.
+                xcb_window_t focused = focusInEvent->event;
+                xcb_window_t sheetParent = [self.sheetController parentOfSheet:focused];
+                if (sheetParent != XCB_NONE) {
+                    focused = sheetParent;
+                } else if ([self.sheetController passFocusToSheetOfWindow:focused]) {
+                    break;
+                }
+                [self handleFocusChange:focused isActive:YES];
+                [self.showDesktopController windowGotFocus:focused];
             }
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 // A raise/lower only changes pixels inside the affected

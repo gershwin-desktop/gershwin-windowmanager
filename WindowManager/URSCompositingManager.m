@@ -3443,9 +3443,12 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     URSCompositeWindow *cw = [self findCWindow:windowId];
     // A window that is already animating (restored from the Dock, just born)
     // draws the eye by itself, and the effect must not cut that short.
-    // An effect may replace another one, though: a sheet dismissed while
-    // still sliding out must start sliding back at once.
-    if (!cw || !cw.viewable || (cw.animating && !cw.effect)) {
+    // Only an effect that says so replaces a running effect (see
+    // -replacesRunningEffect); a repeated hop must not restart itself.
+    BOOL replaces = cw.effect != nil
+        && [effect respondsToSelector:@selector(replacesRunningEffect)]
+        && [effect replacesRunningEffect];
+    if (!cw || !cw.viewable || (cw.animating && !replaces)) {
         return;
     }
     if (!cw.animating) {

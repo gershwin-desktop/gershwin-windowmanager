@@ -21,6 +21,13 @@
     return self;
 }
 
+// A sheet dismissed while still sliding in starts sliding back from
+// wherever it is instead of waiting for the slide in to end.
+- (BOOL)replacesRunningEffect
+{
+    return YES;
+}
+
 - (NSTimeInterval)duration
 {
     return 0.25;

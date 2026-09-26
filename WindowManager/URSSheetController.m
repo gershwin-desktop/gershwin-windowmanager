@@ -6,6 +6,7 @@
 
 #import "URSSheetController.h"
 #import "URSSheetLayout.h"
+#import "URSSheetRegistry.h"
 #import "URSSheetSlideEffect.h"
 #import "URSCompositingManager.h"
 #import "XCBConnection.h"
@@ -19,8 +20,7 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
 {
     XCBConnection *_connection;
     xcb_atom_t _sheetAtom;
-    // Sheet window id -> the client window it is a sheet of.
-    NSMutableDictionary<NSNumber *, NSNumber *> *_parents;
+    URSSheetRegistry *_registry;
 }
 
 - (instancetype)initWithConnection:(XCBConnection *)connection
@@ -28,7 +28,7 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
     self = [super init];
     if (self) {
         _connection = connection;
-        _parents = [NSMutableDictionary dictionary];
+        _registry = [URSSheetRegistry new];
         const char *name = [URSSheetPropertyName UTF8String];
         xcb_connection_t *c = [connection connection];
         xcb_intern_atom_reply_t *reply =
@@ -47,7 +47,7 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
 // The window it is a sheet of, or XCB_NONE: both the sheet mark and
 // WM_TRANSIENT_FOR must be there, since the mark alone does not say whose
 // sheet it is and WM_TRANSIENT_FOR alone is any dialog or child window.
-- (xcb_window_t)parentOfSheet:(xcb_window_t)window
+- (xcb_window_t)markedParentOfWindow:(xcb_window_t)window
 {
     if (_sheetAtom == XCB_NONE) {
         return XCB_NONE;
@@ -82,7 +82,7 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
 
 - (void)placeSheet:(xcb_window_t)sheet
 {
-    xcb_window_t parent = [_parents[@(sheet)] unsignedIntValue];
+    xcb_window_t parent = [_registry parentOfSheet:sheet];
     XCBFrame *frame = [self frameOfClient:parent];
     XCBScreen *screen = [[_connection screens] firstObject];
     if (!frame || !screen) {
@@ -126,47 +126,89 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
     free(sheetGeometry);
 }
 
-#pragma mark - Events
+#pragma mark - Showing a sheet
 
-- (BOOL)handleMapRequest:(xcb_map_request_event_t *)event
+// Registers, places and maps a window that is a sheet of a decorated
+// window; the caller has made sure it is one.
+- (void)attachSheet:(xcb_window_t)window
+           toParent:(xcb_window_t)parent
+      mapStackParent:(xcb_window_t)stackParent
 {
-    xcb_window_t parent = [self parentOfSheet:event->window];
-    if (parent == XCB_NONE) {
-        return NO;
-    }
-    if ([self frameOfClient:parent] == nil) {
-        // Nothing to hang from (an undecorated or unknown parent).
-        return NO;
-    }
-    XCBWindow *sheet = [_connection windowForXCBId:event->window];
-    if ([[sheet parentWindow] isKindOfClass:[XCBFrame class]]) {
-        // Still framed from being shown as an ordinary dialog before.
-        return NO;
-    }
+    XCBWindow *sheet = [_connection windowForXCBId:window];
     if (sheet == nil) {
-        sheet = [[XCBWindow alloc] initWithXCBWindow:event->window andConnection:_connection];
+        sheet = [[XCBWindow alloc] initWithXCBWindow:window andConnection:_connection];
         [sheet updateAttributes];
-        [sheet setParentWindow:[[XCBWindow alloc] initWithXCBWindow:event->parent
+        [sheet setParentWindow:[[XCBWindow alloc] initWithXCBWindow:stackParent
                                                       andConnection:_connection]];
         [_connection registerWindow:sheet];
         // Like other undecorated windows: a click on it must give it the
         // focus back after the user clicked elsewhere.
         [sheet grabButton];
+        // Its FocusIn is what draws the parent's titlebar active.
+        uint32_t mask = XCB_EVENT_MASK_FOCUS_CHANGE;
+        xcb_change_window_attributes([_connection connection], window,
+                                     XCB_CW_EVENT_MASK, &mask);
     }
     [sheet setDecorated:NO];
     [sheet updatePid];
 
-    _parents[@(event->window)] = @(parent);
-    [self placeSheet:event->window];
+    [_registry attachSheet:window toParent:parent];
+    [self placeSheet:window];
     [_connection mapWindow:sheet];
     [sheet setNormalState];
     [_connection flush];
+}
+
+// The parent it can hang from, or XCB_NONE when the window is no sheet or
+// has nothing to hang from (an undecorated or unknown parent) and so is
+// shown as an ordinary window.
+- (xcb_window_t)attachableParentOfSheet:(xcb_window_t)window
+{
+    xcb_window_t parent = [self markedParentOfWindow:window];
+    if (parent == XCB_NONE || [self frameOfClient:parent] == nil) {
+        return XCB_NONE;
+    }
+    if ([[[_connection windowForXCBId:window] parentWindow] isKindOfClass:[XCBFrame class]]) {
+        // Still framed from being shown as an ordinary dialog before.
+        return XCB_NONE;
+    }
+    return parent;
+}
+
+- (BOOL)handleMapRequest:(xcb_map_request_event_t *)event
+{
+    xcb_window_t parent = [self attachableParentOfSheet:event->window];
+    if (parent == XCB_NONE) {
+        return NO;
+    }
+    [self attachSheet:event->window toParent:parent mapStackParent:event->parent];
+    return YES;
+}
+
+- (BOOL)isSheet:(xcb_window_t)window
+{
+    return [self markedParentOfWindow:window] != XCB_NONE;
+}
+
+- (BOOL)adoptMappedSheet:(xcb_window_t)window
+{
+    xcb_window_t parent = [self attachableParentOfSheet:window];
+    if (parent == XCB_NONE) {
+        return NO;
+    }
+    XCBScreen *screen = [[_connection screens] firstObject];
+    [self attachSheet:window toParent:parent mapStackParent:[[screen rootWindow] window]];
+    // No MapNotify follows for a window that is mapped already, and the
+    // slide-out after its unmap needs the picture kept.
+    if ([self.compositingManager compositingActive]) {
+        [self.compositingManager setKeepsContentAfterUnmap:YES forWindow:window];
+    }
     return YES;
 }
 
 - (BOOL)handleConfigureRequest:(xcb_configure_request_event_t *)event
 {
-    if (_parents[@(event->window)] == nil) {
+    if ([_registry parentOfSheet:event->window] == XCB_NONE) {
         return NO;
     }
     uint16_t mask = 0;
@@ -188,9 +230,62 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
     return YES;
 }
 
+#pragma mark - Following the parent
+
+- (xcb_window_t)parentOfSheet:(xcb_window_t)window
+{
+    return [_registry parentOfSheet:window];
+}
+
+// The sheet hanging from a window given as its client or its frame.
+- (xcb_window_t)sheetOfWindow:(xcb_window_t)window
+{
+    xcb_window_t sheet = [_registry sheetOfParent:window];
+    return sheet != XCB_NONE ? sheet : [self sheetOfFrame:window];
+}
+
+// Only the frame says whether the parent is shown: its client is also
+// unmapped and mapped again when it is reparented into a new frame (every
+// window the window manager adopts when it starts), which must not hide
+// the sheet.
+- (xcb_window_t)sheetOfFrame:(xcb_window_t)window
+{
+    for (NSNumber *candidate in [_registry sheets]) {
+        XCBFrame *frame = [self frameOfClient:[_registry parentOfSheet:[candidate unsignedIntValue]]];
+        if (frame && [frame window] == window) {
+            return [candidate unsignedIntValue];
+        }
+    }
+    return XCB_NONE;
+}
+
+- (BOOL)passFocusToSheetOfWindow:(xcb_window_t)window
+{
+    xcb_window_t sheet = [self sheetOfWindow:window];
+    if (sheet == XCB_NONE || [_registry isSheetHiddenWithParent:sheet]) {
+        return NO;
+    }
+    [[_connection windowForXCBId:sheet] focus];
+    [_connection flush];
+    return YES;
+}
+
 - (void)windowMapped:(xcb_window_t)window
 {
-    if (_parents[@(window)] == nil || ![self.compositingManager compositingActive]) {
+    if ([_registry isSheetHiddenWithParent:window]) {
+        // Back with its restored parent: no slide, it was never dismissed.
+        [_registry setSheet:window hiddenWithParent:NO];
+        return;
+    }
+    xcb_window_t hidden = [self sheetOfFrame:window];
+    if (hidden != XCB_NONE && [_registry isSheetHiddenWithParent:hidden]) {
+        [self placeSheet:hidden];
+        xcb_map_window([_connection connection], hidden);
+        [_connection flush];
+        return;
+    }
+    if ([_registry parentOfSheet:window] == XCB_NONE ||
+        ![self.compositingManager compositingActive]) {
         return;
     }
     [self.compositingManager setKeepsContentAfterUnmap:YES forWindow:window];
@@ -200,40 +295,71 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
 
 - (void)windowWillUnmap:(xcb_window_t)window
 {
-    if (_parents[@(window)] == nil) {
+    if ([_registry parentOfSheet:window] != XCB_NONE) {
+        if ([_registry isSheetHiddenWithParent:window]) {
+            // Unmapped by us along with its parent; still attached.
+            return;
+        }
+        xcb_window_t parent = [_registry parentOfSheet:window];
+        [_registry detachSheet:window];
+        [self returnFocusFromSheet:window toParent:parent];
+        if ([self.compositingManager compositingActive]) {
+            [self.compositingManager playEffect:[[URSSheetSlideEffect alloc] initAppearing:NO]
+                                       onWindow:window];
+        }
         return;
     }
-    [_parents removeObjectForKey:@(window)];
-    if ([self.compositingManager compositingActive]) {
-        [self.compositingManager playEffect:[[URSSheetSlideEffect alloc] initAppearing:NO]
-                                   onWindow:window];
+    // A minimised or otherwise unmapped parent takes its sheet along; the
+    // sheet would otherwise hang in the air where the parent was.
+    xcb_window_t sheet = [self sheetOfFrame:window];
+    if (sheet != XCB_NONE && ![_registry isSheetHiddenWithParent:sheet]) {
+        [_registry setSheet:sheet hiddenWithParent:YES];
+        xcb_unmap_window([_connection connection], sheet);
+        [_connection flush];
+    }
+}
+
+// The window manager never tracked the sheet as the focused window (it
+// has no titlebar), so nothing else would give the focus back once it is
+// gone.  By the time the unmap is seen the X server has already dropped
+// the sheet's focus on the root window (or none), so that also counts as
+// the sheet having had it; a focus on any other window is the user's.
+- (void)returnFocusFromSheet:(xcb_window_t)sheet toParent:(xcb_window_t)parent
+{
+    xcb_connection_t *c = [_connection connection];
+    xcb_window_t root = [[[[_connection screens] firstObject] rootWindow] window];
+    xcb_get_input_focus_reply_t *focus =
+        xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL);
+    BOOL sheetHadFocus = focus && (focus->focus == sheet || focus->focus == root ||
+                                   focus->focus == XCB_NONE ||
+                                   focus->focus == XCB_INPUT_FOCUS_POINTER_ROOT);
+    free(focus);
+    XCBWindow *parentWindow = [_connection windowForXCBId:parent];
+    if (sheetHadFocus && parentWindow && [self frameOfClient:parent]) {
+        [parentWindow focus];
+        [_connection flush];
     }
 }
 
 - (void)windowDestroyed:(xcb_window_t)window
 {
-    [_parents removeObjectForKey:@(window)];
-    NSArray *orphans = [_parents allKeysForObject:@(window)];
-    [_parents removeObjectsForKeys:orphans];
+    [_registry forgetWindow:window];
 }
 
 - (void)windowConfigured:(xcb_configure_notify_event_t *)event
 {
-    NSNumber *parent = _parents[@(event->window)];
-    if (parent != nil) {
+    xcb_window_t parent = [_registry parentOfSheet:event->window];
+    if (parent != XCB_NONE) {
         // Something restacked the sheet away from its parent.
-        XCBFrame *frame = [self frameOfClient:[parent unsignedIntValue]];
+        XCBFrame *frame = [self frameOfClient:parent];
         if (frame && event->above_sibling != [frame window]) {
             [self placeSheet:event->window];
         }
         return;
     }
-    for (NSNumber *sheet in [_parents allKeys]) {
-        xcb_window_t client = [_parents[sheet] unsignedIntValue];
-        XCBFrame *frame = [self frameOfClient:client];
-        if (client == event->window || (frame && [frame window] == event->window)) {
-            [self placeSheet:[sheet unsignedIntValue]];
-        }
+    xcb_window_t sheet = [self sheetOfWindow:event->window];
+    if (sheet != XCB_NONE) {
+        [self placeSheet:sheet];
     }
 }
 
