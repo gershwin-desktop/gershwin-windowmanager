@@ -98,6 +98,9 @@ typedef NS_ENUM(NSInteger, WindowState)
 @property (nonatomic, assign) BOOL skipPager;
 @property (nonatomic, assign) BOOL isAbove;
 @property (nonatomic, assign) BOOL isBelow;
+// A window kept directly below another one, which every restack must leave
+// it under (a drawer below its parent's frame); nil for most windows.
+@property (weak, nonatomic) XCBWindow *stackedBelowWindow;
 @property (nonatomic, assign) BOOL maximizedVertically;
 @property (nonatomic, assign) BOOL maximizedHorizontally;
 @property (nonatomic, assign) BOOL shaded;

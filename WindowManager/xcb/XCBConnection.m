@@ -656,6 +656,8 @@ static XCBConnection *sharedInstance;
             if ([aWindow pid] != fpid) continue;
             if ([aWindow isKindOfClass:[XCBFrame class]]) continue;
             if ([aWindow decorated]) continue;
+            // Kept below its parent, put back there at the end.
+            if ([aWindow stackedBelowWindow]) continue;
             [auxCandidatesById setObject:aWindow forKey:@([aWindow window])];
         }
 
@@ -755,6 +757,22 @@ static XCBConnection *sharedInstance;
     // Only the focused application's own panels are re-raised, matching
     // the transient loop above.
     [self reassertAboveFramesForPid:fpid];
+
+    // Windows kept directly below another (drawers below their parent's
+    // frame) go back there after whatever the loops above raised.
+    for (XCBWindow *aWindow in [windowsMap allValues])
+    {
+        XCBWindow *above = [aWindow stackedBelowWindow];
+        if (!above || ![aWindow isMapped])
+            continue;
+        uint32_t values[2] = { [above window], XCB_STACK_MODE_BELOW };
+        xcb_configure_window(connection, [aWindow window],
+                             XCB_CONFIG_WINDOW_SIBLING | XCB_CONFIG_WINDOW_STACK_MODE, values);
+        if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+        {
+            [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+        }
+    }
 
     ewmhService = nil;
 }

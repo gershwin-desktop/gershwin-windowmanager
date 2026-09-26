@@ -28,6 +28,8 @@
     // ConfigureNotify for windows it has not framed, so this is the only
     // record that needs no round trip.
     NSMutableDictionary<NSNumber *, NSValue *> *_placedRects;
+    // Attached window -> its parent client's origin before adoption.
+    NSMutableDictionary<NSNumber *, NSValue *> *_parentOriginsBeforeAdoption;
 }
 
 - (instancetype)initWithConnection:(XCBConnection *)connection
@@ -38,6 +40,7 @@
         _registry = [URSAttachmentRegistry new];
         _contentInsets = [NSMutableDictionary new];
         _placedRects = [NSMutableDictionary new];
+        _parentOriginsBeforeAdoption = [NSMutableDictionary new];
         const char *name = [URSWindowRolePropertyName UTF8String];
         xcb_connection_t *c = [connection connection];
         xcb_intern_atom_reply_t *reply =
@@ -256,6 +259,9 @@
     if (NSIsEmptyRect(r)) {
         return;
     }
+    // The window manager's own restacks (raising an application's
+    // undecorated windows with it) must leave it there too.
+    [[_connection windowForXCBId:window] setStackedBelowWindow:[self stacksAboveParent] ? nil : frame];
     [self configureWindow:window toRect:r currentSize:current.size parentFrame:[frame window]];
     [_connection flush];
 }
@@ -374,8 +380,16 @@
     }
     NSRect parentFrame, parentContent, rect;
     if (![self getParentFrame:&parentFrame parentContent:&parentContent
-                   windowRect:&rect forWindow:window parent:parent] ||
-        ![self prepareAttachmentOfWindow:window rect:rect parentFrame:parentFrame
+                   windowRect:&rect forWindow:window parent:parent]) {
+        return XCB_NONE;
+    }
+    NSValue *before = _parentOriginsBeforeAdoption[@(window)];
+    if (before != nil) {
+        [_parentOriginsBeforeAdoption removeObjectForKey:@(window)];
+        rect = NSOffsetRect(rect, NSMinX(parentContent) - [before pointValue].x,
+                            NSMinY(parentContent) - [before pointValue].y);
+    }
+    if (![self prepareAttachmentOfWindow:window rect:rect parentFrame:parentFrame
                            parentContent:parentContent]) {
         return XCB_NONE;
     }
@@ -395,6 +409,23 @@
 - (BOOL)isAttachedKind:(xcb_window_t)window
 {
     return [self markedParentOfWindow:window] != XCB_NONE;
+}
+
+- (void)rememberParentBeforeAdoptionOfWindow:(xcb_window_t)window
+{
+    xcb_window_t parent = [self markedParentOfWindow:window];
+    if (parent == XCB_NONE) {
+        return;
+    }
+    xcb_connection_t *c = [_connection connection];
+    xcb_window_t root = [[[[_connection screens] firstObject] rootWindow] window];
+    xcb_translate_coordinates_reply_t *origin =
+        xcb_translate_coordinates_reply(c, xcb_translate_coordinates(c, parent, root, 0, 0), NULL);
+    if (origin) {
+        _parentOriginsBeforeAdoption[@(window)] =
+            [NSValue valueWithPoint:NSMakePoint(origin->dst_x, origin->dst_y)];
+    }
+    free(origin);
 }
 
 - (BOOL)adoptMappedWindow:(xcb_window_t)window
@@ -535,6 +566,7 @@
         URSAttachmentEdge edge = [self slideEdgeOfWindow:window];
         [_registry detachWindow:window];
         [self forgetAttachmentOfWindow:window];
+        [[_connection windowForXCBId:window] setStackedBelowWindow:nil];
         [self returnFocusFromWindow:window toParent:parent];
         if ([self.compositingManager compositingActive]) {
             [self.compositingManager playEffect:[[URSAttachmentSlideEffect alloc]

@@ -45,6 +45,10 @@
 // has been attached to its (by then decorated) parent and must not be
 // framed.
 - (BOOL)adoptMappedWindow:(xcb_window_t)window;
+// Before any window is adopted: notes where the parent of a window of this
+// kind is, so that the window keeps its place relative to the parent even
+// when adopting moves the parent.
+- (void)rememberParentBeforeAdoptionOfWindow:(xcb_window_t)window;
 // The client an attached window hangs from, or XCB_NONE.
 - (xcb_window_t)parentOfWindow:(xcb_window_t)window;
 // The attached windows hanging from a frame or its client.

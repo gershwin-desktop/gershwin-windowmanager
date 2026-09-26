@@ -547,6 +547,14 @@ static CGFloat WMLastScaleFactor = 1.0;
         XCBWindow *topmostAdopted = nil;
         NSMutableArray<NSNumber *> *attachedWindows = [NSMutableArray array];
 
+        // A drawer was put next to its parent where the parent was before
+        // it is framed (and maybe moved) below.
+        for (uint32_t i = 0; i < childCount; i++) {
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments rememberParentBeforeAdoptionOfWindow:children[i]];
+            }
+        }
+
         connection.adoptingExistingWindows = YES;
         for (uint32_t i = 0; i < childCount; i++) {
             xcb_window_t winId = children[i];
