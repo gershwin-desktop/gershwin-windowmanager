@@ -36,7 +36,9 @@ needed.
 |-------|-----------|
 | Map request | Not framed. Placed at the top of the parent's client area, centred, kept on the screen sideways, stacked directly above the parent's frame, mapped and focused. |
 | Configure request | Only its size is honoured; it is placed again, so a growing sheet stays centred. |
-| Parent moves, resizes or is restacked | The sheet follows (ConfigureNotify of the parent's client or frame). |
+| Parent dragged or resized by the window manager | The sheet moves in the same batch of requests as the frame, before the compositor paints. |
+| Parent moves, resizes or is restacked otherwise | The sheet follows (ConfigureNotify of the parent's client or frame). |
+| Parent wobbles | The sheet bends along as a continuation of the parent's mesh. |
 | Parent (client or frame) gets the focus | The focus is passed to the sheet; the parent keeps its active titlebar. A click on the parent therefore leaves Return and typing with the sheet. |
 | Sheet gets the focus | The parent's titlebar is drawn active (the sheet has none). |
 | Parent's frame unmapped (minimised) | The sheet is unmapped with it and stays attached. |
@@ -52,7 +54,8 @@ compositor; the slide needs it.
 
 | File | Role |
 |------|------|
-| `URSSheetController.h/m` | Recognises sheets, places, maps, follows, hides and focuses them; hooked into `URSHybridEventHandler` (map/configure requests, Map/Unmap/Configure/Destroy notify, FocusIn, start-up adoption). |
+| `URSAttachmentController.h/m` | Shared with drawers (DRAWERS.md): recognises attached windows by role, places, maps, follows, hides and focuses them; hooked into `URSHybridEventHandler` (map/configure requests, Map/Unmap/Configure/Destroy notify, FocusIn, start-up adoption, drag and resize motion). |
+| `URSSheetController.h/m` | Where a sheet hangs, that it stacks above its parent and takes its focus. |
 | `URSWindowRole.h/m` | Reads `WM_WINDOW_ROLE` values (Foundation only). |
 | `URSAttachmentRegistry.h/m` | Which sheet (or drawer) hangs from which window, and whether it is hidden with its parent (Foundation only). |
 | `URSSheetLayout.h/m` | Where a sheet sits on its parent and how far it has slid out (pure geometry). |

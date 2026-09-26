@@ -76,7 +76,11 @@ WindowManager/
 ├── URSWobblyModel.h/m              Spring mesh of a wobbly window (pure physics)
 ├── URSTriangleSpans.h/m            Watertight triangle spans for bent windows
 ├── URSWobblyWindowsController.h/m  Wobbly windows while dragging
+├── URSAttachmentController.h/m     Sheets and drawers attached to a parent
 ├── URSSheetController.h/m          Sheets attached to their parent (SHEETS.md)
+├── URSDrawerController.h/m         Drawers attached to their parent (DRAWERS.md)
+├── URSDrawerLayout.h/m             Drawer placement (pure geometry)
+├── URSAttachedDeformation.h/m      Attached window bending with a wobbling parent
 ├── URSAttachmentRegistry.h/m       Which sheet or drawer hangs from which window
 ├── URSSheetLayout.h/m              Sheet placement and slide (pure geometry)
 ├── URSAttachmentSlideEffect.h/m    Slide of an attached window out from under its parent

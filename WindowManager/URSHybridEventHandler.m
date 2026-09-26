@@ -832,8 +832,10 @@ static CGFloat WMLastScaleFactor = 1.0;
     XCBFrame *frame = nil;
     if ([connection dragState] && [window isKindOfClass:[XCBTitleBar class]]) {
         frame = (XCBFrame *)[window parentWindow];
-    } else if ([connection resizeState] && [window isKindOfClass:[XCBFrame class]]) {
-        frame = (XCBFrame *)window;
+    } else if ([connection resizeState]) {
+        // The grip is a child of the frame; the edges are the frame itself.
+        frame = [window isKindOfClass:[XCBFrame class]] ? (XCBFrame *)window
+                                                        : (XCBFrame *)[window parentWindow];
     }
     if (![frame isKindOfClass:[XCBFrame class]]) {
         return;

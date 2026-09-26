@@ -290,14 +290,12 @@
         }
         [self configureWindow:window toRect:r currentSize:current parentFrame:[frame window]];
         // The compositor would otherwise learn of the move only from the
-        // ConfigureNotify a round trip later and paint one frame behind.
-        if (composited) {
-            if (NSEqualSizes(r.size, current)) {
-                [self.compositingManager moveWindow:window x:NSMinX(r) y:NSMinY(r)];
-            } else {
-                [self.compositingManager resizeWindow:window x:NSMinX(r) y:NSMinY(r)
-                                                width:NSWidth(r) height:NSHeight(r)];
-            }
+        // ConfigureNotify a round trip later and paint one frame behind.  A
+        // new size is left to that ConfigureNotify: told early, the
+        // compositor keeps the picture of the old size and never paints the
+        // part the window grew by.
+        if (composited && NSEqualSizes(r.size, current)) {
+            [self.compositingManager moveWindow:window x:NSMinX(r) y:NSMinY(r)];
         }
     }
     [_connection flush];
