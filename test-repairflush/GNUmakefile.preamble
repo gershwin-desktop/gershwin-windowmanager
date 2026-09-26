@@ -42,6 +42,13 @@ WM_COLLABORATORS = \
 	../WindowManager/URSShadowOverrides.m \
 	../WindowManager/URSTitlebarRegistry.m \
 	../WindowManager/URSFramePacer.m \
+	../WindowManager/URSFlowLayout.m \
+	../WindowManager/URSWindowFlowController.m \
+	../WindowManager/URSUtilityRestackOrder.m \
+	../WindowManager/URSSheetLayout.m \
+	../WindowManager/URSSheetSlideEffect.m \
+	../WindowManager/URSSheetRegistry.m \
+	../WindowManager/URSSheetController.m \
 	../WindowManager/GSThemeTitleBar.m \
 	../WindowManager/xcb/XCBConnection.m \
 	../WindowManager/xcb/XCBWindow.m \
