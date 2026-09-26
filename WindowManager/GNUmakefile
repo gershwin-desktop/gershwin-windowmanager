@@ -41,6 +41,9 @@ $(APP_NAME)_OBJC_FILES = \
 		URSSheetSlideEffect.m \
 		URSAttachmentController.m \
 		URSSheetController.m \
+		URSDrawerController.m \
+		URSDrawerLayout.m \
+		URSAttachedDeformation.m \
 		URSAttachmentRegistry.m \
 		URSWindowRole.m \
 		URSWobblyModel.m \

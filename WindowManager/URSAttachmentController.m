@@ -8,6 +8,8 @@
 #import "URSAttachmentRegistry.h"
 #import "URSWindowRole.h"
 #import "URSCompositingManager.h"
+#import "URSShapePath.h"
+#import "XCBAtomService.h"
 #import "XCBConnection.h"
 #import "XCBWindow.h"
 #import "XCBFrame.h"
@@ -303,6 +305,30 @@
 
 #pragma mark - Showing an attached window
 
+// An attached window is not framed, so the frame's handling of the
+// _WM_SHAPE_PATH outline does not reach it; the compositor is given the
+// outline directly (a drawer's rounded outer corners).  The client sets it
+// before mapping.
+- (void)applyOutlineOfWindow:(xcb_window_t)window
+{
+    if (![self.compositingManager compositingActive]) {
+        return;
+    }
+    xcb_connection_t *c = [_connection connection];
+    xcb_atom_t atom = [[XCBAtomService sharedInstanceWithConnection:_connection]
+                          cacheAtom:@"_WM_SHAPE_PATH"];
+    xcb_get_property_reply_t *reply =
+        xcb_get_property_reply(c, xcb_get_property(c, 0, window, atom, XCB_ATOM_INTEGER, 0, 65536),
+                               NULL);
+    URSShapePath *path = nil;
+    if (reply && reply->type == XCB_ATOM_INTEGER && reply->format == 32) {
+        path = [URSShapePath shapePathWithValues:(const int32_t *)xcb_get_property_value(reply)
+                                           count:(NSUInteger)xcb_get_property_value_length(reply) / 4];
+    }
+    free(reply);
+    [self.compositingManager setShapePath:path clientOriginX:0 y:0 forWindow:window];
+}
+
 // Registers, places and maps a window that hangs from a decorated window;
 // the caller has made sure it is one.
 - (void)attachWindow:(xcb_window_t)window
@@ -328,6 +354,7 @@
     [attached updatePid];
 
     [_registry attachWindow:window toParent:parent exclusive:[self attachesExclusively]];
+    [self applyOutlineOfWindow:window];
     [self placeWindow:window];
     [_connection mapWindow:attached];
     [attached setNormalState];
@@ -559,6 +586,10 @@
 {
     if ([_registry parentOfWindow:window] != XCB_NONE) {
         [self forgetAttachmentOfWindow:window];
+    }
+    // The compositor keys outlines by window id, and X reuses ids.
+    if (_placedRects[@(window)] != nil && [self.compositingManager compositingActive]) {
+        [self.compositingManager setShapePath:nil clientOriginX:0 y:0 forWindow:window];
     }
     for (NSNumber *attached in [_registry windowsOfParent:window]) {
         [self forgetAttachmentOfWindow:[attached unsignedIntValue]];

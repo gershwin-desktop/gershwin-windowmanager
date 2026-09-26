@@ -40,6 +40,9 @@
 // frame instead of triggering an uncapped series of paints.  With Present,
 // the display's refresh paces painting instead (see URSFramePacer).
 static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
+// The longest step an effect that plays every frame may take between two
+// paints: two 60 Hz frames, so a stall slows it rather than skipping it.
+static const NSTimeInterval URSEffectMaxFrameGap = 2.0 / 60.0;
 
 // While the window manager starts, every window already on screen is put
 // into a new frame and redraws; showing each step made the whole desktop
@@ -143,6 +146,8 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // An effect that has run but whose last frame stays on screen (a window
 // left turned over); painted while the window does not animate otherwise.
 @property (strong, nonatomic) id<URSWindowEffect> heldEffect;
+// When the running effect was last painted (see -playsEveryFrame).
+@property (assign, nonatomic) NSTimeInterval lastEffectPaint;
 // Mesh the window's picture is bent over (see setDeformation:forWindow:),
 // and the area it covered when last painted, which must be repainted too.
 @property (strong, nonatomic) id<URSWindowDeformation> deformation;
@@ -3468,6 +3473,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     cw.animationDuration = [effect duration];
     cw.animating = YES;
     cw.effect = effect;
+    cw.lastEffectPaint = 0;
     cw.heldEffect = nil;
 
     [self startAnimationTimerIfNeeded];
@@ -3590,7 +3596,20 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
     }
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     xcb_connection_t *conn = [self.connection connection];
-    for (URSCompositeWindow *cw in [self.cwindows allValues]) {
+    // A mesh that follows another one is stepped after it, so both are
+    // painted as of the same moment.
+    NSArray<URSCompositeWindow *> *windows = [self.cwindows allValues];
+    NSMutableArray<URSCompositeWindow *> *followers = [NSMutableArray array];
+    for (URSCompositeWindow *cw in windows) {
+        if ([cw.deformation respondsToSelector:@selector(followsOtherDeformation)] &&
+            [cw.deformation followsOtherDeformation]) {
+            [followers addObject:cw];
+        }
+    }
+    NSMutableArray<URSCompositeWindow *> *ordered = [windows mutableCopy];
+    [ordered removeObjectsInArray:followers];
+    [ordered addObjectsFromArray:followers];
+    for (URSCompositeWindow *cw in ordered) {
         if (!cw.deformation) {
             continue;
         }
@@ -5311,6 +5330,14 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
             cw.animationStart = now;
             URS_PROFILE_END(paintWindow);
             return NO;
+        }
+        if ([cw.effect respondsToSelector:@selector(playsEveryFrame)] && [cw.effect playsEveryFrame]) {
+            // A stall (the client flooding requests as it shows a window)
+            // postpones the rest of the effect instead of skipping frames.
+            if (cw.lastEffectPaint > 0 && now - cw.lastEffectPaint > URSEffectMaxFrameGap) {
+                cw.animationStart += now - cw.lastEffectPaint - URSEffectMaxFrameGap;
+            }
+            cw.lastEffectPaint = now;
         }
         double t = (now - cw.animationStart) / cw.animationDuration;
         if (t >= 1.0) {

@@ -34,6 +34,12 @@ static const double URSAttachmentClipMargin = 1024.0;
     return YES;
 }
 
+// Coming out from under the parent is the whole point: every step shows.
+- (BOOL)playsEveryFrame
+{
+    return YES;
+}
+
 - (NSTimeInterval)duration
 {
     return 0.25;

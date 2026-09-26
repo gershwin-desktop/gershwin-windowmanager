@@ -34,6 +34,8 @@ int main(void)
       initAppearing: NO outward: URSAttachmentEdgeRight] autorelease];
 
     PASS([in duration] >= 0.2 && [in duration] <= 0.3, "the slide takes about a quarter second");
+    PASS([in respondsToSelector: @selector(playsEveryFrame)] && [in playsEveryFrame],
+         "a stall postpones the slide rather than letting it jump half way out");
     PASS(NSIsEmptyRect(shown(in, 0.0, w)), "nothing shows at the start: it is under the parent");
     PASS(near(NSMaxX([in paintRectAtProgress: 0.0 forWindowRect: w]), NSMinX(w)),
          "it starts fully tucked under the parent's edge");

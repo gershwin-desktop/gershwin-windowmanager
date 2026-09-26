@@ -10,6 +10,7 @@
 //
 
 #import "URSHybridEventHandler.h"
+#import "URSDrawerController.h"
 #import <unistd.h>
 #import <fcntl.h>
 #import <errno.h>
@@ -241,7 +242,8 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                                          focusManager:self.focusManager
                                                                        windowSwitcher:self.windowSwitcher
                                                                       workareaManager:self.workareaManager];
-    self.attachmentControllers = @[ [[URSSheetController alloc] initWithConnection:connection] ];
+    self.attachmentControllers = @[ [[URSSheetController alloc] initWithConnection:connection],
+                                    [[URSDrawerController alloc] initWithConnection:connection] ];
 
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -299,6 +301,10 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         self.wobblyWindowsController = [[URSWobblyWindowsController alloc] init];
         self.wobblyWindowsController.compositingManager = self.compositingManager;
+        __weak URSHybridEventHandler *weakSelf = self;
+        self.wobblyWindowsController.attachedWindowsOfFrame = ^NSArray<NSNumber *> *(xcb_window_t frame) {
+            return [weakSelf attachedWindowsOfWindow:frame];
+        };
     }
 
     /* Follow the theme the user picks while the session runs.  GSTheme posts
@@ -807,6 +813,36 @@ static CGFloat WMLastScaleFactor = 1.0;
     return XCB_NONE;
 }
 
+- (NSArray<NSNumber *> *)attachedWindowsOfWindow:(xcb_window_t)window
+{
+    NSMutableArray<NSNumber *> *attached = [NSMutableArray array];
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        [attached addObjectsFromArray:[attachments attachedWindowsOfWindow:window]];
+    }
+    return attached;
+}
+
+// A frame the window manager is moving or resizing takes its sheets and
+// drawers along in the same batch of requests, before the compositor
+// paints the frame at its new place, so no frame shows the parent moved
+// and them not yet.
+- (void)attachedWindowsFollowMotion:(xcb_motion_notify_event_t *)motionEvent
+{
+    XCBWindow *window = [connection windowForXCBId:motionEvent->event];
+    XCBFrame *frame = nil;
+    if ([connection dragState] && [window isKindOfClass:[XCBTitleBar class]]) {
+        frame = (XCBFrame *)[window parentWindow];
+    } else if ([connection resizeState] && [window isKindOfClass:[XCBFrame class]]) {
+        frame = (XCBFrame *)window;
+    }
+    if (![frame isKindOfClass:[XCBFrame class]]) {
+        return;
+    }
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        [attachments followFrame:frame];
+    }
+}
+
 - (BOOL)passFocusToAttachedWindowOfWindow:(xcb_window_t)window
 {
     for (URSAttachmentController *attachments in self.attachmentControllers) {
@@ -824,6 +860,7 @@ static CGFloat WMLastScaleFactor = 1.0;
     }
     [connection handleMotionNotify:motionEvent];
     [self.titlebarController handleResizeDuringMotion:motionEvent];
+    [self attachedWindowsFollowMotion:motionEvent];
     [self handleCompositingDuringMotion:motionEvent];
     [self.titlebarController handleHoverDuringMotion:motionEvent];
 }

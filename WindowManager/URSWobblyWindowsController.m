@@ -6,6 +6,7 @@
 
 #import "URSWobblyWindowsController.h"
 #import "URSWobblyModel.h"
+#import "URSAttachedDeformation.h"
 #import "URSCompositingManager.h"
 #import "XCBFrame.h"
 
@@ -37,6 +38,12 @@ NSString * const URSWobblyWindowsKey = @"URSWobblyWindows";
                                          grabPoint:pointer
                                               time:[NSDate timeIntervalSinceReferenceDate]];
     [self.compositingManager setDeformation:model forWindow:frameId];
+    if (self.attachedWindowsOfFrame && [self.compositingManager deformationForWindow:frameId] == model) {
+        for (NSNumber *attached in self.attachedWindowsOfFrame(frameId)) {
+            [self.compositingManager setDeformation:[[URSAttachedDeformation alloc] initWithParent:model]
+                                          forWindow:[attached unsignedIntValue]];
+        }
+    }
     // The compositor declines while the window plays an animation; the drag
     // then stays flat rather than retrying on every motion.
     self.model = model;
