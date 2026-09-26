@@ -50,6 +50,7 @@ WM_COLLABORATORS = \
 	../WindowManager/URSSheetSlideEffect.m \
 	../WindowManager/URSAttachmentRegistry.m \
 	../WindowManager/URSWindowRole.m \
+	../WindowManager/URSAttachmentController.m \
 	../WindowManager/URSSheetController.m \
 	../WindowManager/URSProjection.m \
 	../WindowManager/URSFlipGeometry.m \

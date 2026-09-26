@@ -241,7 +241,7 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                                          focusManager:self.focusManager
                                                                        windowSwitcher:self.windowSwitcher
                                                                       workareaManager:self.workareaManager];
-    self.sheetController = [[URSSheetController alloc] initWithConnection:connection];
+    self.attachmentControllers = @[ [[URSSheetController alloc] initWithConnection:connection] ];
 
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -294,7 +294,9 @@ static CGFloat WMLastScaleFactor = 1.0;
         self.overviewController.compositingManager = self.compositingManager;
         self.windowSwitcher.flowController.compositingManager = self.compositingManager;
         self.showDesktopController.compositingManager = self.compositingManager;
-        self.sheetController.compositingManager = self.compositingManager;
+        for (URSAttachmentController *attachments in self.attachmentControllers) {
+            attachments.compositingManager = self.compositingManager;
+        }
         self.wobblyWindowsController = [[URSWobblyWindowsController alloc] init];
         self.wobblyWindowsController.compositingManager = self.compositingManager;
     }
@@ -537,7 +539,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         // Focusing every adopted window in turn made each titlebar flash
         // active; only the topmost one (the tree is bottom-first) gets focus.
         XCBWindow *topmostAdopted = nil;
-        NSMutableArray<NSNumber *> *sheets = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *attachedWindows = [NSMutableArray array];
 
         connection.adoptingExistingWindows = YES;
         for (uint32_t i = 0; i < childCount; i++) {
@@ -580,10 +582,10 @@ static CGFloat WMLastScaleFactor = 1.0;
                 continue;
             }
 
-            // A sheet hangs from its parent, which may come later in the
-            // stacking order and must be framed first.
-            if ([self.sheetController isSheet:winId]) {
-                [sheets addObject:@(winId)];
+            // A sheet or drawer hangs from its parent, which may come later
+            // in the stacking order and must be framed first.
+            if ([self attachmentControllerOfKind:winId] != nil) {
+                [attachedWindows addObject:@(winId)];
                 continue;
             }
 
@@ -592,16 +594,16 @@ static CGFloat WMLastScaleFactor = 1.0;
                 topmostAdopted = adopted;
             }
         }
-        for (NSNumber *sheet in sheets) {
-            xcb_window_t sheetId = [sheet unsignedIntValue];
-            if ([self.sheetController adoptMappedSheet:sheetId]) {
+        for (NSNumber *attached in attachedWindows) {
+            xcb_window_t attachedId = [attached unsignedIntValue];
+            if ([[self attachmentControllerOfKind:attachedId] adoptMappedWindow:attachedId]) {
                 if (self.compositingManager && [self.compositingManager compositingActive]) {
-                    [self.compositingManager registerWindow:sheetId];
+                    [self.compositingManager registerWindow:attachedId];
                 }
                 continue;
             }
-            // Its parent is undecorated: framed like any other dialog.
-            XCBWindow *adopted = [self adoptExistingWindow:sheetId];
+            // Its parent is undecorated: framed like any other window.
+            XCBWindow *adopted = [self adoptExistingWindow:attachedId];
             if (adopted) {
                 topmostAdopted = adopted;
             }
@@ -780,6 +782,39 @@ static CGFloat WMLastScaleFactor = 1.0;
     }
     [self cleanupBeforeExit];
     [NSApp terminate:nil];
+}
+
+#pragma mark - Attached windows (sheets, drawers)
+
+- (URSAttachmentController *)attachmentControllerOfKind:(xcb_window_t)window
+{
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        if ([attachments isAttachedKind:window]) {
+            return attachments;
+        }
+    }
+    return nil;
+}
+
+- (xcb_window_t)parentOfAttachedWindow:(xcb_window_t)window
+{
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        xcb_window_t parent = [attachments parentOfWindow:window];
+        if (parent != XCB_NONE) {
+            return parent;
+        }
+    }
+    return XCB_NONE;
+}
+
+- (BOOL)passFocusToAttachedWindowOfWindow:(xcb_window_t)window
+{
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        if ([attachments passFocusToAttachedWindowOfWindow:window]) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 - (void)processMotionEvent:(xcb_motion_notify_event_t *)motionEvent
@@ -1008,14 +1043,14 @@ static CGFloat WMLastScaleFactor = 1.0;
             // frames after the switch had drawn the new one active.
             if (focusInEvent->mode == XCB_NOTIFY_MODE_NORMAL ||
                 focusInEvent->mode == XCB_NOTIFY_MODE_WHILE_GRABBED) {
-                // A sheet has no titlebar of its own: its parent shows as
-                // the active window while the sheet has the focus, and the
+                // A sheet or drawer has no titlebar of its own: its parent
+                // shows as the active window while it has the focus, and the
                 // parent passes on a focus it gets while its sheet is up.
                 xcb_window_t focused = focusInEvent->event;
-                xcb_window_t sheetParent = [self.sheetController parentOfSheet:focused];
-                if (sheetParent != XCB_NONE) {
-                    focused = sheetParent;
-                } else if ([self.sheetController passFocusToSheetOfWindow:focused]) {
+                xcb_window_t attachedParent = [self parentOfAttachedWindow:focused];
+                if (attachedParent != XCB_NONE) {
+                    focused = attachedParent;
+                } else if ([self passFocusToAttachedWindowOfWindow:focused]) {
                     break;
                 }
                 [self handleFocusChange:focused isActive:YES];
@@ -1148,21 +1183,32 @@ static CGFloat WMLastScaleFactor = 1.0;
                 // Track mapped child windows (e.g., GPU/GL subwindows) to receive damage events
                 [self registerChildWindowsForCompositor:notifyEvent->window depth:2];
             }
-            [self.sheetController windowMapped:notifyEvent->window];
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments windowMapped:notifyEvent->window];
+            }
             break;
         }
         case XCB_MAP_REQUEST: {
             xcb_map_request_event_t *mapRequestEvent = (xcb_map_request_event_t *)event;
 
-            if ([self.sheetController handleMapRequest:mapRequestEvent]) {
+            URSAttachmentController *attaching = nil;
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                if ([attachments handleMapRequest:mapRequestEvent]) {
+                    attaching = attachments;
+                    break;
+                }
+            }
+            if (attaching) {
                 if (self.compositingManager && [self.compositingManager compositingActive]) {
                     [self.compositingManager registerWindow:mapRequestEvent->window];
                 }
-                // The sheet is what the user answers now; the delay is the
+                // A sheet is what the user answers now; the delay is the
                 // same as for any new window, so its map has been processed.
-                [self performSelector:@selector(focusNewlyMappedWindow:)
-                           withObject:[connection windowForXCBId:mapRequestEvent->window]
-                           afterDelay:0.1];
+                if (attaching.focusesOnMap) {
+                    [self performSelector:@selector(focusNewlyMappedWindow:)
+                               withObject:[connection windowForXCBId:mapRequestEvent->window]
+                               afterDelay:0.1];
+                }
                 break;
             }
 
@@ -1263,7 +1309,9 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_UNMAP_NOTIFY: {
             xcb_unmap_notify_event_t *unmapNotifyEvent = (xcb_unmap_notify_event_t *)event;
             xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:unmapNotifyEvent->window];
-            [self.sheetController windowWillUnmap:unmapNotifyEvent->window];
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments windowWillUnmap:unmapNotifyEvent->window];
+            }
             [connection handleUnMapNotify:unmapNotifyEvent];
             [self.showDesktopController windowUnmapped:unmapNotifyEvent->window];
 
@@ -1301,7 +1349,9 @@ static CGFloat WMLastScaleFactor = 1.0;
 
             [connection handleDestroyNotify:destroyNotify];
             [self.showDesktopController windowDestroyed:destroyNotify->window];
-            [self.sheetController windowDestroyed:destroyNotify->window];
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments windowDestroyed:destroyNotify->window];
+            }
             [self.focusManager ensureFocusAfterWindowRemoval:removedClientId];
             break;
         }
@@ -1312,7 +1362,14 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_CONFIGURE_REQUEST: {
             xcb_configure_request_event_t *configRequest = (xcb_configure_request_event_t *)event;
-            if ([self.sheetController handleConfigureRequest:configRequest]) {
+            BOOL attached = NO;
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                if ([attachments handleConfigureRequest:configRequest]) {
+                    attached = YES;
+                    break;
+                }
+            }
+            if (attached) {
                 break;
             }
             [connection handleConfigureWindowRequest:configRequest];
@@ -1331,7 +1388,9 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_CONFIGURE_NOTIFY: {
             xcb_configure_notify_event_t *configureNotify = (xcb_configure_notify_event_t *)event;
             [connection handleConfigureNotify:configureNotify];
-            [self.sheetController windowConfigured:configureNotify];
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments windowConfigured:configureNotify];
+            }
 
             // Notify compositor of window resize/move
             if (self.compositingManager && [self.compositingManager compositingActive]) {

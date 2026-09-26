@@ -61,7 +61,9 @@
 @property (strong, nonatomic) URSOverviewController *overviewController;
 @property (strong, nonatomic) URSShowDesktopController *showDesktopController;
 @property (strong, nonatomic) URSWobblyWindowsController *wobblyWindowsController;
-@property (strong, nonatomic) URSSheetController *sheetController;
+// Sheets and drawers: windows that hang from a parent instead of being
+// framed.
+@property (strong, nonatomic) NSArray<URSAttachmentController *> *attachmentControllers;
 
 // Window manager lifecycle
 - (BOOL)registerAsWindowManager;
