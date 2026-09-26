@@ -275,6 +275,16 @@ NSString * const URSSheetPropertyName = @"_GERSHWIN_SHEET";
     if ([_registry isSheetHiddenWithParent:window]) {
         // Back with its restored parent: no slide, it was never dismissed.
         [_registry setSheet:window hiddenWithParent:NO];
+        // The restored parent may have been focused before the sheet was
+        // back; that focus is the sheet's.
+        xcb_connection_t *c = [_connection connection];
+        xcb_get_input_focus_reply_t *focus =
+            xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL);
+        xcb_window_t focused = focus ? focus->focus : XCB_NONE;
+        free(focus);
+        if (focused != XCB_NONE && [self sheetOfWindow:focused] == window) {
+            [self passFocusToSheetOfWindow:focused];
+        }
         return;
     }
     xcb_window_t hidden = [self sheetOfFrame:window];
