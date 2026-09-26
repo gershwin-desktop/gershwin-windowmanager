@@ -22,6 +22,14 @@
 NSString * const URSOverviewEnabledKey = @"URSOverviewEnabled";
 NSString * const URSOverviewKeyKey = @"URSOverviewKey";
 NSString * const URSOverviewHotCornerKey = @"URSOverviewHotCorner";
+NSString * const URSOverviewUtilityWindowsKey = @"URSOverviewUtilityWindows";
+
+// Filtered out of the tiled grid either way; this decides only whether they
+// also fade with the Menu bar, Dock and utility panels.  Defaults to "hide"
+// so a note and a palette behave alike, matching the existing, unconditional
+// treatment of GNUstep utility panels.
+static NSString * const URSOverviewUtilityWindowsHide = @"hide";
+static NSString * const URSOverviewUtilityWindowsKeep = @"keep";
 
 static const NSTimeInterval URSOverviewTransitionDuration = 0.3;
 static const double URSOverviewBackdropDimming = 0.5;
@@ -49,6 +57,10 @@ static const double URSOverviewBackdropDimming = 0.5;
 // instant it closes, since they are never part of self.items and so never
 // get relaid out or moved.
 @property (strong, nonatomic) NSSet *utilityPanelWindows;
+// Floating windows that are not utility panels (Stickies notes and the
+// like), also excluded from the grid; fading them too is controlled by
+// URSOverviewUtilityWindowsKey rather than being unconditional.
+@property (strong, nonatomic) NSSet *floatingWindows;
 @property (strong, nonatomic) URSOverviewItem *selectedItem;
 @property (assign, nonatomic) BOOL open;
 @property (strong, nonatomic) URSPresentationTransition *transition;
@@ -62,7 +74,8 @@ static const double URSOverviewBackdropDimming = 0.5;
         [[NSUserDefaults standardUserDefaults] registerDefaults:@{
             URSOverviewEnabledKey: @YES,
             URSOverviewKeyKey: @"F9",
-            URSOverviewHotCornerKey: @"none"
+            URSOverviewHotCornerKey: @"none",
+            URSOverviewUtilityWindowsKey: URSOverviewUtilityWindowsHide
         }];
     }
 }
@@ -206,6 +219,7 @@ static const double URSOverviewBackdropDimming = 0.5;
     self.items = byFrame;
     self.dockWindows = [URSScreenWindow dockWindowsOfConnection:self.connection];
     self.utilityPanelWindows = [URSScreenWindow utilityPanelsOfConnection:self.connection];
+    self.floatingWindows = [URSScreenWindow floatingWindowsOfConnection:self.connection];
     self.selectedItem = nil;
     self.open = YES;
     [self.compositingManager setPresentation:self];
@@ -235,6 +249,7 @@ static const double URSOverviewBackdropDimming = 0.5;
     self.items = nil;
     self.dockWindows = nil;
     self.utilityPanelWindows = nil;
+    self.floatingWindows = nil;
     self.selectedItem = nil;
     [self.compositingManager removePresentation:self];
 }
@@ -256,9 +271,16 @@ static const double URSOverviewBackdropDimming = 0.5;
     // Palettes fade with the Menu bar and Dock: hidden from the overview's
     // own scene without ever being unmapped, so they reappear exactly as
     // they were - including mid-fade, if a document is picked before the
-    // fade-out finishes - the instant progress heads back to 0.
+    // fade-out finishes - the instant progress heads back to 0.  A floating
+    // window that is not a utility panel (a Stickies note) fades the same
+    // way only when URSOverviewUtilityWindowsKey says "hide"; with "keep" it
+    // is left out of this set entirely and simply keeps painting at its own
+    // place, since it was never added to self.items.
+    BOOL utilityWindowsHide = [[[NSUserDefaults standardUserDefaults]
+        stringForKey:URSOverviewUtilityWindowsKey] isEqualToString:URSOverviewUtilityWindowsHide];
     BOOL fadesOut = [self.dockWindows containsObject:@(windowId)] ||
-                    [self.utilityPanelWindows containsObject:@(windowId)];
+                    [self.utilityPanelWindows containsObject:@(windowId)] ||
+                    (utilityWindowsHide && [self.floatingWindows containsObject:@(windowId)]);
     return fadesOut ? 1.0 - [self.transition progress] : 1.0;
 }
 
