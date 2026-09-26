@@ -33,5 +33,8 @@
 
 @end
 
+// The ease in and out every transition follows, t and result 0..1.
+double URSPresentationEase(double t);
+
 // A rect progress (0..1) of the way from one rect to another.
 NSRect URSInterpolateRect(NSRect from, NSRect to, double progress);

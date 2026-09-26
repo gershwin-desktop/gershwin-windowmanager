@@ -8,7 +8,7 @@
 #import "URSCompositingManager.h"
 
 // Ease in and out, so windows neither jump off nor slam into place.
-static double URSPresentationEase(double t) {
+double URSPresentationEase(double t) {
     return t < 0.5 ? 4.0 * t * t * t : 1.0 - pow(-2.0 * t + 2.0, 3.0) * 0.5;
 }
 
