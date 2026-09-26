@@ -87,35 +87,103 @@ int main(void) {
     PASS([g getProjection:&p atAngle:45.0] && !p.backFace, "at 45 degrees the front is painted");
 
     // The map from the screen back into the picture is what XRender gets;
-    // it must land on the picture's corners, also after rounding to 16.16.
-    URSProjectiveMatrix fixed = URSProjectiveMatrixForFixedPoint(p.toFace);
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            fixed.m[i][j] = round(fixed.m[i][j] * 65536.0) / 65536.0;
-        }
-    }
+    // it must land on the picture's corners, also after rounding to 16.16,
+    // and what the server computes from it for every pixel of the painted
+    // area (x, y and w, each in 16.16) must fit, or it samples nothing
+    // (seen live: the first frames of a flip showed smeared stripes).
     NSPoint faceCorners[4] = { {0, 0}, {size.width, 0}, {size.width, size.height}, {0, size.height} };
-    BOOL roundTrip = YES, fixedRoundTrip = YES;
-    double worst = 0.0;
-    for (int i = 0; i < 4; i++) {
-        NSPoint back = URSProjectiveMatrixMapPoint(p.toFace, c[i]);
-        roundTrip = roundTrip && pointNear(back, faceCorners[i], 1e-6);
-        NSPoint backFixed = URSProjectiveMatrixMapPoint(fixed, c[i]);
-        worst = MAX(worst, MAX(fabs(backFixed.x - faceCorners[i].x), fabs(backFixed.y - faceCorners[i].y)));
-    }
-    fixedRoundTrip = worst < 0.25;
-    PASS(roundTrip, "screen to face undoes face to screen");
-    PASS(fixedRoundTrip, "in 16.16 fixed point the corners still land within a quarter pixel (%.3f)", worst);
-    double largest = 0.0;
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            largest = MAX(largest, fabs(URSProjectiveMatrixForFixedPoint(p.toFace).m[i][j]));
+    NSRect area = [g sweptRectFromAngle:0.0 toAngle:180.0];
+    NSPoint areaCorners[4] = { { NSMinX(area), NSMinY(area) }, { NSMaxX(area), NSMinY(area) },
+                               { NSMaxX(area), NSMaxY(area) }, { NSMinX(area), NSMaxY(area) } };
+    double angles[3] = { 2.0, 45.0, 150.0 };
+    BOOL roundTrip = YES;
+    double worst = 0.0, largestOutput = 0.0, largestEntry = 0.0;
+    for (int a = 0; a < 3; a++) {
+        [g getProjection:&p atAngle:angles[a]];
+        [g getCorners:c atAngle:angles[a]];
+        URSProjectiveMatrix scaled = URSProjectiveMatrixForFixedPoint(p.toFace, area);
+        URSProjectiveMatrix fixed = scaled;
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                fixed.m[i][j] = round(scaled.m[i][j] * 65536.0) / 65536.0;
+                largestEntry = MAX(largestEntry, fabs(scaled.m[i][j]));
+            }
+        }
+        for (int i = 0; i < 4; i++) {
+            NSPoint back = URSProjectiveMatrixMapPoint(p.toFace, c[i]);
+            NSPoint expected = faceCorners[i];
+            roundTrip = roundTrip && pointNear(back, expected, 1e-6);
+            NSPoint backFixed = URSProjectiveMatrixMapPoint(fixed, c[i]);
+            worst = MAX(worst, MAX(fabs(backFixed.x - expected.x), fabs(backFixed.y - expected.y)));
+            for (int row = 0; row < 3; row++) {
+                double v = scaled.m[row][0] * areaCorners[i].x + scaled.m[row][1] * areaCorners[i].y
+                         + scaled.m[row][2];
+                largestOutput = MAX(largestOutput, fabs(v));
+            }
         }
     }
-    PASS(near(largest, URSProjectiveFixedPointLimit, 1e-6), "a perspective map is scaled to use the fixed point range");
-    URSProjectiveMatrix shift = URSProjectiveMatrixForFixedPoint(URSProjectiveMatrixTranslation(-12.0, 7.0));
+    PASS(roundTrip, "screen to face undoes face to screen");
+    PASS(worst < 0.05, "in 16.16 fixed point the corners still land within a twentieth of a pixel (%.4f)", worst);
+    PASS(largestOutput <= URSProjectiveFixedPointLimit + 1e-6 && largestEntry <= URSProjectiveFixedPointLimit,
+         "what the server computes over the painted area fits 16.16 (largest %.0f)", largestOutput);
+    PASS(largestOutput > 0.5 * URSProjectiveFixedPointLimit,
+         "a perspective map is scaled up to use the fixed point range (largest %.0f)", largestOutput);
+    URSProjectiveMatrix shift = URSProjectiveMatrixForFixedPoint(URSProjectiveMatrixTranslation(-12.0, 7.0), area);
     PASS(shift.m[2][2] == 1.0 && shift.m[0][2] == -12.0 && shift.m[0][0] == 1.0,
          "a plain shift is left exact, so the server keeps its affine path");
+
+    // pixman samples garbage for a pixel whose projective source point is
+    // negative (seen live as stray one-pixel columns above and left of the
+    // turning window), so only pixels whose centres land inside the
+    // picture may be painted: exactly those, and all of them.
+    double margin = 0.25;
+    BOOL spansInside = YES, spansComplete = YES, spansSafeInFixed = YES, spansWellFormed = YES;
+    NSUInteger spanCount = 0;
+    double spanAngles[4] = { 2.0, 45.0, 89.5, 150.0 };
+    NSUInteger capacity = (NSUInteger)NSHeight(area) + 2;
+    NSRect *spans = malloc(sizeof(NSRect) * capacity);
+    for (int a = 0; a < 4; a++) {
+        [g getProjection:&p atAngle:spanAngles[a]];
+        URSProjectiveMatrix fixed = URSProjectiveMatrixForFixedPoint(p.toFace, area);
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                fixed.m[i][j] = round(fixed.m[i][j] * 65536.0) / 65536.0;
+            }
+        }
+        NSUInteger n = URSProjectiveInsideSpans(p.toFace, size, margin, area, spans, capacity);
+        spanCount += n;
+        NSUInteger covered = 0;
+        for (NSUInteger s = 0; s < n; s++) {
+            spansWellFormed = spansWellFormed && NSEqualRects(spans[s], NSIntegralRect(spans[s])) &&
+                              NSHeight(spans[s]) == 1.0 && NSContainsRect(area, spans[s]) &&
+                              (s == 0 || NSMinY(spans[s]) > NSMinY(spans[s - 1]));
+            for (double x = NSMinX(spans[s]) + 0.5; x < NSMaxX(spans[s]); x += 1.0) {
+                NSPoint centre = NSMakePoint(x, NSMinY(spans[s]) + 0.5);
+                NSPoint q = URSProjectiveMatrixMapPoint(p.toFace, centre);
+                spansInside = spansInside && q.x >= margin - 1e-6 && q.y >= margin - 1e-6 &&
+                              q.x <= size.width - margin + 1e-6 && q.y <= size.height - margin + 1e-6;
+                NSPoint qf = URSProjectiveMatrixMapPoint(fixed, centre);
+                spansSafeInFixed = spansSafeInFixed && qf.x > 0.0 && qf.y > 0.0;
+                covered++;
+            }
+        }
+        NSUInteger inside = 0;
+        for (double y = NSMinY(area) + 0.5; y < NSMaxY(area); y += 1.0) {
+            for (double x = NSMinX(area) + 0.5; x < NSMaxX(area); x += 1.0) {
+                NSPoint q = URSProjectiveMatrixMapPoint(p.toFace, NSMakePoint(x, y));
+                if (q.x >= margin + 1e-6 && q.y >= margin + 1e-6 &&
+                    q.x <= size.width - margin - 1e-6 && q.y <= size.height - margin - 1e-6) {
+                    inside++;
+                }
+            }
+        }
+        spansComplete = spansComplete && covered >= inside;
+    }
+    free(spans);
+    PASS(spanCount > 0 && spansWellFormed, "the spans are whole pixel rows of the area, top to bottom");
+    PASS(spanCount > 0 && spansInside, "every painted pixel's centre lands inside the picture");
+    PASS(spanCount > 0 && spansComplete, "every pixel whose centre lands inside the picture is painted");
+    PASS(spanCount > 0 && spansSafeInFixed, "no painted pixel reaches the server as a negative source point");
 
     [g getProjection:&p atAngle:180.0];
     PASS(p.backFace && pointNear(URSProjectiveMatrixMapPoint(p.toFace, NSMakePoint(10, 20)), NSMakePoint(10, 20), 1e-9),

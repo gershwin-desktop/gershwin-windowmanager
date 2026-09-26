@@ -76,15 +76,25 @@ NSRect URSProjectiveMatrixMapRectBounds(URSProjectiveMatrix a, NSRect r) {
     return NSMakeRect(x1, y1, x2 - x1, y2 - y1);
 }
 
-URSProjectiveMatrix URSProjectiveMatrixForFixedPoint(URSProjectiveMatrix a) {
+URSProjectiveMatrix URSProjectiveMatrixForFixedPoint(URSProjectiveMatrix a, NSRect area) {
     double scale;
     if (a.m[2][0] == 0.0 && a.m[2][1] == 0.0) {
         scale = 1.0 / a.m[2][2];
     } else {
+        // Each of x, y and w is linear in the point, so over a rect it is
+        // largest in magnitude at a corner.
+        NSPoint corners[4] = {
+            { NSMinX(area), NSMinY(area) }, { NSMaxX(area), NSMinY(area) },
+            { NSMaxX(area), NSMaxY(area) }, { NSMinX(area), NSMaxY(area) },
+        };
         double largest = 0.0;
         for (int i = 0; i < 3; i++) {
             for (int j = 0; j < 3; j++) {
                 largest = MAX(largest, fabs(a.m[i][j]));
+            }
+            for (int k = 0; k < 4; k++) {
+                largest = MAX(largest, fabs(a.m[i][0] * corners[k].x + a.m[i][1] * corners[k].y
+                                            + a.m[i][2]));
             }
         }
         scale = URSProjectiveFixedPointLimit / largest;
@@ -95,4 +105,9 @@ URSProjectiveMatrix URSProjectiveMatrixForFixedPoint(URSProjectiveMatrix a) {
         }
     }
     return a;
+}
+
+NSUInteger URSProjectiveInsideSpans(URSProjectiveMatrix toPicture, NSSize picture, double margin,
+                                    NSRect area, NSRect *spans, NSUInteger capacity) {
+    return 0;
 }

@@ -3747,8 +3747,9 @@ static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
 // The back of a turned window: a neutral panel in the window's light grey.
 static const double URSWindowBackFaceGrey = 0.9;
 
-static xcb_render_transform_t URSRenderTransformFromMatrix(URSProjectiveMatrix m) {
-    URSProjectiveMatrix f = URSProjectiveMatrixForFixedPoint(m);
+// area: the window-local points the transform will be applied to.
+static xcb_render_transform_t URSRenderTransformFromMatrix(URSProjectiveMatrix m, NSRect area) {
+    URSProjectiveMatrix f = URSProjectiveMatrixForFixedPoint(m, area);
     xcb_render_transform_t t = {
         (xcb_render_fixed_t)lround(f.m[0][0] * 65536.0),
         (xcb_render_fixed_t)lround(f.m[0][1] * 65536.0),
@@ -3780,7 +3781,7 @@ static xcb_render_transform_t URSRenderTransformFromMatrix(URSProjectiveMatrix m
         return;
     }
     xcb_connection_t *conn = [self.connection connection];
-    xcb_render_set_picture_transform(conn, transformed, URSRenderTransformFromMatrix(toPicture));
+    xcb_render_set_picture_transform(conn, transformed, URSRenderTransformFromMatrix(toPicture, r));
     int16_t x = (int16_t)NSMinX(r);
     int16_t y = (int16_t)NSMinY(r);
     xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER, source, mask, self.rootBuffer,
