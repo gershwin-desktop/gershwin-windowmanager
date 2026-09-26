@@ -29,4 +29,10 @@
 // behind something (a sheet from under its parent's titlebar).
 - (NSRect)clipRectForWindowRect:(NSRect)windowRect;
 
+// YES when the effect may cut short an effect still running on the window.
+// Without it a new effect is ignored while one runs, so that repeating an
+// attention effect (an Alt-Tab hop) does not restart it; a sheet dismissed
+// while still sliding in has to start sliding back at once, though.
+- (BOOL)replacesRunningEffect;
+
 @end

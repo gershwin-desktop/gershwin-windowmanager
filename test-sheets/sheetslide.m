@@ -81,6 +81,12 @@ int main(void)
          "the reach stays within the window's own rect (the rest is clipped)");
   END_SET("clip and reach")
 
+  START_SET("replacing a running effect")
+    PASS([in respondsToSelector: @selector(replacesRunningEffect)]
+         && [in replacesRunningEffect] && [out replacesRunningEffect],
+         "a sheet dismissed while still sliding in starts sliding back at once");
+  END_SET("replacing a running effect")
+
   [arp release];
   return 0;
 }
