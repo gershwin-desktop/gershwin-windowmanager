@@ -6,7 +6,7 @@
 
 #import "URSSheetController.h"
 #import "URSSheetLayout.h"
-#import "URSSheetRegistry.h"
+#import "URSAttachmentRegistry.h"
 #import "URSSheetSlideEffect.h"
 #import "URSWindowRole.h"
 #import "URSCompositingManager.h"
@@ -19,7 +19,7 @@
 {
     XCBConnection *_connection;
     xcb_atom_t _roleAtom;
-    URSSheetRegistry *_registry;
+    URSAttachmentRegistry *_registry;
 }
 
 - (instancetype)initWithConnection:(XCBConnection *)connection
@@ -27,7 +27,7 @@
     self = [super init];
     if (self) {
         _connection = connection;
-        _registry = [URSSheetRegistry new];
+        _registry = [URSAttachmentRegistry new];
         const char *name = [URSWindowRolePropertyName UTF8String];
         xcb_connection_t *c = [connection connection];
         xcb_intern_atom_reply_t *reply =
@@ -83,7 +83,7 @@
 
 - (void)placeSheet:(xcb_window_t)sheet
 {
-    xcb_window_t parent = [_registry parentOfSheet:sheet];
+    xcb_window_t parent = [_registry parentOfWindow:sheet];
     XCBFrame *frame = [self frameOfClient:parent];
     XCBScreen *screen = [[_connection screens] firstObject];
     if (!frame || !screen) {
@@ -153,7 +153,7 @@
     [sheet setDecorated:NO];
     [sheet updatePid];
 
-    [_registry attachSheet:window toParent:parent];
+    [_registry attachWindow:window toParent:parent exclusive:YES];
     [self placeSheet:window];
     [_connection mapWindow:sheet];
     [sheet setNormalState];
@@ -209,7 +209,7 @@
 
 - (BOOL)handleConfigureRequest:(xcb_configure_request_event_t *)event
 {
-    if ([_registry parentOfSheet:event->window] == XCB_NONE) {
+    if ([_registry parentOfWindow:event->window] == XCB_NONE) {
         return NO;
     }
     uint16_t mask = 0;
@@ -235,13 +235,13 @@
 
 - (xcb_window_t)parentOfSheet:(xcb_window_t)window
 {
-    return [_registry parentOfSheet:window];
+    return [_registry parentOfWindow:window];
 }
 
 // The sheet hanging from a window given as its client or its frame.
 - (xcb_window_t)sheetOfWindow:(xcb_window_t)window
 {
-    xcb_window_t sheet = [_registry sheetOfParent:window];
+    xcb_window_t sheet = [_registry windowOfParent:window];
     return sheet != XCB_NONE ? sheet : [self sheetOfFrame:window];
 }
 
@@ -251,8 +251,8 @@
 // the sheet.
 - (xcb_window_t)sheetOfFrame:(xcb_window_t)window
 {
-    for (NSNumber *candidate in [_registry sheets]) {
-        XCBFrame *frame = [self frameOfClient:[_registry parentOfSheet:[candidate unsignedIntValue]]];
+    for (NSNumber *candidate in [_registry windows]) {
+        XCBFrame *frame = [self frameOfClient:[_registry parentOfWindow:[candidate unsignedIntValue]]];
         if (frame && [frame window] == window) {
             return [candidate unsignedIntValue];
         }
@@ -263,7 +263,7 @@
 - (BOOL)passFocusToSheetOfWindow:(xcb_window_t)window
 {
     xcb_window_t sheet = [self sheetOfWindow:window];
-    if (sheet == XCB_NONE || [_registry isSheetHiddenWithParent:sheet]) {
+    if (sheet == XCB_NONE || [_registry isWindowHiddenWithParent:sheet]) {
         return NO;
     }
     [[_connection windowForXCBId:sheet] focus];
@@ -273,9 +273,9 @@
 
 - (void)windowMapped:(xcb_window_t)window
 {
-    if ([_registry isSheetHiddenWithParent:window]) {
+    if ([_registry isWindowHiddenWithParent:window]) {
         // Back with its restored parent: no slide, it was never dismissed.
-        [_registry setSheet:window hiddenWithParent:NO];
+        [_registry setWindow:window hiddenWithParent:NO];
         // The restored parent may have been focused before the sheet was
         // back; that focus is the sheet's.
         xcb_connection_t *c = [_connection connection];
@@ -289,13 +289,13 @@
         return;
     }
     xcb_window_t hidden = [self sheetOfFrame:window];
-    if (hidden != XCB_NONE && [_registry isSheetHiddenWithParent:hidden]) {
+    if (hidden != XCB_NONE && [_registry isWindowHiddenWithParent:hidden]) {
         [self placeSheet:hidden];
         xcb_map_window([_connection connection], hidden);
         [_connection flush];
         return;
     }
-    if ([_registry parentOfSheet:window] == XCB_NONE ||
+    if ([_registry parentOfWindow:window] == XCB_NONE ||
         ![self.compositingManager compositingActive]) {
         return;
     }
@@ -306,13 +306,13 @@
 
 - (void)windowWillUnmap:(xcb_window_t)window
 {
-    if ([_registry parentOfSheet:window] != XCB_NONE) {
-        if ([_registry isSheetHiddenWithParent:window]) {
+    if ([_registry parentOfWindow:window] != XCB_NONE) {
+        if ([_registry isWindowHiddenWithParent:window]) {
             // Unmapped by us along with its parent; still attached.
             return;
         }
-        xcb_window_t parent = [_registry parentOfSheet:window];
-        [_registry detachSheet:window];
+        xcb_window_t parent = [_registry parentOfWindow:window];
+        [_registry detachWindow:window];
         [self returnFocusFromSheet:window toParent:parent];
         if ([self.compositingManager compositingActive]) {
             [self.compositingManager playEffect:[[URSSheetSlideEffect alloc] initAppearing:NO]
@@ -323,8 +323,8 @@
     // A minimised or otherwise unmapped parent takes its sheet along; the
     // sheet would otherwise hang in the air where the parent was.
     xcb_window_t sheet = [self sheetOfFrame:window];
-    if (sheet != XCB_NONE && ![_registry isSheetHiddenWithParent:sheet]) {
-        [_registry setSheet:sheet hiddenWithParent:YES];
+    if (sheet != XCB_NONE && ![_registry isWindowHiddenWithParent:sheet]) {
+        [_registry setWindow:sheet hiddenWithParent:YES];
         xcb_unmap_window([_connection connection], sheet);
         [_connection flush];
     }
@@ -359,7 +359,7 @@
 
 - (void)windowConfigured:(xcb_configure_notify_event_t *)event
 {
-    xcb_window_t parent = [_registry parentOfSheet:event->window];
+    xcb_window_t parent = [_registry parentOfWindow:event->window];
     if (parent != XCB_NONE) {
         // Something restacked the sheet away from its parent.
         XCBFrame *frame = [self frameOfClient:parent];

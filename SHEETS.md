@@ -54,7 +54,7 @@ compositor; the slide needs it.
 |------|------|
 | `URSSheetController.h/m` | Recognises sheets, places, maps, follows, hides and focuses them; hooked into `URSHybridEventHandler` (map/configure requests, Map/Unmap/Configure/Destroy notify, FocusIn, start-up adoption). |
 | `URSWindowRole.h/m` | Reads `WM_WINDOW_ROLE` values (Foundation only). |
-| `URSSheetRegistry.h/m` | Which sheet hangs from which window, and whether it is hidden with its parent (Foundation only). |
+| `URSAttachmentRegistry.h/m` | Which sheet (or drawer) hangs from which window, and whether it is hidden with its parent (Foundation only). |
 | `URSSheetLayout.h/m` | Where a sheet sits on its parent and how far it has slid out (pure geometry). |
 | `URSSheetSlideEffect.h/m` | The 0.25 s slide as a `URSWindowEffect`, clipped at the titlebar (`-clipRectForWindowRect:`); it may replace a running effect (`-replacesRunningEffect`), so a sheet dismissed mid-slide slides back at once. |
 
@@ -67,5 +67,5 @@ time waits for the client's first content.
 
 `gnustep-tests test-sheets` (headless): `sheetlayout.m` (placement and
 curve), `sheetslide.m` (the slide effect, its clip and reach, replacing a
-running effect), `sheetregistry.m` (attachment bookkeeping), `windowrole.m` (reading the
+running effect), `attachmentregistry.m` (attachment bookkeeping), `windowrole.m` (reading the
 role).

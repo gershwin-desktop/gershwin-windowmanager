@@ -77,7 +77,7 @@ WindowManager/
 ├── URSTriangleSpans.h/m            Watertight triangle spans for bent windows
 ├── URSWobblyWindowsController.h/m  Wobbly windows while dragging
 ├── URSSheetController.h/m          Sheets attached to their parent (SHEETS.md)
-├── URSSheetRegistry.h/m            Which sheet hangs from which window
+├── URSAttachmentRegistry.h/m       Which sheet or drawer hangs from which window
 ├── URSSheetLayout.h/m              Sheet placement and slide (pure geometry)
 ├── URSSheetSlideEffect.h/m         Slide of a sheet out of the titlebar
 ├── URSWindowRole.h/m               WM_WINDOW_ROLE (sheet, drawer) of a window
