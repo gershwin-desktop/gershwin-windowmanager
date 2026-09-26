@@ -27,4 +27,10 @@
 // Bounding box of the mesh as last stepped.
 - (NSRect)reach;
 
+@optional
+// YES for a mesh worked out from another window's mesh (a drawer bending
+// along with its parent): it is stepped after all others, so that it reads
+// the other mesh as painted in the same frame.
+- (BOOL)followsOtherDeformation;
+
 @end

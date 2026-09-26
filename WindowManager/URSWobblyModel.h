@@ -21,5 +21,8 @@
 - (void)releaseGrab;
 
 @property (readonly, nonatomic) BOOL grabbed;
+// The window's rect as of the last step: where the mesh points are placed
+// from.
+@property (readonly, nonatomic) NSRect windowRect;
 
 @end

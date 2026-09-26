@@ -73,6 +73,10 @@ typedef struct {
     return _grabbed;
 }
 
+- (NSRect)windowRect {
+    return _windowRect;
+}
+
 - (void)releaseGrab {
     _grabbed = NO;
 }
