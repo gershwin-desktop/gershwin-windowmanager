@@ -107,7 +107,47 @@ URSProjectiveMatrix URSProjectiveMatrixForFixedPoint(URSProjectiveMatrix a, NSRe
     return a;
 }
 
+// Narrows [*left, *right] to the x where a * x + b >= 0; NO when empty.
+static BOOL URSNarrowToNonNegative(double a, double b, double *left, double *right) {
+    if (fabs(a) < 1e-12) {
+        return b >= 0.0;
+    }
+    double root = -b / a;
+    if (a > 0.0) {
+        *left = MAX(*left, root);
+    } else {
+        *right = MIN(*right, root);
+    }
+    return *left <= *right;
+}
+
 NSUInteger URSProjectiveInsideSpans(URSProjectiveMatrix toPicture, NSSize picture, double margin,
                                     NSRect area, NSRect *spans, NSUInteger capacity) {
-    return 0;
+    const double (*m)[3] = toPicture.m;
+    double limits[2][2] = { { margin, picture.width - margin },
+                            { margin, picture.height - margin } };
+    NSUInteger count = 0;
+    for (double y = floor(NSMinY(area)); y < NSMaxY(area) && count < capacity; y += 1.0) {
+        double cy = y + 0.5;
+        // Along a row every picture coordinate is (a x + b) / (g x + h), so
+        // with w > 0 each bound is a linear condition on the pixel centre x.
+        double g = m[2][0], h = m[2][1] * cy + m[2][2];
+        double left = floor(NSMinX(area)) + 0.5;
+        double right = ceil(NSMaxX(area)) - 0.5;
+        BOOL open = URSNarrowToNonNegative(g, h - 1e-9, &left, &right);
+        for (int r = 0; r < 2 && open; r++) {
+            double a = m[r][0], b = m[r][1] * cy + m[r][2];
+            open = URSNarrowToNonNegative(a - limits[r][0] * g, b - limits[r][0] * h, &left, &right) &&
+                   URSNarrowToNonNegative(limits[r][1] * g - a, limits[r][1] * h - b, &left, &right);
+        }
+        if (!open) {
+            continue;
+        }
+        double x1 = ceil(left - 0.5);
+        double x2 = floor(right - 0.5) + 1.0;
+        if (x2 > x1) {
+            spans[count++] = NSMakeRect(x1, y, x2 - x1, 1.0);
+        }
+    }
+    return count;
 }

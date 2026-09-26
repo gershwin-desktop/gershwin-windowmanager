@@ -3764,39 +3764,80 @@ static xcb_render_transform_t URSRenderTransformFromMatrix(URSProjectiveMatrix m
     return t;
 }
 
+// How far inside the picture a pixel's centre must land to be painted
+// through a perspective map: more than the 16.16 rounding of the map.
+static const double URSProjectiveEdgeMargin = 0.25;
+
 // Composites source through mask over area (window-local), one of the two
-// sampled through toPicture.  Source and mask origins are the area's
-// window-local origin, so the map receives window-local screen points and
-// its entries stay small enough for 16.16 fixed point; outside the picture
-// nothing is sampled, which cuts the projected outline out of the area.
+// (transformed, pictureSize big) sampled through toPicture.  Source and mask
+// origins are the area's window-local origin, so the map receives
+// window-local screen points and its entries stay small enough for 16.16
+// fixed point.  clip is the rootBuffer clip in force, restored afterwards.
 - (void)compositeProjectedSource:(xcb_render_picture_t)source
                             mask:(xcb_render_picture_t)mask
                      transformed:(xcb_render_picture_t)transformed
+                     pictureSize:(NSSize)pictureSize
                        toPicture:(URSProjectiveMatrix)toPicture
                             area:(NSRect)area
-                        ofWindow:(URSCompositeWindow *)cw {
+                        ofWindow:(URSCompositeWindow *)cw
+                            clip:(xcb_xfixes_region_t)clip {
     // One more pixel for the filtered edge.
     NSRect r = NSIntegralRect(NSInsetRect(area, -1.0, -1.0));
     if (NSIsEmptyRect(r)) {
         return;
     }
     xcb_connection_t *conn = [self.connection connection];
-    xcb_render_set_picture_transform(conn, transformed, URSRenderTransformFromMatrix(toPicture, r));
     int16_t x = (int16_t)NSMinX(r);
     int16_t y = (int16_t)NSMinY(r);
+    xcb_xfixes_region_t inside = XCB_NONE;
+    if (toPicture.m[2][0] != 0.0 || toPicture.m[2][1] != 0.0) {
+        // pixman (0.44) samples garbage for a pixel whose perspective source
+        // point is negative instead of leaving it transparent, which showed
+        // as stray one-pixel columns beside the turning window; so only the
+        // pixels that land inside the picture are painted.
+        NSUInteger capacity = (NSUInteger)NSHeight(r);
+        NSRect *spans = malloc(sizeof(NSRect) * capacity);
+        xcb_rectangle_t *rects = malloc(sizeof(xcb_rectangle_t) * capacity);
+        NSUInteger count = URSProjectiveInsideSpans(toPicture, pictureSize, URSProjectiveEdgeMargin,
+                                                    r, spans, capacity);
+        for (NSUInteger i = 0; i < count; i++) {
+            rects[i] = (xcb_rectangle_t){ (int16_t)(cw.x + NSMinX(spans[i])),
+                                          (int16_t)(cw.y + NSMinY(spans[i])),
+                                          (uint16_t)NSWidth(spans[i]), 1 };
+        }
+        free(spans);
+        if (count == 0) {
+            free(rects);
+            return;
+        }
+        inside = xcb_generate_id(conn);
+        xcb_xfixes_create_region(conn, inside, (uint32_t)count, rects);
+        free(rects);
+        if (clip != XCB_NONE) {
+            xcb_xfixes_intersect_region(conn, inside, clip, inside);
+        }
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, inside, 0, 0);
+    }
+    xcb_render_set_picture_transform(conn, transformed, URSRenderTransformFromMatrix(toPicture, r));
     xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER, source, mask, self.rootBuffer,
                          x, y, x, y, (int16_t)(cw.x + x), (int16_t)(cw.y + y),
                          (uint16_t)NSWidth(r), (uint16_t)NSHeight(r));
     xcb_render_set_picture_transform(conn, transformed, URSIdentityTransform());
+    if (inside != XCB_NONE) {
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clip, 0, 0);
+        xcb_xfixes_destroy_region(conn, inside);
+    }
 }
 
 // The window turned in depth: shadow first, in the same plane, then the
 // front (shaded as it turns away) or the back, both cut to the window's
 // outline by its own picture.  XRender divides by w itself, so the
-// perspective is exact, not approximated by triangles.
+// perspective is exact, not approximated by triangles.  clip is the
+// rootBuffer clip in force (screen coordinates).
 - (void)paintProjectedWindow:(URSCompositeWindow *)cw
                   projection:(const URSWindowProjection *)projection
-                  withShadow:(BOOL)withShadow {
+                  withShadow:(BOOL)withShadow
+                        clip:(xcb_xfixes_region_t)clip {
     xcb_connection_t *conn = [self.connection connection];
     if (withShadow) {
         // Filtered only while it is turned: at rest the shadow is copied
@@ -3811,9 +3852,11 @@ static xcb_render_transform_t URSRenderTransformFromMatrix(URSProjectiveMatrix m
         [self compositeProjectedSource:cw.shadowPicture
                                   mask:XCB_NONE
                            transformed:cw.shadowPicture
+                           pictureSize:NSMakeSize(cw.shadowWidth, cw.shadowHeight)
                              toPicture:toShadow
                                   area:URSProjectiveMatrixMapRectBounds(projection->toScreen, shadowFace)
-                              ofWindow:cw];
+                              ofWindow:cw
+                                  clip:clip];
         xcb_render_set_picture_filter(conn, cw.shadowPicture, strlen(nearest), nearest, 0, NULL);
     }
 
@@ -3822,20 +3865,22 @@ static xcb_render_transform_t URSRenderTransformFromMatrix(URSProjectiveMatrix m
     NSRect window = NSMakeRect(0.0, 0.0, (double)cw.width + 2.0 * cw.borderWidth,
                                (double)cw.height + 2.0 * cw.borderWidth);
     NSRect face = URSProjectiveMatrixMapRectBounds(projection->toScreen, window);
+    xcb_render_picture_t source = cw.picture;
+    xcb_render_picture_t mask = XCB_NONE;
     if (projection->backFace) {
         double grey = URSWindowBackFaceGrey * (1.0 - projection->shading);
-        xcb_render_picture_t panel = [self createSolidPicture:grey g:grey b:grey a:1.0];
-        [self compositeProjectedSource:panel mask:cw.picture transformed:cw.picture
-                             toPicture:projection->toFace area:face ofWindow:cw];
-        xcb_render_free_picture(conn, panel);
-        return;
+        source = [self createSolidPicture:grey g:grey b:grey a:1.0];
+        mask = cw.picture;
     }
-    [self compositeProjectedSource:cw.picture mask:XCB_NONE transformed:cw.picture
-                         toPicture:projection->toFace area:face ofWindow:cw];
-    if (projection->shading > 0.001) {
+    [self compositeProjectedSource:source mask:mask transformed:cw.picture pictureSize:window.size
+                         toPicture:projection->toFace area:face ofWindow:cw clip:clip];
+    if (projection->backFace) {
+        xcb_render_free_picture(conn, source);
+    } else if (projection->shading > 0.001) {
         xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0 a:projection->shading];
         [self compositeProjectedSource:veil mask:cw.picture transformed:cw.picture
-                             toPicture:projection->toFace area:face ofWindow:cw];
+                           pictureSize:window.size toPicture:projection->toFace area:face
+                              ofWindow:cw clip:clip];
         xcb_render_free_picture(conn, veil);
     }
 }
@@ -5466,7 +5511,8 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
             [self paintProjectedWindow:cw
                             projection:&projection
                             withShadow:animating && cw.shadowPicture != XCB_NONE && !skipShadow &&
-                                       cw.pictureValid];
+                                       cw.pictureValid
+                                  clip:clipRegion];
         }
         if (animating) {
             URS_PROFILE_END(paintWindow);
