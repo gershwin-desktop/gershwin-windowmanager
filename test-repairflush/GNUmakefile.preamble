@@ -49,6 +49,10 @@ WM_COLLABORATORS = \
 	../WindowManager/URSSheetSlideEffect.m \
 	../WindowManager/URSSheetRegistry.m \
 	../WindowManager/URSSheetController.m \
+	../WindowManager/URSProjection.m \
+	../WindowManager/URSFlipGeometry.m \
+	../WindowManager/URSWindowFlipEffect.m \
+	../WindowManager/URSCompositingManager+WindowFlip.m \
 	../WindowManager/GSThemeTitleBar.m \
 	../WindowManager/xcb/XCBConnection.m \
 	../WindowManager/xcb/XCBWindow.m \
