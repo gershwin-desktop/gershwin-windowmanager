@@ -51,10 +51,11 @@ README.
 | Parent dragged or resized by the window manager | Moved in the same batch of requests as the frame and handed to the compositor before it paints, so no frame shows the parent moved and the drawer not; a new length follows on the ConfigureNotify. |
 | Parent moved, resized or restacked otherwise | Placed again from the parent's ConfigureNotify. |
 | Parent wobbles (`URSWobblyWindows`) | Bent as a continuation of the parent's mesh: every point moves as far as the nearest point of the parent, so the seam stays closed. |
+| The window manager restacks the application (a click, a sheet shown) | The drawer is put back directly below its parent's frame (`XCBWindow stackedBelowWindow`), never above the parent, the Dock or the menu bar. |
 | Drawer gets the focus (a click into it) | The parent's titlebar is drawn active; the drawer stays below the parent. |
 | Parent's frame unmapped (minimised) | The drawer is unmapped with it and stays attached; mapped again with it, without a slide. |
 | Drawer unmapped by the client (closed) | Slides back under the edge after the unmap; the focus returns to the parent if the drawer had it. |
-| Window manager starts with a drawer open | Adopted after its parent, not framed. |
+| Window manager starts with a drawer open | Adopted after its parent, not framed; its offsets are read against where the parent was before it was framed again. |
 | Parent or drawer destroyed | The attachment and the outline are forgotten. |
 
 A parent can have several drawers, on different edges.
