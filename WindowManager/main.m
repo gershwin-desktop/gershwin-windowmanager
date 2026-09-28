@@ -12,20 +12,23 @@
 #import "TitleBarSettingsService.h"
 #import "URSProfiler.h"
 #import <signal.h>
+#import <unistd.h>
 #import <string.h>
 
-// Global reference to the event handler for signal handlers
-static URSHybridEventHandler *globalEventHandler = nil;
+// Write end of the pipe the run loop shuts the window manager down from.
+static volatile sig_atomic_t terminationWriteFD = -1;
 
-// Signal handler for clean shutdown
+/* Only a byte down the pipe: the shutdown itself needs the X connection,
+ * whose lock the interrupted code still holds, so doing it here left the
+ * process hanging with the desktop unmanaged.  write() is one of the few
+ * calls a signal handler may make. */
 static void signalHandler(int sig)
 {
-    if (globalEventHandler) {
-        [globalEventHandler cleanupBeforeExit];
+    if (terminationWriteFD >= 0) {
+        char wake = (char)sig;
+        ssize_t written = write(terminationWriteFD, &wake, 1);
+        (void)written;
     }
-    
-    // Terminate the application
-    [NSApp terminate:nil];
 }
 
 // Setup signal handlers for clean termination
@@ -129,10 +132,8 @@ int main(int argc, const char * argv[])
         // Create custom NSApplication and set the prepared hybrid event handler
         [app setDelegate:hybridHandler];
         
-        // Store global reference for signal handlers
-        globalEventHandler = hybridHandler;
-        
-        // Setup signal handlers for clean shutdown
+        // The run loop carries out the shutdown; the handlers only wake it.
+        terminationWriteFD = [hybridHandler installTerminationPipe];
         setupSignalHandlers();
 
         // Install profiling signal handler (SIGUSR1 dumps stats)

@@ -1,0 +1,3 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+# The model is pure physics, so it is compiled into the test directly.
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager

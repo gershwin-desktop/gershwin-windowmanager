@@ -23,6 +23,10 @@
 #import "URSWorkareaManager.h"
 #import "URSTitlebarController.h"
 #import "URSSnappingMenuController.h"
+#import "URSOverviewController.h"
+#import "URSShowDesktopController.h"
+#import "URSSheetController.h"
+#import "URSWobblyWindowsController.h"
 
 @interface URSHybridEventHandler : NSObject <NSApplicationDelegate, RunLoopEvents>
 
@@ -54,6 +58,12 @@
 @property (strong, nonatomic) URSWorkareaManager *workareaManager;
 @property (strong, nonatomic) URSTitlebarController *titlebarController;
 @property (strong, nonatomic) URSSnappingMenuController *snappingMenuController;
+@property (strong, nonatomic) URSOverviewController *overviewController;
+@property (strong, nonatomic) URSShowDesktopController *showDesktopController;
+@property (strong, nonatomic) URSWobblyWindowsController *wobblyWindowsController;
+// Sheets and drawers: windows that hang from a parent instead of being
+// framed.
+@property (strong, nonatomic) NSArray<URSAttachmentController *> *attachmentControllers;
 
 // Window manager lifecycle
 - (BOOL)registerAsWindowManager;
@@ -74,6 +84,10 @@
 
 // Cleanup
 - (void)cleanupBeforeExit;
+
+// A pipe a signal handler can write one byte to; the shutdown itself then
+// runs from the run loop.  Returns the write end, or -1.
+- (int)installTerminationPipe;
 
 // ICCCM Manager Selection Protocol
 - (void)handleSelectionClear:(xcb_selection_clear_event_t *)event;

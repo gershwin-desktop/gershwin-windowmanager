@@ -10,13 +10,20 @@
 //
 
 #import "URSHybridEventHandler.h"
+#import "URSDrawerController.h"
+#import <unistd.h>
+#import <fcntl.h>
+#import <errno.h>
+#import <string.h>
 #import "URSProfiler.h"
 #import "xcb/services/TitleBarSettingsService.h"
 #import <GNUstepGUI/GSTheme.h>
 
-/* Eau theme's live scale-factor cache reset (implemented by the theme). */
+/* Eau theme's live scale-factor cache reset (implemented by the theme), and
+ * the titlebar height it wants at the current scale. */
 @interface GSTheme (EauScaleFactor)
 - (void)invalidateScaleFactorCache;
+- (float)titlebarHeight;
 @end
 
 /* Class extension for private ivars */
@@ -29,6 +36,7 @@
 #import "XCBQueryTreeReply.h"
 #import "XCBAttributesReply.h"
 #import <xcb/xcb.h>
+#import <xcb/shape.h>
 #import <xcb/xcb_icccm.h>
 #import <xcb/xcb_aux.h>
 #import <xcb/damage.h>
@@ -43,6 +51,15 @@
 #import "URSThemeIntegration.h"
 #import "GSThemeTitleBar.h"
 #import "URSWindowSwitcher.h"
+#import "URSWindowFlowController.h"
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
+@interface URSHybridEventHandler () <URSXCBEventProcessing>
+// Read end of the pipe a termination signal writes to; -1 while unset.
+@property (assign, nonatomic) int terminationReadFD;
+@end
 
 @implementation URSHybridEventHandler
 
@@ -98,15 +115,31 @@ static CGFloat WMLastScaleFactor = 1.0;
 
 - (void)applyScaleFactor:(CGFloat)factor
 {
-  TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-  [settings setScaleFactor:factor];
-  [settings setHeight:(uint16_t)(22 * factor)];
+  [[TitleBarSettingsService sharedInstance] setScaleFactor:factor];
+  [self redecorateManagedWindows];
+}
 
-  /* Keep the root _GNUSTEP_FRAME_OFFSETS in sync with the new titlebar
-   * height so the GNUstep backend positions content flush below it. */
-  XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
-  EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
-  [ewmh updateGNUStepFrameOffsetsForRootWindow:rootWin];
+/* The theme was switched under the running window manager.  Every number the
+ * decorations are built from comes from the theme, so the whole set has to be
+ * read again: the window manager keeps the frames it already has, and without
+ * this they would go on being drawn by the theme that has gone until each of
+ * them happens to be re-rendered for another reason. */
+- (void)themeDidActivate:(NSNotification *)notification
+{
+  (void)notification;
+  [URSThemeIntegration themeDidChange];
+  [self redecorateManagedWindows];
+}
+
+/* Re-read every decoration metric from the theme and apply it to the windows
+ * that are already framed.  Shared by the scale factor and the theme change,
+ * which need exactly the same work: the scale factor is written into the
+ * settings first, the theme change drops the render caches first. */
+- (void)redecorateManagedWindows
+{
+  TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
+  GSTheme *theme = [GSTheme theme];
+  CGFloat factor = [settings scaleFactor];
 
   /* Titlebar drawing constants cache the scale factor; invalidate so the
    * next render uses the new value. */
@@ -114,18 +147,32 @@ static CGFloat WMLastScaleFactor = 1.0;
 
   /* The Eau theme's own decoration metrics (buttons, corners) cache the
    * factor too; reset them so the re-render below uses the new scale. */
-  if ([[GSTheme theme] respondsToSelector: @selector(invalidateScaleFactorCache)])
-    [[GSTheme theme] invalidateScaleFactorCache];
+  if ([theme respondsToSelector: @selector(invalidateScaleFactorCache)])
+    [theme invalidateScaleFactorCache];
 
-  /* Re-frame every managed window so its titlebar height follows the factor.
-   * reframeForScaleChange self-guards (only acts on frame-parented windows). */
+  /* The theme owns the titlebar height, and it need not be the factor times
+   * the base height: a title bar drawn as pixel art keeps its rows whole
+   * instead of following a fractional factor. */
+  [settings setHeight:[theme respondsToSelector: @selector(titlebarHeight)]
+                      ? (uint16_t)[theme titlebarHeight]
+                      : (uint16_t)(22 * factor)];
+
+  /* Keep the root _GNUSTEP_FRAME_OFFSETS in sync with the new titlebar
+   * height so the GNUstep backend positions content flush below it. */
+  XCBWindow *rootWin = [[[self.connection screens] objectAtIndex:0] rootWindow];
+  EWMHService *ewmh = [EWMHService sharedInstanceWithConnection:self.connection];
+  [ewmh updateGNUStepFrameOffsetsForRootWindow:rootWin];
+
+  /* Re-frame every managed window so its titlebar height and frame inset
+   * follow the new metrics.  reframeForDecorationChange self-guards (only
+   * acts on frame-parented windows). */
   NSDictionary *windows = [self.connection windowsMap];
   for (XCBWindow *win in [windows allValues])
     {
-      [win reframeForScaleChange];
+      [win reframeForDecorationChange];
     }
 
-  /* Re-render all titlebars with the new scale. */
+  /* Re-render all titlebars with the new metrics. */
   xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
   [URSThemeIntegration refreshAllTitlebarsWithFocusedWindow:focusedId];
 }
@@ -161,6 +208,8 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.nsRunLoopActive = NO;
     self.eventCount = 0;
     _randrEventBase = 0;
+    // No pipe yet, and never the fd 0 the property would default to.
+    _terminationReadFD = -1;
 
     // Initialize XCB connection
     connection = [XCBConnection sharedConnectionAsWindowManager:YES];
@@ -177,11 +226,24 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.keyboardManager = [[URSKeyboardManager alloc] initWithConnection:connection
                                                           windowSwitcher:self.windowSwitcher];
     self.keyboardManager.focusManager = self.focusManager;
+    self.keyboardManager.eventProcessor = self;
+    self.windowSwitcher.focusManager = self.focusManager;
     self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
     self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
     self.titlebarController.workareaManager = self.workareaManager;
     self.titlebarController.focusManager = self.focusManager;
     self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
+    self.overviewController = [[URSOverviewController alloc] initWithConnection:connection
+                                                                    focusManager:self.focusManager
+                                                                  windowSwitcher:self.windowSwitcher];
+    self.windowSwitcher.flowController = [[URSWindowFlowController alloc] initWithConnection:connection
+                                                                               windowSwitcher:self.windowSwitcher];
+    self.showDesktopController = [[URSShowDesktopController alloc] initWithConnection:connection
+                                                                         focusManager:self.focusManager
+                                                                       windowSwitcher:self.windowSwitcher
+                                                                      workareaManager:self.workareaManager];
+    self.attachmentControllers = @[ [[URSSheetController alloc] initWithConnection:connection],
+                                    [[URSDrawerController alloc] initWithConnection:connection] ];
 
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -231,10 +293,30 @@ static CGFloat WMLastScaleFactor = 1.0;
     if (self.compositingRequested) {
         [self initializeCompositing];
         self.titlebarController.compositingManager = self.compositingManager;
+        self.overviewController.compositingManager = self.compositingManager;
+        self.windowSwitcher.flowController.compositingManager = self.compositingManager;
+        self.showDesktopController.compositingManager = self.compositingManager;
+        for (URSAttachmentController *attachments in self.attachmentControllers) {
+            attachments.compositingManager = self.compositingManager;
+        }
+        self.wobblyWindowsController = [[URSWobblyWindowsController alloc] init];
+        self.wobblyWindowsController.compositingManager = self.compositingManager;
+        __weak URSHybridEventHandler *weakSelf = self;
+        self.wobblyWindowsController.attachedWindowsOfFrame = ^NSArray<NSNumber *> *(xcb_window_t frame) {
+            return [weakSelf attachedWindowsOfWindow:frame];
+        };
     }
+
+    /* Follow the theme the user picks while the session runs.  GSTheme posts
+     * this in every process that adopts the new theme, this one included. */
+    [[NSNotificationCenter defaultCenter] addObserver: self
+                                             selector: @selector(themeDidActivate:)
+                                                 name: GSThemeDidActivateNotification
+                                               object: nil];
 
     // Decorate any existing windows already on screen
     [self decorateExistingWindowsOnStartup];
+    [self.compositingManager releasePaintingWhenSettled];
 
     // Setup XCB event integration with NSRunLoop
     [self setupXCBEventIntegration];
@@ -244,6 +326,26 @@ static CGFloat WMLastScaleFactor = 1.0;
 
     // Setup keyboard grabbing for Alt-Tab
     [self.keyboardManager setupKeyboardGrabbing];
+    [self.overviewController setUp];
+    [self.showDesktopController setUp];
+
+    /* Loading the desktop background and decorating every window go
+       through tens of megabytes that are freed again, some of them only
+       when the launch autorelease pool drains after this method; the heap
+       is trimmed on the next pass of the run loop. */
+    [self performSelector:@selector(releaseFreedHeapMemory)
+               withObject:nil
+               afterDelay:0];
+}
+
+- (void)releaseFreedHeapMemory
+{
+#ifdef __GLIBC__
+    /* glibc gives memory back only from the top of the heap, so the freed
+       pages below a surviving object stay resident for the life of the
+       process.  The allocators of the BSDs return such pages on their own. */
+    malloc_trim(0);
+#endif
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender
@@ -386,6 +488,48 @@ static CGFloat WMLastScaleFactor = 1.0;
 
 #pragma mark - Existing Windows Decoration
 
+// Frames a window that was mapped before this window manager started, as
+// the map request handler would have; returns its client when it can take
+// the focus.
+- (XCBWindow *)adoptExistingWindow:(xcb_window_t)winId {
+    XCBWindow *rootWindow = [[[connection screens] objectAtIndex:0] rootWindow];
+    XCBWindow *focusable = nil;
+
+    //NSLog(@"[WindowManager] Adopting existing window %u", winId);
+
+    // Synthesize a map request so normal decoration flow runs
+    xcb_map_request_event_t mapEvent = {0};
+    mapEvent.response_type = XCB_MAP_REQUEST;
+    mapEvent.parent = [rootWindow window];
+    mapEvent.window = winId;
+
+    [connection handleMapRequest:&mapEvent];
+
+    // Mirror the XCB_MAP_REQUEST handler's post-processing for startup-adopted windows.
+    // Without this, pre-existing windows miss compositor registration and fixed-size
+    // border adjustment that the normal map-request flow provides.
+    XCBWindow *mappedClient = [connection windowForXCBId:winId];
+    if (mappedClient && [[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
+        if (self.compositingManager && [self.compositingManager compositingActive]) {
+            [self.compositingManager registerWindow:winId];
+            [self registerChildWindowsForCompositor:winId depth:3];
+            XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
+            [self.compositingManager registerWindow:[frame window]];
+            [self registerChildWindowsForCompositor:[frame window] depth:3];
+        }
+        [self adjustBorderForFixedSizeWindow:winId];
+        if ([self.focusManager isWindowFocusable:mappedClient allowDesktop:NO]) {
+            focusable = mappedClient;
+        }
+    }
+
+    // Apply GSTheme rendering to the titlebar immediately after decoration.
+    // The normal XCB_MAP_REQUEST path calls this; we must replicate it for
+    // startup-adopted windows or they keep the unstyled placeholder titlebar.
+    [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:winId]];
+    return focusable;
+}
+
 - (void)decorateExistingWindowsOnStartup {
     @try {
         XCBScreen *screen = [[connection screens] objectAtIndex:0];
@@ -397,6 +541,19 @@ static CGFloat WMLastScaleFactor = 1.0;
         uint32_t childCount = tree.childrenLen;
 
         //NSLog(@"[WindowManager] Decorating %u pre-existing windows", childCount);
+
+        // Focusing every adopted window in turn made each titlebar flash
+        // active; only the topmost one (the tree is bottom-first) gets focus.
+        XCBWindow *topmostAdopted = nil;
+        NSMutableArray<NSNumber *> *attachedWindows = [NSMutableArray array];
+
+        // A drawer was put next to its parent where the parent was before
+        // it is framed (and maybe moved) below.
+        for (uint32_t i = 0; i < childCount; i++) {
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments rememberParentBeforeAdoptionOfWindow:children[i]];
+            }
+        }
 
         connection.adoptingExistingWindows = YES;
         for (uint32_t i = 0; i < childCount; i++) {
@@ -439,37 +596,43 @@ static CGFloat WMLastScaleFactor = 1.0;
                 continue;
             }
 
-            //NSLog(@"[WindowManager] Adopting existing window %u", winId);
-
-            // Synthesize a map request so normal decoration flow runs
-            xcb_map_request_event_t mapEvent = {0};
-            mapEvent.response_type = XCB_MAP_REQUEST;
-            mapEvent.parent = [rootWindow window];
-            mapEvent.window = winId;
-
-            [connection handleMapRequest:&mapEvent];
-
-            // Mirror the XCB_MAP_REQUEST handler's post-processing for startup-adopted windows.
-            // Without this, pre-existing windows miss compositor registration and fixed-size
-            // border adjustment that the normal map-request flow provides.
-            XCBWindow *mappedClient = [connection windowForXCBId:winId];
-            if (mappedClient && [[mappedClient parentWindow] isKindOfClass:[XCBFrame class]]) {
-                if (self.compositingManager && [self.compositingManager compositingActive]) {
-                    [self.compositingManager registerWindow:winId];
-                    [self registerChildWindowsForCompositor:winId depth:3];
-                    XCBFrame *frame = (XCBFrame *)[mappedClient parentWindow];
-                    [self.compositingManager registerWindow:[frame window]];
-                    [self registerChildWindowsForCompositor:[frame window] depth:3];
-                }
-                [self adjustBorderForFixedSizeWindow:winId];
+            // A sheet or drawer hangs from its parent, which may come later
+            // in the stacking order and must be framed first.
+            if ([self attachmentControllerOfKind:winId] != nil) {
+                [attachedWindows addObject:@(winId)];
+                continue;
             }
 
-            // Apply GSTheme rendering to the titlebar immediately after decoration.
-            // The normal XCB_MAP_REQUEST path calls this; we must replicate it for
-            // startup-adopted windows or they keep the unstyled placeholder titlebar.
-            [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:winId]];
+            XCBWindow *adopted = [self adoptExistingWindow:winId];
+            if (adopted) {
+                topmostAdopted = adopted;
+            }
+        }
+        for (NSNumber *attached in attachedWindows) {
+            xcb_window_t attachedId = [attached unsignedIntValue];
+            if ([[self attachmentControllerOfKind:attachedId] adoptMappedWindow:attachedId]) {
+                if (self.compositingManager && [self.compositingManager compositingActive]) {
+                    [self.compositingManager registerWindow:attachedId];
+                }
+                continue;
+            }
+            // Its parent is undecorated: framed like any other window.
+            XCBWindow *adopted = [self adoptExistingWindow:attachedId];
+            if (adopted) {
+                topmostAdopted = adopted;
+            }
         }
         connection.adoptingExistingWindows = NO;
+
+        if (topmostAdopted) {
+            [self focusWindowAfterThemeApplied:topmostAdopted];
+        }
+
+        // Each adopted window got a new frame, and new windows are created on
+        // top of the stack - above the Dock and the menu bar, which were above
+        // them before this window manager started.  Put that layer back now
+        // instead of leaving it buried until some later restack.
+        [connection restackDockWindowsAbove];
 
         [connection flush];
         
@@ -584,10 +747,132 @@ static CGFloat WMLastScaleFactor = 1.0;
                 extra:(void*)extra
               forMode:(NSString*)mode
 {
-    if (type == ET_RDESC) {
-        // Process available XCB events (non-blocking)
-        [self processAvailableXCBEvents];
+    if (type != ET_RDESC) {
+        return;
     }
+    if ((int)(uintptr_t)data == self.terminationReadFD) {
+        [self handleTerminationSignal];
+        return;
+    }
+    // Process available XCB events (non-blocking)
+    [self processAvailableXCBEvents];
+}
+
+/* A termination signal only writes a byte to this pipe: shutting down from
+ * the handler itself deadlocked the window manager.  The handler interrupts
+ * whatever X call is in flight, and the X connection lock it holds is still
+ * taken while the handler asks the server for a reply of its own, so the
+ * process hangs forever with the desktop unmanaged. */
+- (int)installTerminationPipe
+{
+    int fds[2];
+    if (pipe(fds) != 0) {
+        NSLog(@"[WindowManager] ERROR: could not create the termination pipe: %s",
+              strerror(errno));
+        return -1;
+    }
+    for (int i = 0; i < 2; i++) {
+        fcntl(fds[i], F_SETFD, fcntl(fds[i], F_GETFD, 0) | FD_CLOEXEC);
+        fcntl(fds[i], F_SETFL, fcntl(fds[i], F_GETFL, 0) | O_NONBLOCK);
+    }
+    self.terminationReadFD = fds[0];
+
+    NSRunLoop *runLoop = [NSRunLoop currentRunLoop];
+    for (NSString *mode in @[NSDefaultRunLoopMode, NSRunLoopCommonModes,
+                             NSEventTrackingRunLoopMode, NSModalPanelRunLoopMode]) {
+        [runLoop addEvent:(void*)(uintptr_t)fds[0]
+                     type:ET_RDESC
+                  watcher:self
+                  forMode:mode];
+    }
+    return fds[1];
+}
+
+- (void)handleTerminationSignal
+{
+    char drained[16];
+    while (read(self.terminationReadFD, drained, sizeof(drained)) > 0) {
+        ;
+    }
+    [self cleanupBeforeExit];
+    [NSApp terminate:nil];
+}
+
+#pragma mark - Attached windows (sheets, drawers)
+
+- (URSAttachmentController *)attachmentControllerOfKind:(xcb_window_t)window
+{
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        if ([attachments isAttachedKind:window]) {
+            return attachments;
+        }
+    }
+    return nil;
+}
+
+- (xcb_window_t)parentOfAttachedWindow:(xcb_window_t)window
+{
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        xcb_window_t parent = [attachments parentOfWindow:window];
+        if (parent != XCB_NONE) {
+            return parent;
+        }
+    }
+    return XCB_NONE;
+}
+
+- (NSArray<NSNumber *> *)attachedWindowsOfWindow:(xcb_window_t)window
+{
+    NSMutableArray<NSNumber *> *attached = [NSMutableArray array];
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        [attached addObjectsFromArray:[attachments attachedWindowsOfWindow:window]];
+    }
+    return attached;
+}
+
+// A frame the window manager is moving or resizing takes its sheets and
+// drawers along in the same batch of requests, before the compositor
+// paints the frame at its new place, so no frame shows the parent moved
+// and them not yet.
+- (void)attachedWindowsFollowMotion:(xcb_motion_notify_event_t *)motionEvent
+{
+    XCBWindow *window = [connection windowForXCBId:motionEvent->event];
+    XCBFrame *frame = nil;
+    if ([connection dragState] && [window isKindOfClass:[XCBTitleBar class]]) {
+        frame = (XCBFrame *)[window parentWindow];
+    } else if ([connection resizeState]) {
+        // The grip is a child of the frame; the edges are the frame itself.
+        frame = [window isKindOfClass:[XCBFrame class]] ? (XCBFrame *)window
+                                                        : (XCBFrame *)[window parentWindow];
+    }
+    if (![frame isKindOfClass:[XCBFrame class]]) {
+        return;
+    }
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        [attachments followFrame:frame];
+    }
+}
+
+- (BOOL)passFocusToAttachedWindowOfWindow:(xcb_window_t)window
+{
+    for (URSAttachmentController *attachments in self.attachmentControllers) {
+        if ([attachments passFocusToAttachedWindowOfWindow:window]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+- (void)processMotionEvent:(xcb_motion_notify_event_t *)motionEvent
+{
+    if ([self.overviewController handleMotion:motionEvent]) {
+        return;
+    }
+    [connection handleMotionNotify:motionEvent];
+    [self.titlebarController handleResizeDuringMotion:motionEvent];
+    [self attachedWindowsFollowMotion:motionEvent];
+    [self handleCompositingDuringMotion:motionEvent];
+    [self.titlebarController handleHoverDuringMotion:motionEvent];
 }
 
 - (void)processAvailableXCBEvents
@@ -612,9 +897,12 @@ static CGFloat WMLastScaleFactor = 1.0;
     const NSUInteger maxEventsPerCall = 50; // Limit to prevent CPU hogging
     BOOL moreEventsAvailable = NO;
 
-    // Use xcb_poll_for_event (non-blocking) instead of xcb_wait_for_event (blocking)
-    while ((e = xcb_poll_for_event([connection connection])) &&
-           eventsProcessed < maxEventsPerCall) {
+    // Use xcb_poll_for_event (non-blocking) instead of xcb_wait_for_event (blocking).
+    // The limit is checked first: polling takes the event off the queue, and
+    // one taken past the limit was never handled.  Losing a client's withdraw
+    // request that way left a quickly passed menu on the screen for good.
+    while (eventsProcessed < maxEventsPerCall &&
+           (e = xcb_poll_for_event([connection connection]))) {
         eventsProcessed++;
 
         // Motion event compression: accumulate the latest motion event
@@ -636,10 +924,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         if (lastMotionEvent) {
             uint8_t nextType = e->response_type & ~0x80;
             if (nextType == XCB_BUTTON_RELEASE || nextType == XCB_BUTTON_PRESS) {
-                [connection handleMotionNotify:lastMotionEvent];
-                [self.titlebarController handleResizeDuringMotion:lastMotionEvent];
-                [self handleCompositingDuringMotion:lastMotionEvent];
-                [self.titlebarController handleHoverDuringMotion:lastMotionEvent];
+                [self processMotionEvent:lastMotionEvent];
                 needFlush = YES;
                 free(lastMotionEvent);
                 lastMotionEvent = NULL;
@@ -658,10 +943,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
     // Process any remaining compressed motion event (e.g. motion was last in queue)
     if (lastMotionEvent) {
-        [connection handleMotionNotify:lastMotionEvent];
-        [self.titlebarController handleResizeDuringMotion:lastMotionEvent];
-        [self handleCompositingDuringMotion:lastMotionEvent];
-        [self.titlebarController handleHoverDuringMotion:lastMotionEvent];
+        [self processMotionEvent:lastMotionEvent];
         needFlush = YES;
         free(lastMotionEvent);
         lastMotionEvent = NULL;
@@ -801,7 +1083,26 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_FOCUS_IN: {
             xcb_focus_in_event_t *focusInEvent = (xcb_focus_in_event_t *)event;
             [connection handleFocusIn:focusInEvent];
-            [self handleFocusChange:focusInEvent->event isActive:YES];
+            // Focus events caused by a keyboard grab starting or ending say
+            // nothing about which window has focus.  Alt-Tab releases its
+            // grab while the old window is still focused, and the Ungrab
+            // FocusIn that follows drew that window active again for a few
+            // frames after the switch had drawn the new one active.
+            if (focusInEvent->mode == XCB_NOTIFY_MODE_NORMAL ||
+                focusInEvent->mode == XCB_NOTIFY_MODE_WHILE_GRABBED) {
+                // A sheet or drawer has no titlebar of its own: its parent
+                // shows as the active window while it has the focus, and the
+                // parent passes on a focus it gets while its sheet is up.
+                xcb_window_t focused = focusInEvent->event;
+                xcb_window_t attachedParent = [self parentOfAttachedWindow:focused];
+                if (attachedParent != XCB_NONE) {
+                    focused = attachedParent;
+                } else if ([self passFocusToAttachedWindowOfWindow:focused]) {
+                    break;
+                }
+                [self handleFocusChange:focused isActive:YES];
+                [self.showDesktopController windowGotFocus:focused];
+            }
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 // A raise/lower only changes pixels inside the affected
                 // window's extents — damage those instead of the screen.
@@ -822,6 +1123,10 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_BUTTON_PRESS: {
             xcb_button_press_event_t *pressEvent = (xcb_button_press_event_t *)event;
+            if ([self.overviewController handleButtonPress:pressEvent] ||
+                [self.showDesktopController handleButtonPress:pressEvent]) {
+                break;
+            }
 
             // Dismiss snapping context menu on any click outside it
             if (self.snappingMenuController.activeMenu) {
@@ -868,6 +1173,10 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_BUTTON_RELEASE: {
             xcb_button_release_event_t *releaseEvent = (xcb_button_release_event_t *)event;
+            if ([self.overviewController handleButtonRelease:releaseEvent] ||
+                [self.showDesktopController handleButtonRelease:releaseEvent]) {
+                break;
+            }
 
             // Dismiss snapping context menu on button release outside it
             // (e.g., user held right-click on titlebar and released off the window)
@@ -887,6 +1196,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
             // Let xcbkit handle the release first
             [connection handleButtonRelease:releaseEvent];
+            [self.wobblyWindowsController dragEnded];
             // After resize completes, update the titlebar with GSTheme
             [self.titlebarController handleResizeComplete:releaseEvent];
 
@@ -912,6 +1222,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_MAP_NOTIFY: {
             xcb_map_notify_event_t *notifyEvent = (xcb_map_notify_event_t *)event;
             [connection handleMapNotify:notifyEvent];
+            [self.showDesktopController windowMapped:notifyEvent->window];
             
             // Notify compositor of map event
             if (self.compositingManager && [self.compositingManager compositingActive]) {
@@ -919,10 +1230,34 @@ static CGFloat WMLastScaleFactor = 1.0;
                 // Track mapped child windows (e.g., GPU/GL subwindows) to receive damage events
                 [self registerChildWindowsForCompositor:notifyEvent->window depth:2];
             }
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments windowMapped:notifyEvent->window];
+            }
             break;
         }
         case XCB_MAP_REQUEST: {
             xcb_map_request_event_t *mapRequestEvent = (xcb_map_request_event_t *)event;
+
+            URSAttachmentController *attaching = nil;
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                if ([attachments handleMapRequest:mapRequestEvent]) {
+                    attaching = attachments;
+                    break;
+                }
+            }
+            if (attaching) {
+                if (self.compositingManager && [self.compositingManager compositingActive]) {
+                    [self.compositingManager registerWindow:mapRequestEvent->window];
+                }
+                // A sheet is what the user answers now; the delay is the
+                // same as for any new window, so its map has been processed.
+                if (attaching.focusesOnMap) {
+                    [self performSelector:@selector(focusNewlyMappedWindow:)
+                               withObject:[connection windowForXCBId:mapRequestEvent->window]
+                               afterDelay:0.1];
+                }
+                break;
+            }
 
             // Check if this is a dock window with struts
             EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
@@ -1021,7 +1356,11 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_UNMAP_NOTIFY: {
             xcb_unmap_notify_event_t *unmapNotifyEvent = (xcb_unmap_notify_event_t *)event;
             xcb_window_t removedClientId = [self.focusManager clientWindowIdForWindowId:unmapNotifyEvent->window];
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments windowWillUnmap:unmapNotifyEvent->window];
+            }
             [connection handleUnMapNotify:unmapNotifyEvent];
+            [self.showDesktopController windowUnmapped:unmapNotifyEvent->window];
 
             // Notify compositor of unmap event. The compositor will remove the
             // entire logical window group atomically, including decorations,
@@ -1039,15 +1378,27 @@ static CGFloat WMLastScaleFactor = 1.0;
             
             // Unregister window from compositor before connection handles destroy
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                [self.compositingManager unregisterWindow:destroyNotify->window];
+                [self.compositingManager unregisterWindow:destroyNotify->window destroyed:YES];
             }
             
             // Remove any struts for this window
             if ([self.workareaManager removeStrutForWindow:destroyNotify->window]) {
                 [self.workareaManager recalculateWorkarea];
             }
-            
+
+            // X recycles client window ids once a connection closes, so a
+            // registration left behind here would attach to whatever
+            // unrelated, later window happens to get the same id - hiding
+            // its zoom button even though it is genuinely resizable (seen
+            // live: a destroyed fixed-size probe window's id was reused by
+            // the next EauTest launch, which then had no zoom button).
+            [URSThemeIntegration unregisterFixedSizeWindow:destroyNotify->window];
+
             [connection handleDestroyNotify:destroyNotify];
+            [self.showDesktopController windowDestroyed:destroyNotify->window];
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments windowDestroyed:destroyNotify->window];
+            }
             [self.focusManager ensureFocusAfterWindowRemoval:removedClientId];
             break;
         }
@@ -1058,6 +1409,16 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_CONFIGURE_REQUEST: {
             xcb_configure_request_event_t *configRequest = (xcb_configure_request_event_t *)event;
+            BOOL attached = NO;
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                if ([attachments handleConfigureRequest:configRequest]) {
+                    attached = YES;
+                    break;
+                }
+            }
+            if (attached) {
+                break;
+            }
             [connection handleConfigureWindowRequest:configRequest];
             break;
         }
@@ -1074,7 +1435,10 @@ static CGFloat WMLastScaleFactor = 1.0;
         case XCB_CONFIGURE_NOTIFY: {
             xcb_configure_notify_event_t *configureNotify = (xcb_configure_notify_event_t *)event;
             [connection handleConfigureNotify:configureNotify];
-            
+            for (URSAttachmentController *attachments in self.attachmentControllers) {
+                [attachments windowConfigured:configureNotify];
+            }
+
             // Notify compositor of window resize/move
             if (self.compositingManager && [self.compositingManager compositingActive]) {
                 [self.compositingManager resizeWindow:configureNotify->window 
@@ -1083,9 +1447,9 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                 width:configureNotify->width
                                                height:configureNotify->height];
                 // Stacking can also change via ConfigureNotify (stack mode);
-                // damage just the configured window — move/resize damage was
-                // already issued by resizeWindow: above.
-                [self.compositingManager markStackingOrderDirtyForWindow:configureNotify->window];
+                // move/resize damage was already issued by resizeWindow: above.
+                [self.compositingManager noteStackPosition:configureNotify->above_sibling
+                                                 forWindow:configureNotify->window];
             }
             break;
         }
@@ -1094,10 +1458,11 @@ static CGFloat WMLastScaleFactor = 1.0;
             [connection handleReparentNotify:reparentNotify];
 
             if (self.compositingManager && [self.compositingManager compositingActive]) {
-                // Re-register to refresh parent/geometry and avoid stale artifacts
-                [self.compositingManager unregisterWindow:reparentNotify->window];
+                // Re-register to refresh parent/geometry.  Unregistering damages
+                // what the window covered while it was painted; inside its new
+                // parent it shows up as damage to that parent.
+                [self.compositingManager unregisterWindow:reparentNotify->window destroyed:NO];
                 [self.compositingManager registerWindow:reparentNotify->window];
-                [self.compositingManager scheduleComposite];
             }
             break;
         }
@@ -1107,6 +1472,16 @@ static CGFloat WMLastScaleFactor = 1.0;
             [self.workareaManager handleStrutPropertyChange:propEvent];
             [self handleWindowTitlePropertyChange:propEvent];
             [connection handlePropertyNotify:propEvent];
+            // Re-evaluate fixed-size status: a client's WM_NORMAL_HINTS can
+            // be published as a placeholder at map time (see
+            // -adjustBorderForFixedSizeWindow:) and corrected afterward once
+            // its real style is known - re-check so a genuinely resizable
+            // window's zoom button reflects that, instead of a stale
+            // snapshot taken before the correction arrived.
+            if ([[[XCBAtomService sharedInstanceWithConnection:connection]
+                    atomNameFromAtom:propEvent->atom] isEqualToString:@"WM_NORMAL_HINTS"]) {
+                [self adjustBorderForFixedSizeWindow:propEvent->window];
+            }
             // App-signal content activity (gershwin-terminal sets this).  Fires
             // regardless of visibility, so it covers WindowShaded windows whose
             // client is clipped and thus emits no X Damage.
@@ -1117,11 +1492,19 @@ static CGFloat WMLastScaleFactor = 1.0;
         }
         case XCB_KEY_PRESS: {
             xcb_key_press_event_t *keyPressEvent = (xcb_key_press_event_t *)event;
+            if ([self.overviewController handleKeyPress:keyPressEvent] ||
+                [self.showDesktopController handleKeyPress:keyPressEvent]) {
+                break;
+            }
             [self.keyboardManager handleKeyPress:keyPressEvent];
             break;
         }
         case XCB_KEY_RELEASE: {
             xcb_key_release_event_t *keyReleaseEvent = (xcb_key_release_event_t *)event;
+            if ([self.overviewController handleKeyRelease:keyReleaseEvent] ||
+                [self.showDesktopController handleKeyRelease:keyReleaseEvent]) {
+                break;
+            }
             [self.keyboardManager handleKeyRelease:keyReleaseEvent];
             break;
         }
@@ -1322,15 +1705,18 @@ static CGFloat WMLastScaleFactor = 1.0;
     }
 
     uint8_t damageEventBase = [self.compositingManager damageEventBase];
-    uint8_t presentEventBase = [self.compositingManager presentEventBase];
 
-    // X Present extension: vblank-synced composite complete
-    if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_COMPLETE_NOTIFY) {
-        [self.compositingManager handlePresentComplete:event];
+    // Present has no core events; its notifications are generic events.
+    if ([self.compositingManager handlePresentEvent:event]) {
         return;
     }
-    if (presentEventBase > 0 && responseType == presentEventBase + XCB_PRESENT_IDLE_NOTIFY) {
-        [self.compositingManager handlePresentIdle];
+
+    uint8_t shapeEventBase = [self.compositingManager shapeEventBase];
+    if (shapeEventBase > 0 && responseType == shapeEventBase + XCB_SHAPE_NOTIFY) {
+        xcb_shape_notify_event_t *shapeEvent = (xcb_shape_notify_event_t *)event;
+        if (shapeEvent->shape_kind == XCB_SHAPE_SK_BOUNDING) {
+            [self.compositingManager handleShapeNotify:shapeEvent->affected_window];
+        }
         return;
     }
 
@@ -1470,29 +1856,12 @@ static CGFloat WMLastScaleFactor = 1.0;
             }
         }
 
-        // Force every other window to the inactive state so only the focused
-        // window shows active decorations.  This runs for the activate case only.
+        // Every other window goes to the inactive state so only the focused
+        // window shows active decorations.
         if (isActive) {
-            NSDictionary *allWindows = [connection windowsMap];
-            for (NSString *wid in allWindows) {
-                XCBWindow *other = [allWindows objectForKey:wid];
-                if (![other isKindOfClass:[XCBFrame class]] || other == frame) {
-                    continue;
-                }
-                XCBFrame *otherFrame = (XCBFrame *)other;
-                XCBTitleBar *otherTB = (XCBTitleBar *)[otherFrame childWindowForKey:TitleBar];
-                if (!otherTB) {
-                    continue;
-                }
-                [otherFrame setIsAbove:NO];
-                [otherTB setIsAbove:NO];
-                [URSThemeIntegration renderGSThemeToWindow:otherFrame
-                                                     frame:otherFrame
-                                                     title:[otherTB windowTitle]
-                                                    active:NO];
-                [otherTB putWindowBackgroundWithPixmap:[otherTB pixmap]];
-                [otherTB drawArea:[otherTB windowRect]];
-            }
+            [URSThemeIntegration showTitlebarsWithActiveFrame:frame
+                                                   connection:connection];
+            return;
         }
 
         // Re-render this titlebar with GSTheme using the correct active/inactive state
@@ -1643,9 +2012,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
                 // Add to managed list
                 URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
-                if (![integration.managedTitlebars containsObject:titlebar]) {
-                    [integration.managedTitlebars addObject:titlebar];
-                }
+                [integration.managedTitlebars addTitlebar:titlebar];
             } else {
                 //NSLog(@"GSTheme-only decoration failed");
             }
@@ -1668,7 +2035,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         xcb_window_t exposedWindow = exposeEvent->window;
 
         // Check if the exposed window is a titlebar we're managing
-        for (XCBTitleBar *titlebar in integration.managedTitlebars) {
+        for (XCBTitleBar *titlebar in [integration.managedTitlebars titlebars]) {
             if ([titlebar window] == exposedWindow) {
                 // This titlebar was exposed, re-apply GSTheme to override XCBKit redrawing
                 // Find the frame by checking the titlebar's parent window
@@ -1687,6 +2054,17 @@ static CGFloat WMLastScaleFactor = 1.0;
                     BOOL exposeIsActive = (self.focusManager.lastFocusedWindowId != XCB_NONE &&
                                            exposeClient != nil &&
                                            [exposeClient window] == self.focusManager.lastFocusedWindowId);
+
+                    // Most Exposes, a burst of them after every step of a live
+                    // resize among them, find the theme's drawing still in the
+                    // pixmap; the connection has copied the exposed part from
+                    // it already, so drawing the whole titlebar anew was pure
+                    // cost (over a third of the CPU a resize took).
+                    if ([URSThemeIntegration titlebar:titlebar
+                                    isCurrentForFrame:frame
+                                               active:exposeIsActive]) {
+                        break;
+                    }
 
                     // Re-apply GSTheme rendering to override the expose redraw
                     BOOL exposeSuccess = [URSThemeIntegration renderGSThemeToWindow:frame
@@ -1718,11 +2096,32 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                  xcb_icccm_get_wm_normal_hints([connection connection], clientWindowId),
                                                  &sizeHints,
                                                  NULL)) {
-            if ((sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
+            BOOL isFixedSize = (sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) &&
                 (sizeHints.flags & XCB_ICCCM_SIZE_HINT_P_MAX_SIZE) &&
                 sizeHints.min_width == sizeHints.max_width &&
-                sizeHints.min_height == sizeHints.max_height) {
+                sizeHints.min_height == sizeHints.max_height;
 
+            if (!isFixedSize) {
+                // A client's WM_NORMAL_HINTS can briefly say "fixed size" for
+                // a window that is really resizable - gnustep-back publishes
+                // that as a workaround for window managers that ignore other
+                // non-resizable signals, before the client's real style is
+                // known, and this method is called as early as MapRequest.
+                // Once corrected hints arrive (this method is called again
+                // from the WM_NORMAL_HINTS PropertyNotify handler below),
+                // undo the registration - otherwise a window that was only
+                // ever momentarily fixed-size stayed registered forever,
+                // since nothing else ever reverses it, and Eau's zoom button
+                // (URSThemeIntegration isFixedSizeWindow:) never came back.
+                [URSThemeIntegration unregisterFixedSizeWindow:clientWindowId];
+                XCBWindow *resizableClientW = [connection windowForXCBId:clientWindowId];
+                if (resizableClientW) {
+                    [resizableClientW setCanResize:YES];
+                }
+                return;
+            }
+
+            {
                 //NSLog(@"Fixed-size window %u detected - removing border and extra buttons", clientWindowId);
 
                 // Register as fixed-size window (for button hiding in GSTheme rendering)
@@ -1973,18 +2372,18 @@ static CGFloat WMLastScaleFactor = 1.0;
                         //NSLog(@"Found frame for client window %u, applying GSTheme to titlebar", windowId);
 
                         // Apply GSTheme rendering (this will override XCBKit's decoration).
-                        // Newly mapped windows almost always get focus, so default active.
+                        // Newly mapped windows almost always get focus, so default active;
+                        // windows adopted at startup do not.
+                        BOOL adopting = self.connection.adoptingExistingWindows;
                         BOOL success = [URSThemeIntegration renderGSThemeToWindow:window
                                                                              frame:frame
                                                                              title:titlebar.windowTitle
-                                                                            active:YES];
+                                                                            active:!adopting];
 
                         if (success) {
                             // Add to managed list so we can handle expose events
                             URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
-                            if (![integration.managedTitlebars containsObject:titlebar]) {
-                                [integration.managedTitlebars addObject:titlebar];
-                            }
+                            [integration.managedTitlebars addTitlebar:titlebar];
 
                             //NSLog(@"Successfully applied GSTheme to titlebar for window %u: %@",
                                   //windowId, titlebar.windowTitle ?: @"(untitled)");
@@ -2005,9 +2404,11 @@ static CGFloat WMLastScaleFactor = 1.0;
 
                             // Auto-focus the client window - the frame and titlebar are now fully set up
                             // Focus after a small delay to ensure the window is properly rendered and ready
-                            [self performSelector:@selector(focusWindowAfterThemeApplied:)
-                                       withObject:clientWindow
-                                       afterDelay:0.1];
+                            if (!adopting) {
+                                [self performSelector:@selector(focusWindowAfterThemeApplied:)
+                                           withObject:clientWindow
+                                           afterDelay:0.1];
+                            }
                         } else {
                             NSLog(@"Failed to apply GSTheme to titlebar for window %u", windowId);
                         }
@@ -2022,7 +2423,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         // Undecorated windows have no titlebars, so GSTheme is not applicable — skip silently.
         XCBWindow *directWindow = [self.connection windowForXCBId:windowId];
         if (directWindow) {
-            if (![directWindow decorated]) return;
+            if (![directWindow decorated] || self.connection.adoptingExistingWindows) return;
 
             // Attempt a direct focus on the client window as a fallback.
             if ([self.focusManager isWindowFocusable:directWindow allowDesktop:NO]) {
@@ -2295,6 +2696,9 @@ static CGFloat WMLastScaleFactor = 1.0;
             
             // Get the frame's current position (after moveTo: was called)
             XCBRect frameRect = [frame windowRect];
+            [self.wobblyWindowsController frameDragged:frame
+                                               pointer:NSMakePoint(motionEvent->root_x,
+                                                                   motionEvent->root_y)];
             
             // Notify compositor of window move (efficient - doesn't recreate picture)
             [self.compositingManager moveWindow:[frame window] 
@@ -2374,6 +2778,8 @@ static CGFloat WMLastScaleFactor = 1.0;
         // Step 1: Clean up keyboard grabs
         //NSLog(@"[WindowManager] Step 1: Cleaning up keyboard grabs");
         [self.keyboardManager cleanupKeyboardGrabbing];
+        [self.overviewController tearDown];
+        [self.showDesktopController tearDown];
         
         // Step 2: Undecorate and restore all client windows
         //NSLog(@"[WindowManager] Step 2: Restoring all client windows");
@@ -2744,6 +3150,13 @@ static CGFloat WMLastScaleFactor = 1.0;
 
     NSString *newTitle = [(clientWindow ? clientWindow : eventWindow) title];
 
+    // One retitle arrives as several notifies (WM_NAME, _NET_WM_NAME, the
+    // frame's copy of the name), and a titlebar rendered again with the title
+    // it shows already cost a theme render and its round trips each time.
+    if (newTitle != nil && [newTitle isEqualToString:[titlebar windowTitle]]) {
+        return;
+    }
+
     [titlebar setInternalTitle:newTitle];
 
     if ([titlebar isGSThemeActive] && [[URSThemeIntegration sharedInstance] enabled]) {
@@ -2774,6 +3187,8 @@ static CGFloat WMLastScaleFactor = 1.0;
 {
     // Clean up keyboard grabs first
     [self.keyboardManager cleanupKeyboardGrabbing];
+    [self.overviewController tearDown];
+    [self.showDesktopController tearDown];
 
     // Remove from run loop if integrated - must match all modes added in setupXCBEventIntegration
     [self teardownXCBEventIntegration];

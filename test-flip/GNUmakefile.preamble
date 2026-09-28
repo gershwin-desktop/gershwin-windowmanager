@@ -1,0 +1,11 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+# The flip geometry is pure maths, so it is compiled into the test directly;
+# the matrix helpers and the shared easing curve are linked beside it.
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager -I../WindowManager/xcb \
+	-I../WindowManager/xcb/services -I../WindowManager/xcb/enums \
+	-I../WindowManager/xcb/utils
+flipgeometry_OBJC_FILES += ../WindowManager/URSProjection.m \
+	../WindowManager/URSPresentationTransition.m
+# The window manager is ARC; the test tool stays MRC for the PASS macros.
+../WindowManager/URSPresentationTransition.m_FILE_FLAGS += -fobjc-arc
+../WindowManager/URSProjection.m_FILE_FLAGS += -fobjc-arc

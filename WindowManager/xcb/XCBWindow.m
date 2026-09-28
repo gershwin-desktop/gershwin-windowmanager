@@ -57,7 +57,9 @@
 @synthesize cursor;
 @synthesize windowClass;
 @synthesize windowType;
+@synthesize isUtilityPanel;
 @synthesize leaderWindow;
+
 @synthesize maximizedHorizontally;
 @synthesize maximizedVertically;
 @synthesize shape;
@@ -436,8 +438,8 @@
 {
     NSUInteger size = [[connection screens] count];
     XCBQueryTreeReply *queryTreeReply = [self queryTree];
-    
-    if ([queryTreeReply message] == BadWindow)
+
+    if (queryTreeReply == nil || [queryTreeReply message] == BadWindow)
         return nil;
     
     XCBWindow *rootWindow = [queryTreeReply rootWindow];
@@ -602,6 +604,10 @@
         [queryReply description];
         return queryReply;
     }
+    /* Neither a reply nor an error: nothing can be said about this window. */
+    if (reply == NULL)
+        return nil;
+
     queryReply = [[XCBQueryTreeReply alloc] initWithReply:reply andConnection:connection];
 
 
@@ -1161,7 +1167,7 @@
     XCBFrame *frame = (XCBFrame*)parentWindow;
     XCBRect frameRect = [frame windowRect];//[[frame geometries] rect];
     TitleBarSettingsService *settingsService = [TitleBarSettingsService sharedInstance];
-    int titleHeight = [settingsService heightDefined] ? [settingsService height] : [settingsService defaultHeight];
+    int titleHeight = [settingsService heightForUtility:[self isUtilityPanel]];
     int cb = [frame clientBorder];
 
     /*** Handle windows we manage ***/
@@ -1181,9 +1187,14 @@
     if (anEvent->value_mask & XCB_CONFIG_WINDOW_Y)
     {
         // Same rationale as X: anEvent->y is the frame Y directly.
+        // Never honor a client-requested move that would put the titlebar
+        // inside a strut (menu bar) - clamp before it reaches the frame.
+        int32_t requestedY = anEvent->y;
+        XCBPoint clamped = [connection clampFramePosition:XCBMakePoint(frameRect.position.x, requestedY)
+                                                      size:frameRect.size];
         config_frame_mask |= XCB_CONFIG_WINDOW_Y;
-        config_frame_vals[frame_i++] = anEvent->y;
-        frameRect.position.y = anEvent->y;
+        config_frame_vals[frame_i++] = (uint32_t)(int32_t)clamped.y;
+        frameRect.position.y = clamped.y;
     }
 
     if (anEvent->value_mask & XCB_CONFIG_WINDOW_WIDTH)
@@ -1294,9 +1305,10 @@
     originalRect = rect;
 }
 
-/* Re-apply the frame geometry after a GSScaleFactor change: resize the frame
- * and titlebar to the new titlebar height and re-position the client. */
-- (void)reframeForScaleChange
+/* Re-apply the frame geometry after anything that changes how a window is
+ * decorated - a GSScaleFactor change or a theme change: resize the frame and
+ * titlebar to the titlebar height in force now and re-position the client. */
+- (void)reframeForDecorationChange
 {
     /* Only decorated client windows live in a frame; titlebars and frames
      * (also in the windows map) must be skipped. */
@@ -1308,8 +1320,13 @@
     XCBFrame *frame = (XCBFrame *)parentWindow;
     XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    int titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
-    int cb = [frame clientBorder];
+    int titleHeight = [settings heightForUtility:[self isUtilityPanel]];
+    int cb;
+
+    /* A theme that draws a window frame of its own decides the inset, so it
+     * has to be read again and not taken from what the last theme left. */
+    [frame updateClientBorder];
+    cb = [frame clientBorder];
 
     /* Keep the frame's cached titlebar height in sync with the service so
      * later interactive resizes (which read frame.titleHeight) place the
@@ -1368,19 +1385,25 @@
     return visual;
 }
 
+// _NET_WM_STATE_HIDDEN goes along with WM_STATE, as EWMH asks, and before
+// it: GNUstep takes a window for miniaturized only when both say so as it
+// sees WM_STATE change, and only then tells it that it came back, which
+// views drawn outside the window's backing store (OpenGL) need to redraw.
 - (void) setIconicState
 {
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_ICONIC];
     isMinimized = YES;
+    [[EWMHService sharedInstanceWithConnection:connection] updateNetWmState:self];
+    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_ICONIC];
     icccmService = nil;
 }
 
 - (void) setNormalState
 {
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_NORMAL];
     isMinimized = NO;
+    [[EWMHService sharedInstanceWithConnection:connection] updateNetWmState:self];
+    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_NORMAL];
     icccmService = nil;
 }
 

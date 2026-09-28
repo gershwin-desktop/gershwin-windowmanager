@@ -27,6 +27,10 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
   from the repo root. Uses the GNUstep ObjectTesting framework (`PASS()`);
   needs a live X server (`DISPLAY` set). Writes `tests.log`/`tests.sum`
   (gitignored).
+- Window overview layout: `gnustep-tests test-overview` (headless).
+- Alt-Tab flow layout: `gnustep-tests test-flowswitch` (headless).
+- Show Desktop layout: `gnustep-tests test-showdesktop` (headless).
+- Wobbly window model: `gnustep-tests test-wobbly` (headless).
 - `test/` is a manual app (KillTest.app), not part of the automated suite.
 
 ## Branching
@@ -46,6 +50,13 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
 - Compositing is ON by default; disable with `-dc`/`--disable-compositing`
   (see `main.m`). `URSCompositingManager` owns animations.
 
+## Window outline protocol (cross-repo contract)
+
+- Documented in SHAPES.md. WM advertises `_WM_SHAPE_PATH` in
+  `_NET_SUPPORTED`; apps (gershwin-components `Player/PlayerViews.m`) set the
+  vector outline on their client window. If you change the property layout, update
+  URSShapePath, its test (`test-shapepath`), the apps and SHAPES.md together.
+
 ## Window open/close animation protocol (cross-repo contract)
 
 - Documented in ANIMATIONS.md. WM advertises `_WINDOW_BIRTH_ANIMATION` and
@@ -56,6 +67,18 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
   close animation is driven by `UnmapNotify`. The property is deleted after
   reading (one-shot); a re-mapped window without a fresh property must NOT
   reuse it.
+
+## Titlebar button property (cross-repo contract)
+
+- The theme draws the titlebar buttons as pixels, not windows, so the WM puts
+  their places on each titlebar window as `_WINDOW_TITLEBAR_BUTTONS`
+  (CARDINAL, five per shown button: 0 close / 1 minimize / 2 zoom, x, y,
+  width, height in titlebar pixels from the top left), written in
+  `URSThemeIntegration` when the titlebar is rendered and the layout changed.
+  `drive_ui titlebar_click` / `click titlebar "T" zoom` in uitests
+  (gershwin-developer DriveUI) read it; change both sides together.
+- Hit testing and the property share `+[URSThemeIntegration buttonRect:...]`,
+  so a click lands where the property says.
 
 ## Logging / error-noise conventions
 

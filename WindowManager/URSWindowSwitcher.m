@@ -8,6 +8,10 @@
 
 #import "URSWindowSwitcher.h"
 #import "XCBTypes.h"
+#import "URSAttentionHopEffect.h"
+#import "URSFocusManager.h"
+#import "URSWindowListFilter.h"
+#import "URSWindowFlowController.h"
 
 @protocol URSCompositingManaging <NSObject>
 + (instancetype)sharedManager;
@@ -15,6 +19,7 @@
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
+- (void)playEffect:(id<URSWindowEffect>)effect onWindow:(xcb_window_t)windowId;
 @end
 #import "XCBTitleBar.h"
 #import "XCBScreen.h"
@@ -22,8 +27,10 @@
 #import "EWMHService.h"
 #import <xcb/xcb.h>
 #import <xcb/xcb_icccm.h>
-#import "URSThemeIntegration.h"
 #import "TitleBarSettingsService.h"
+
+NSString * const URSHopOnWindowSwitchKey = @"URSHopOnWindowSwitch";
+NSString * const URSWindowSwitcherStyleKey = @"URSWindowSwitcherStyle";
 
 #pragma mark - Class Extension
 
@@ -59,6 +66,14 @@
 @synthesize currentIndex;
 @synthesize isSwitching;
 @synthesize overlay;
+
++ (void)initialize {
+    if (self == [URSWindowSwitcher class]) {
+        [[NSUserDefaults standardUserDefaults] registerDefaults:@{
+            URSWindowSwitcherStyleKey: @"flow"
+        }];
+    }
+}
 
 #pragma mark - Singleton
 
@@ -103,18 +118,25 @@
                 
                 // Check if the frame has a titlebar (managed window)
                 XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
-                if (titlebarWindow && [titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
-                    if (!frame.needDestroy) {
-                        BOOL isMinimized = [self isWindowMinimized:frame];
-                        NSString *title = [self getTitleForFrame:frame];
-                        
-                        URSWindowEntry *entry = [[URSWindowEntry alloc] initWithFrame:frame
-                                                                         wasMinimized:isMinimized
-                                                                                title:title];
-                        // Fetch the app icon
-                        entry.icon = [self getIconForFrame:frame];
-                        [validEntries addObject:entry];
-                    }
+                XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
+                // Palettes and floating windows (Stickies notes) are
+                // auxiliary, not documents to switch to, and are meant to
+                // stay out of the switcher entirely, the same way they are
+                // excluded from the F9 overview.
+                if ([URSWindowListFilter includesFrameNeedingDestroy:frame.needDestroy
+                                                          hasTitlebar:[titlebarWindow isKindOfClass:[XCBTitleBar class]]
+                                                       isUtilityPanel:[clientWindow isUtilityPanel]
+                                                     isFloatingWindow:[[EWMHService sharedInstanceWithConnection:self.connection]
+                                                                           clientDeclaresFloatingOrAboveLevel:clientWindow]]) {
+                    BOOL isMinimized = [self isWindowMinimized:frame];
+                    NSString *title = [self getTitleForFrame:frame];
+
+                    URSWindowEntry *entry = [[URSWindowEntry alloc] initWithFrame:frame
+                                                                     wasMinimized:isMinimized
+                                                                            title:title];
+                    // Fetch the app icon
+                    entry.icon = [self getIconForFrame:frame];
+                    [validEntries addObject:entry];
                 }
             }
         }
@@ -484,12 +506,8 @@
 
         // Trigger compositing restore animation (Alt-Tab path)
         {
-            Class compositorClass = NSClassFromString(@"URSCompositingManager");
-            id<URSCompositingManaging> compositor = nil;
-            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                compositor = [compositorClass performSelector:@selector(sharedManager)];
-            }
-            if (compositor && [compositor compositingActive]) {
+            id<URSCompositingManaging> compositor = [self activeCompositor];
+            if (compositor) {
                 XCBRect iconRect = XCBInvalidRect;
                 EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
                 if (clientWindow) {
@@ -986,6 +1004,11 @@
     
     if ([self.windowEntries count] < 1) return;
     
+    if ([self.flowController isShown]) {
+        [self followFlowSelection:[self.flowController moveSelectionBy:1]];
+        return;
+    }
+
     // Move to next window (cycling through all available windows)
     // Start at 0, cycle through 1,2,3,...,count-1, then back to 0
     self.currentIndex = (self.currentIndex + 1) % [self.windowEntries count];
@@ -1002,6 +1025,11 @@
     
     if ([self.windowEntries count] < 1) return;
     
+    if ([self.flowController isShown]) {
+        [self followFlowSelection:[self.flowController moveSelectionBy:-1]];
+        return;
+    }
+
     // Move to previous window (cycling through all available windows)
     self.currentIndex = (self.currentIndex - 1 + [self.windowEntries count]) % [self.windowEntries count];
     
@@ -1021,6 +1049,20 @@
     NSArray *icons = [userInfo objectForKey:@"icons"];
     
     if (!titles || [titles count] == 0) return;
+
+    if ([[[NSUserDefaults standardUserDefaults] stringForKey:URSWindowSwitcherStyleKey]
+         isEqualToString:@"flow"]) {
+        NSMutableArray *frames = [NSMutableArray array];
+        for (URSWindowEntry *entry in self.windowEntries) {
+            [frames addObject:entry.frame];
+        }
+        XCBFrame *chosen = [self.flowController showFrames:frames
+                                             selectedIndex:(NSUInteger)self.currentIndex];
+        if (chosen) {
+            [self followFlowSelection:chosen];
+            return;
+        }
+    }
     
     // Show the overlay centered on screen
     [self.overlay showCenteredOnScreen];
@@ -1029,6 +1071,17 @@
     
     //NSLog(@"[WindowSwitcher] Overlay shown after 250ms delay, selected index: %ld",
           //(long)self.currentIndex);
+}
+
+// The flow skips minimized windows, so its choice leads.
+- (void)followFlowSelection:(XCBFrame *)frame {
+    for (NSUInteger i = 0; i < [self.windowEntries count]; i++) {
+        URSWindowEntry *entry = [self.windowEntries objectAtIndex:i];
+        if (entry.frame == frame) {
+            self.currentIndex = (NSInteger)i;
+            return;
+        }
+    }
 }
 
 - (void)showWindowAtCurrentIndex {
@@ -1062,6 +1115,7 @@
 
 - (void)completeSwitching {
     if (!self.isSwitching) return;
+    BOOL flowShown = [self.flowController isShown];
     
     //NSLog(@"[WindowSwitcher] ========== COMPLETING WINDOW SWITCH ==========");
     //NSLog(@"[WindowSwitcher] Current index: %ld", (long)self.currentIndex);
@@ -1082,37 +1136,13 @@
                 [self unminimizeWindow:entry.frame];
             }
             
-            // CRITICAL: Use the EXACT same code path as handleButtonPress
-            // This ensures window activation works identically to clicking the titlebar
-            XCBWindow *clientWindow = [entry.frame childWindowForKey:ClientWindow];
-            XCBTitleBar *titleBar = (XCBTitleBar *)[entry.frame childWindowForKey:TitleBar];
-            
-            if (clientWindow && entry.frame) {
-                //NSLog(@"[WindowSwitcher] Focusing client window %u and raising frame %u", 
-                      //[clientWindow window], [entry.frame window]);
-                
-                // Step 1: Focus the client window (same as handleButtonPress)
-                [clientWindow focus];
-                
-                // Step 2: Raise the frame (same as handleButtonPress)
-                [entry.frame stackAbove];
+            [self.focusManager activateFrame:entry.frame];
 
-                // Ensure dock windows remain stacked above regular windows
-                [self.connection restackDockWindowsAbove];
-
-                // Step 3: Update titlebar state and redraw all titlebars (same as handleButtonPress)
-                if (titleBar) {
-                    [titleBar setIsAbove:YES];
-                    [titleBar setButtonsAbove:YES];
-                    if (![titleBar isGSThemeActive]) {
-                        [titleBar drawTitleBarComponents];
-                        [self.connection drawAllTitleBarsExcept:titleBar];
-                    }
-                }
-                
-                //NSLog(@"[WindowSwitcher] Window activation complete using XCBKit standard path");
-            } else {
-                NSLog(@"[WindowSwitcher] WARNING: Could not get client window or frame!");
+            // A minimized window needs no hop: its restore animation
+            // already leads the eye to it, as the flight back from the
+            // flow does.
+            if (!entry.wasMinimized && !flowShown) {
+                [self hopToAttention:entry.frame];
             }
         }
         
@@ -1136,6 +1166,8 @@
     if (self.overlayVisible) {
         [self.overlay hide];
     }
+    // After the activation, so the chosen window flies back on top.
+    [self.flowController close];
     
     // Force screen redraw after overlay is hidden so the area that was
     // covered by the switcher overlay gets repaired.
@@ -1182,6 +1214,7 @@
     if (self.overlayVisible) {
         [self.overlay hide];
     }
+    [self.flowController close];
     
     // Force screen redraw after overlay is hidden.
     [self forceScreenRedraw];
@@ -1190,6 +1223,30 @@
     self.isSwitching = NO;
     self.overlayVisible = NO;
     self.currentIndex = -1;
+}
+
+#pragma mark - Compositor
+
+// Looked up by name: the compositor is optional at run time.
+- (id<URSCompositingManaging>)activeCompositor {
+    Class compositorClass = NSClassFromString(@"URSCompositingManager");
+    if (![compositorClass respondsToSelector:@selector(sharedManager)]) {
+        return nil;
+    }
+    id<URSCompositingManaging> compositor = [compositorClass performSelector:@selector(sharedManager)];
+    return [compositor compositingActive] ? compositor : nil;
+}
+
+// Among many windows the one switched to is easy to lose track of.  Off
+// unless the user asks for it: motion on every switch is not to everyone's
+// taste.
+- (void)hopToAttention:(XCBFrame *)frame {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:URSHopOnWindowSwitchKey]) {
+        return;
+    }
+    URSAttentionHopEffect *hop =
+        [[URSAttentionHopEffect alloc] initWithScreenHeight:[[frame onScreen] height]];
+    [[self activeCompositor] playEffect:hop onWindow:[frame window]];
 }
 
 #pragma mark - Screen Redraw After Switcher Closes

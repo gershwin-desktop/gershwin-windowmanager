@@ -96,6 +96,9 @@ static const CGFloat kBorderWidth = 3.0;
                                     NSWindowCollectionBehaviorStationary |
                                     NSWindowCollectionBehaviorFullScreenAuxiliary];
         [self setReleasedWhenClosed:NO];  // Keep window alive for reuse
+        // A name lets tests and diagnostic tools find the preview among the
+        // window manager's otherwise anonymous windows.
+        [self setTitle:@"Snap Preview"];
 
         // Create the content view
         URSSnapPreviewOverlayView *contentView =
@@ -128,9 +131,13 @@ static const CGFloat kBorderWidth = 3.0;
     // Update window frame to match target snap area
     [self setFrame:targetRect display:NO];
 
-    // Update content view frame
+    // The window frame is in device pixels but the view is laid out in
+    // points; at a GSScaleFactor other than 1 a view sized in pixels overhangs
+    // the window, cutting off the right and bottom edges of the outline.
+    CGFloat scale = [self userSpaceScaleFactor];
     URSSnapPreviewOverlayView *view = (URSSnapPreviewOverlayView *)[self contentView];
-    [view setFrame:NSMakeRect(0, 0, targetRect.size.width, targetRect.size.height)];
+    [view setFrame:NSMakeRect(0, 0, targetRect.size.width / scale,
+                              targetRect.size.height / scale)];
 
     // Check if compositing is active to determine whether to use rounded corners
     URSCompositingManager *compositor = [URSCompositingManager sharedManager];

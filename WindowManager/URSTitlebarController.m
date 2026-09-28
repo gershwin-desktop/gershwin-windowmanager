@@ -12,6 +12,9 @@
 #import "URSCompositingManager.h"
 #import "URSFocusManager.h"
 
+// Zoom and unzoom take the same time, in both directions.
+static const NSTimeInterval URSZoomAnimationDuration = 0.22;
+
 @implementation URSTitlebarController
 
 - (instancetype)initWithConnection:(XCBConnection *)aConnection
@@ -112,71 +115,30 @@
 - (GSThemeTitleBarButton)buttonAtPoint:(NSPoint)point
                           forTitlebar:(XCBTitleBar *)titlebar
 {
-    static const CGFloat ORB_SIZE = 15.0;
-    static const CGFloat ORB_PAD_LEFT = 10.5;
-    static const CGFloat ORB_SPACING = 4.0;
-
     XCBRect titlebarRect = [titlebar windowRect];
-    CGFloat titlebarWidth = titlebarRect.size.width;
-    CGFloat titlebarHeight = titlebarRect.size.height;
 
     XCBFrame *frame = nil;
     if ([[titlebar parentWindow] isKindOfClass:[XCBFrame class]]) {
         frame = (XCBFrame *)[titlebar parentWindow];
     }
 
+    // Utility panels always draw a single fixed-size close square (see
+    // URSThemeIntegration renderUtilityTitlebarForTitlebar:), not the
+    // theme's normal button layout - hit-test that fixed layout instead
+    // of asking the theme, so clicks land where the pixels actually are.
     XCBWindow *clientWindow = frame ? [frame childWindowForKey:ClientWindow] : nil;
-    xcb_window_t clientWindowId = clientWindow ? [clientWindow window] : 0;
-    BOOL isFixedSize = clientWindowId &&
-        [URSThemeIntegration isFixedSizeWindow:clientWindowId];
-    BOOL hasMaximize = !isFixedSize;
-
-    if ([URSThemeIntegration isOrbButtonStyle]) {
-        CGFloat buttonY = (titlebarHeight - ORB_SIZE) / 2.0;
-        CGFloat closeX = ORB_PAD_LEFT;
-        CGFloat miniX = closeX + ORB_SIZE + ORB_SPACING;
-        CGFloat zoomX = miniX + ORB_SIZE + ORB_SPACING;
-
-        if (NSPointInRect(point, NSMakeRect(closeX, buttonY, ORB_SIZE, ORB_SIZE))) {
-            return GSThemeTitleBarButtonClose;
-        }
-        if (NSPointInRect(point, NSMakeRect(miniX, buttonY, ORB_SIZE, ORB_SIZE))) {
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-        if (hasMaximize &&
-            NSPointInRect(point, NSMakeRect(zoomX, buttonY, ORB_SIZE, ORB_SIZE))) {
-            return GSThemeTitleBarButtonZoom;
-        }
-
-        return GSThemeTitleBarButtonNone;
+    if ([clientWindow isUtilityPanel]) {
+        CGFloat h = titlebarRect.size.height;
+        NSRect closeFrame = NSMakeRect(0, 0, h, h);
+        return NSPointInRect(point, closeFrame) ? GSThemeTitleBarButtonClose
+                                                  : GSThemeTitleBarButtonNone;
     }
 
-    // Edge layout: Close at left | title | Minimize | Maximize at right
-    if (NSPointInRect(point, NSMakeRect(0, 0, titlebarHeight, titlebarHeight))) {
-        return GSThemeTitleBarButtonClose;
-    }
-
-    if (hasMaximize) {
-        NSRect miniRect = NSMakeRect(titlebarWidth - 2 * titlebarHeight, 0,
-                                     titlebarHeight, titlebarHeight);
-        if (NSPointInRect(point, miniRect)) {
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-
-        NSRect zoomRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
-                                     titlebarHeight, titlebarHeight);
-        if (NSPointInRect(point, zoomRect)) {
-            return GSThemeTitleBarButtonZoom;
-        }
-    } else {
-        NSRect miniRect = NSMakeRect(titlebarWidth - titlebarHeight, 0,
-                                     titlebarHeight, titlebarHeight);
-        if (NSPointInRect(point, miniRect)) {
-            return GSThemeTitleBarButtonMiniaturize;
-        }
-    }
-
-    return GSThemeTitleBarButtonNone;
+    NSInteger index = [URSThemeIntegration buttonIndexAtPoint:point
+                                                 titlebarSize:NSMakeSize(titlebarRect.size.width,
+                                                                         titlebarRect.size.height)
+                                                        frame:frame];
+    return GSThemeTitleBarButtonForIndex(index);
 }
 
 #pragma mark - Double-Click Detection
@@ -316,71 +278,94 @@
                   titlebar:(XCBTitleBar *)titlebar
               clientWindow:(XCBWindow *)clientWindow
 {
+    XCBRect startRect = [frame windowRect];
+
     if ([frame isMaximized]) {
-        XCBRect startRect = [frame windowRect];
         XCBRect restoredRect = [frame oldRect];
 
-        [frame programmaticResizeToRect:restoredRect];
-        [frame setIsMaximized:NO];
-
-        [titlebar destroyPixmap];
-        [titlebar createPixmap];
-
-        BOOL restoreIsActive = [self titlebarIsActiveForFrame:frame
-                                                  clientWindow:clientWindow];
-        [URSThemeIntegration renderGSThemeToWindow:frame
-                                             frame:frame
-                                             title:[titlebar windowTitle]
-                                            active:restoreIsActive];
-
-        [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
-        [titlebar drawArea:[titlebar windowRect]];
-
-        [frame updateAllResizeZonePositions];
-        [frame applyRoundedCornersShapeMask];
-
-        [self animateTransition:frame
-                       fromRect:startRect
-                         toRect:[frame windowRect]];
-    } else {
-        XCBRect startRect = [frame windowRect];
-
-        [frame setOldRect:startRect];
-        [titlebar setOldRect:[titlebar windowRect]];
-        if (clientWindow) {
-            [clientWindow setOldRect:[clientWindow windowRect]];
+        /* The window still shows its maximized content while it shrinks, so
+         * the compositor scales that picture down and the real geometry
+         * follows when the animation is over.  Resizing first left the
+         * compositor with a picture already at the restored size, which it
+         * never scales up: the window snapped to its final size in the very
+         * first frame and only slid into place. */
+        if (self.compositingManager &&
+            [self.compositingManager compositingActive] &&
+            [self.compositingManager respondsToSelector:
+                @selector(animateWindowShrink:fromRect:toRect:duration:completion:)]) {
+            [self.compositingManager animateWindowShrink:[frame window]
+                                                fromRect:startRect
+                                                  toRect:restoredRect
+                                                duration:URSZoomAnimationDuration
+                                              completion:^{
+                [self applyZoomRect:restoredRect
+                            toFrame:frame
+                           titlebar:titlebar
+                       clientWindow:clientWindow
+                          maximized:NO];
+            }];
+            return;
         }
 
-        NSRect workarea = [self.workareaManager currentWorkarea];
-        XCBRect targetRect = XCBMakeRect(
-            XCBMakePoint((int32_t)workarea.origin.x,
-                         (int32_t)workarea.origin.y),
-            XCBMakeSize((uint32_t)workarea.size.width,
-                        (uint32_t)workarea.size.height));
-
-        [frame programmaticResizeToRect:targetRect];
-        [frame setIsMaximized:YES];
-
-        [titlebar destroyPixmap];
-        [titlebar createPixmap];
-
-        BOOL maximizeIsActive = [self titlebarIsActiveForFrame:frame
-                                                  clientWindow:clientWindow];
-        [URSThemeIntegration renderGSThemeToWindow:frame
-                                             frame:frame
-                                             title:[titlebar windowTitle]
-                                            active:maximizeIsActive];
-
-        [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
-        [titlebar drawArea:[titlebar windowRect]];
-
-        [frame updateAllResizeZonePositions];
-        [frame applyRoundedCornersShapeMask];
-
-        [self animateTransition:frame
-                       fromRect:startRect
-                         toRect:[frame windowRect]];
+        [self applyZoomRect:restoredRect
+                    toFrame:frame
+                   titlebar:titlebar
+               clientWindow:clientWindow
+                  maximized:NO];
+        return;
     }
+
+    [frame setOldRect:startRect];
+    [titlebar setOldRect:[titlebar windowRect]];
+    if (clientWindow) {
+        [clientWindow setOldRect:[clientWindow windowRect]];
+    }
+
+    NSRect workarea = [self.workareaManager currentWorkarea];
+    XCBRect targetRect = XCBMakeRect(
+        XCBMakePoint((int32_t)workarea.origin.x,
+                     (int32_t)workarea.origin.y),
+        XCBMakeSize((uint32_t)workarea.size.width,
+                    (uint32_t)workarea.size.height));
+
+    /* Growing works the other way round: the window is made maximized first
+     * and the compositor scales that picture down to the small rect it
+     * starts from. */
+    [self applyZoomRect:targetRect
+                toFrame:frame
+               titlebar:titlebar
+           clientWindow:clientWindow
+              maximized:YES];
+
+    [self animateTransition:frame
+                   fromRect:startRect
+                     toRect:[frame windowRect]];
+}
+
+// The window at its new size, with the titlebar drawn for it.
+- (void)applyZoomRect:(XCBRect)rect
+              toFrame:(XCBFrame *)frame
+             titlebar:(XCBTitleBar *)titlebar
+         clientWindow:(XCBWindow *)clientWindow
+            maximized:(BOOL)maximized
+{
+    [frame programmaticResizeToRect:rect];
+    [frame setIsMaximized:maximized];
+
+    [titlebar destroyPixmap];
+    [titlebar createPixmap];
+
+    BOOL isActive = [self titlebarIsActiveForFrame:frame clientWindow:clientWindow];
+    [URSThemeIntegration renderGSThemeToWindow:frame
+                                         frame:frame
+                                         title:[titlebar windowTitle]
+                                        active:isActive];
+
+    [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+    [titlebar drawArea:[titlebar windowRect]];
+
+    [frame updateAllResizeZonePositions];
+    [frame applyRoundedCornersShapeMask];
 }
 
 - (BOOL)titlebarIsActiveForFrame:(XCBFrame *)frame clientWindow:(XCBWindow *)clientWindow
@@ -403,7 +388,7 @@
         [self.compositingManager animateWindowTransition:[frame window]
                                                fromRect:startRect
                                                  toRect:endRect
-                                               duration:0.22
+                                               duration:URSZoomAnimationDuration
                                                    fade:NO];
     }
 }
@@ -443,22 +428,27 @@
 
         XCBRect frameRect = [frame windowRect];
         XCBRect titlebarRect = [titlebar windowRect];
-        CGFloat titlebarWidth = frameRect.size.width;
-        CGFloat titlebarHeight = titlebarRect.size.height;
+        NSSize titlebarSize = NSMakeSize(frameRect.size.width, titlebarRect.size.height);
 
         XCBWindow *clientWindow = [frame childWindowForKey:ClientWindow];
-        xcb_window_t clientWindowId = clientWindow ? [clientWindow window] : 0;
-        BOOL hasMaximize = clientWindowId ?
-            ![URSThemeIntegration isFixedSizeWindow:clientWindowId] : YES;
-
-        CGFloat mouseX = motionEvent->event_x;
-        CGFloat mouseY = motionEvent->event_y;
-        NSInteger newButtonIndex =
-            [URSThemeIntegration buttonIndexAtX:mouseX
-                                              y:mouseY
-                                       forWidth:titlebarWidth
-                                         height:titlebarHeight
-                                    hasMaximize:hasMaximize];
+        NSInteger newButtonIndex;
+        if ([clientWindow isUtilityPanel]) {
+            // The compact utility titlebar always draws a single fixed
+            // close square (see renderUtilityTitlebarForTitlebar:), not the
+            // theme's normal button layout - compute hover the same fixed
+            // way so the highlight lines up with the pixels actually drawn.
+            CGFloat h = titlebarRect.size.height;
+            NSRect closeFrame = NSMakeRect(0, 0, h, h);
+            newButtonIndex = NSPointInRect(NSMakePoint(motionEvent->event_x,
+                                                        motionEvent->event_y),
+                                            closeFrame) ? 0 : -1;
+        } else {
+            newButtonIndex =
+                [URSThemeIntegration buttonIndexAtPoint:NSMakePoint(motionEvent->event_x,
+                                                                    motionEvent->event_y)
+                                           titlebarSize:titlebarSize
+                                                  frame:frame];
+        }
 
         xcb_window_t prevTitlebar = [URSThemeIntegration hoveredTitlebarWindow];
         NSInteger prevButtonIndex = [URSThemeIntegration hoveredButtonIndex];
