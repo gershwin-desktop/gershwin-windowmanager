@@ -173,7 +173,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     // get minHeightHint=0 which previously caused uint32_t underflows
     // in the resize functions and allowed 0-height client areas.
     // Utility panels (palettes) are exempt: a control strip may legitimately
-    // be smaller than 100x100, so only guard against an actual zero size.
+    // be smaller than the minimum client size, so only guard against an actual zero size.
     if (isUtilityPanel)
     {
         if (minHeightHint < 1)

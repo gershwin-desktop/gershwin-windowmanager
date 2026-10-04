@@ -18,8 +18,8 @@
 
 // Absolute minimum client area — prevents windows from collapsing to just the titlebar.
 // These are enforced even when the client doesn't set WM_NORMAL_HINTS.
-#define WM_MIN_CLIENT_HEIGHT 100
-#define WM_MIN_CLIENT_WIDTH  100
+#define WM_MIN_CLIENT_HEIGHT 32
+#define WM_MIN_CLIENT_WIDTH  32
 
 typedef NS_ENUM(NSInteger, childrenMask)
 {
