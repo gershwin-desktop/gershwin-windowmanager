@@ -59,6 +59,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSThemeIntegration.m \
 		URSProfiler.m \
 		URSImageUpload.m \
+		URSBackgroundRender.m \
 		URSShapePath.m \
 		URSShadowOverrides.m \
 		URSUtilityRestackOrder.m \
@@ -108,6 +109,7 @@ $(APP_NAME)_HEADER_FILES = \
 		URSThemeIntegration.h \
 		URSProfiler.h \
 		URSImageUpload.h \
+		URSBackgroundRender.h \
 		GSThemeTitleBar.h \
 		xcb/XCBConnection.h \
 		xcb/XCBWindow.h \

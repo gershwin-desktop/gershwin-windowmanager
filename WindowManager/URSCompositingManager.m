@@ -25,6 +25,7 @@
 #import <xcb/damage.h>
 #import <xcb/present.h>
 #import "URSFramePacer.h"
+#import "URSBackgroundRender.h"
 #import <xcb/shm.h>
 #import <xcb/randr.h>
 #import <xcb/shape.h>
@@ -923,60 +924,16 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     }
 
     @autoreleasepool {
-        NSImage *image = [[NSImage alloc] initWithContentsOfFile:imagePath];
-        if (!image) {
-            NSLog(@"[Compositor] Desktop background: failed to load image at %@", imagePath);
-            self.desktopBgLoaded = YES;
-            return;
-        }
-
-        NSSize srcSize = [image size];
         uint16_t outW = self.screenWidth;
         uint16_t outH = self.screenHeight;
 
-        NSImage *scaled = [[NSImage alloc] initWithSize:NSMakeSize(outW, outH)];
-        [scaled lockFocus];
-        [image drawInRect:NSMakeRect(0, 0, outW, outH)
-                fromRect:NSZeroRect
-               operation:NSCompositeCopy
-                fraction:1.0];
-        /* Read the pixels back directly: -TIFFRepresentation does the same
-           read and then encodes a TIFF that would only be decoded again,
-           two more full-screen copies at once. */
-        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc]
-          initWithFocusedViewRect:NSMakeRect(0, 0, outW, outH)];
-        [scaled unlockFocus];
-        // Neither is needed any more; free them before the upload buffer.
-        image = nil;
-        scaled = nil;
-        if (!bitmap) {
-            NSLog(@"[Compositor] Desktop background: bitmap conversion failed");
+        NSData *pixels = URSRenderBackgroundInHelper(imagePath, outW, outH);
+        if (!pixels) {
+            NSLog(@"[Compositor] Desktop background: failed to render %@", imagePath);
             self.desktopBgLoaded = YES;
             return;
         }
-
-        size_t bufSize = (size_t)outW * (size_t)outH * 4;
-        uint8_t *argb = malloc(bufSize);
-        if (!argb) {
-            self.desktopBgLoaded = YES;
-            return;
-        }
-
-        int srcW = (int)[bitmap pixelsWide];
-        int srcH = (int)[bitmap pixelsHigh];
-
-        for (int y = 0; y < outH && y < srcH; y++) {
-            for (int x = 0; x < outW && x < srcW; x++) {
-                NSUInteger pixel[4];
-                [bitmap getPixel:pixel atX:x y:y];
-                uint32_t r = (uint32_t)(pixel[0]);
-                uint32_t g = (uint32_t)(pixel[1]);
-                uint32_t b = (uint32_t)(pixel[2]);
-                uint32_t a = (uint32_t)(pixel[3]);
-                uint32_t argbPixel = (a << 24) | (r << 16) | (g << 8) | b;
-                ((uint32_t *)argb)[y * outW + x] = argbPixel;
-            }
-        }
+        const uint8_t *argb = [pixels bytes];
 
         xcb_pixmap_t pm = xcb_generate_id(conn);
         xcb_create_pixmap(conn, 32, pm, self.rootWindow, outW, outH);
@@ -990,7 +947,6 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
                           outW, outH, 0, 0, 0, 32,
                           (uint32_t)outW * 4, argb);
         xcb_free_gc(conn, gc);
-        free(argb);
 
         xcb_render_picture_t pic = xcb_generate_id(conn);
         uint32_t repeat = 1;
@@ -1000,8 +956,8 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         self.desktopBgPixmap = pm;
         self.desktopBgPicture = pic;
 
-        NSLog(@"[Compositor] Desktop background: loaded %@ (%dx%d -> %dx%d)",
-              imagePath, (int)srcSize.width, (int)srcSize.height, outW, outH);
+        NSLog(@"[Compositor] Desktop background: loaded %@ (-> %dx%d)",
+              imagePath, outW, outH);
     }
 
     self.desktopBgLoaded = YES;

@@ -5,6 +5,7 @@
 //
 
 #import <AppKit/AppKit.h>
+#import "URSBackgroundRender.h"
 #import "URSHybridEventHandler.h"
 #import "UROSWMApplication.h"
 #import "URSThemeIntegration.h"
@@ -58,6 +59,20 @@ static void setupSignalHandlers(void)
 
 int main(int argc, const char * argv[])
 {
+    // Helper mode, started by the compositor: decode the wallpaper, write the
+    // pixels to standard output and exit, so the decoding never grows the long-lived
+    // window manager process.
+    if (argc == 5 && strcmp(argv[1], [URSRenderBackgroundFlag UTF8String]) == 0) {
+        @autoreleasepool {
+            // Same as below: no application icon window, no user bundles
+            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GSSuppressAppIcon"];
+            [[NSUserDefaults standardUserDefaults] setObject:@[] forKey:@"GSAppKitUserBundles"];
+            return URSRenderBackgroundMain([NSString stringWithUTF8String:argv[2]],
+                                           (NSUInteger)strtoul(argv[3], NULL, 10),
+                                           (NSUInteger)strtoul(argv[4], NULL, 10));
+        }
+    }
+
     @autoreleasepool {
 
         // Suppress the GNUstep application icon window (NSIconWindow) so the
