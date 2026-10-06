@@ -5251,49 +5251,51 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     cw.shadowOffsetY = SHADOW_OFFSET_Y;
     cw.shadowHasCutout = (cornerRadius > 0 || shaped);
 
-    // Create shadow using ARGB32 format directly
-    // Convert 8-bit alpha data to ARGB32 (pre-multiplied black+alpha)
-    uint32_t *argb_data = (uint32_t *)malloc(swidth * sheight * sizeof(uint32_t));
-    if (!argb_data) {
-        NSLog(@"[Shadow] Failed to allocate ARGB data");
+    // The shadow is kept as an 8-bit alpha picture: used as a source, a
+    // picture without color channels reads as black with that alpha, which is
+    // the shadow, at a quarter of the X server memory of an ARGB32 pixmap.
+    if (self.a8Format == XCB_NONE) {
+        self.a8Format = [self findPictFormat:8];
+    }
+    if (self.a8Format == XCB_NONE) {
+        NSLog(@"[Shadow] No A8 picture format: windows get no shadow");
         free(shadow_data);
         return;
     }
-    
-    // Convert A8 -> ARGB32 (black with alpha)
-    // ARGB format on little-endian is BGRA in memory: B, G, R, A bytes
-    for (int i = 0; i < swidth * sheight; i++) {
-        uint8_t alpha = shadow_data[i];
-        // ARGB32 little-endian: 0xAARRGGBB stored as BB GG RR AA in memory
-        // For black (0,0,0) with alpha, it's just (alpha << 24)
-        argb_data[i] = ((uint32_t)alpha << 24);  // 0xAA000000 = black with alpha
+
+    // Rows of an 8-bit image are padded to 4 bytes
+    uint32_t stride = ((uint32_t)swidth + 3) & ~3u;
+    uint8_t *padded = calloc((size_t)stride * sheight, 1);
+    if (!padded) {
+        NSLog(@"[Shadow] Failed to allocate shadow rows");
+        free(shadow_data);
+        return;
+    }
+    for (int y = 0; y < sheight; y++) {
+        memcpy(padded + (size_t)y * stride, shadow_data + (size_t)y * swidth, swidth);
     }
     free(shadow_data);
-    
-    // Create 32-bit depth pixmap for ARGB shadow
+
     cw.shadowPixmap = xcb_generate_id(conn);
-    xcb_create_pixmap(conn, 32, cw.shadowPixmap, self.rootWindow, swidth, sheight);
-    
-    // Upload ARGB32 shadow data
+    xcb_create_pixmap(conn, 8, cw.shadowPixmap, self.rootWindow, swidth, sheight);
+
     xcb_gcontext_t gc = xcb_generate_id(conn);
     xcb_create_gc(conn, gc, cw.shadowPixmap, 0, NULL);
-    
+
     // Banded upload: the shadow is sized from the window, so a full-screen
     // window on a 4K display would exceed the maximum request length.
     URSPutImageBanded(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.shadowPixmap, gc,
-                      swidth, sheight, 0, 0, 0, 32,
-                      (uint32_t)swidth * 4, (uint8_t *)argb_data);
-    // No blocking flush here — the batch flush in the event loop sends it.
+                      swidth, sheight, 0, 0, 0, 8, stride, padded);
+    // No blocking flush here - the batch flush in the event loop sends it.
     // The next xcb_render_create_picture is queued after put_image in order,
     // so the server will process them in sequence without an explicit sync.
-    
+
     xcb_free_gc(conn, gc);
-    free(argb_data);
-    
-    // Create Picture with ARGB format
+    free(padded);
+
     cw.shadowPicture = xcb_generate_id(conn);
-    xcb_render_create_picture(conn, cw.shadowPicture, cw.shadowPixmap, self.argbFormat, 0, NULL);
-    
+    xcb_render_create_picture(conn, cw.shadowPicture, cw.shadowPixmap, self.a8Format, 0, NULL);
+
     // DO NOT free the pixmap - the Picture needs it to stay alive
     // It will be freed when the window is destroyed
     URS_PROFILE_END(shadowCreate);
