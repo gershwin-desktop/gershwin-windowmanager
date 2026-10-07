@@ -22,6 +22,14 @@
                    position:(double)position
                      inArea:(NSRect)area;
 
+// The same for a row of count items.  A layout that goes round (the deck)
+// needs the count; this one does not, and ignores it.
++ (NSRect)slotForWindowSize:(NSSize)windowSize
+                    atIndex:(NSUInteger)index
+                      count:(NSUInteger)count
+                   position:(double)position
+                     inArea:(NSRect)area;
+
 // One slot per window size (NSValue), in the same order.
 + (NSArray *)slotsForWindowSizes:(NSArray *)windowSizes
                         position:(double)position

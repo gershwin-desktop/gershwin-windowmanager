@@ -6,6 +6,7 @@
 
 #import "URSWindowFlowController.h"
 #import "URSFlowLayout.h"
+#import "URSDeckLayout.h"
 #import "URSOverviewTitleLabel.h"
 #import "URSPresentationTransition.h"
 #import "URSScreenWindow.h"
@@ -18,7 +19,11 @@
 // As long as the window overview takes, so both modes feel alike.
 static const NSTimeInterval URSFlowTransitionDuration = 0.3;
 static const NSTimeInterval URSFlowSlideDuration = 0.25;
+// The deck's step is the one of the reference animation.
+static const NSTimeInterval URSDeckSlideDuration = 0.55;
 static const double URSFlowBackdropDimming = 0.6;
+// The room the title label needs under the bottom edge of a slot.
+static const CGFloat URSFlowTitleBottomMargin = 24.0;
 
 @interface URSFlowItem : URSScreenWindow
 @property (assign, nonatomic) NSUInteger index;
@@ -36,6 +41,9 @@ static const double URSFlowBackdropDimming = 0.6;
 @property (strong, nonatomic) NSSet *fadedWindows;
 @property (assign, nonatomic) NSUInteger selectedIndex;
 @property (assign, nonatomic) BOOL shown;
+// The geometry of the style the Alt-Tab was started with (URSFlowLayout or
+// URSDeckLayout); a style changed meanwhile applies from the next Alt-Tab.
+@property (assign, nonatomic) Class layout;
 // From the windows' places (0) to the row (1).
 @property (strong, nonatomic) URSPresentationTransition *transition;
 // The row position: the index of the item in the middle, between two
@@ -118,6 +126,11 @@ static const double URSFlowBackdropDimming = 0.6;
         byFrame[@([item.frame window])] = item;
     }
     BOOL wasClosing = self.items != nil;
+    if (!wasClosing) {
+        BOOL deck = [URSWindowSwitcher deckStyleSelected];
+        self.layout = deck ? [URSDeckLayout class] : [URSFlowLayout class];
+        self.slide.duration = deck ? URSDeckSlideDuration : URSFlowSlideDuration;
+    }
     self.items = items;
     self.itemsByFrame = byFrame;
     NSMutableSet *faded = [[URSScreenWindow dockWindowsOfConnection:self.connection] mutableCopy];
@@ -139,8 +152,12 @@ static const double URSFlowBackdropDimming = 0.6;
     if (!self.shown) {
         return nil;
     }
-    self.selectedIndex = [URSFlowLayout indexFrom:self.selectedIndex step:step count:[self.items count]];
-    [self.slide runTo:(double)self.selectedIndex];
+    self.selectedIndex = [self.layout indexFrom:self.selectedIndex step:step count:[self.items count]];
+    // The deck goes round without end, always on in the direction of the
+    // step, so its position goes on past the ends; the flow slides back
+    // along the row from the last item to the first.
+    BOOL deck = self.layout == [URSDeckLayout class];
+    [self.slide runTo:deck ? [self.slide targetProgress] + (double)step : (double)self.selectedIndex];
     [self showTitle];
     URSFlowItem *chosen = [self.items objectAtIndex:self.selectedIndex];
     return chosen.frame;
@@ -171,10 +188,20 @@ static const double URSFlowBackdropDimming = 0.6;
 // ends up.
 - (void)showTitle {
     URSFlowItem *item = [self.items objectAtIndex:self.selectedIndex];
-    NSRect slot = [URSFlowLayout slotForWindowSize:item.windowRect.size
+    NSRect slot = [self.layout slotForWindowSize:item.windowRect.size
                                            atIndex:item.index
+                                             count:[self.items count]
                                           position:(double)item.index
                                             inArea:[self screenArea]];
+    // The label straddles the bottom edge of the slot, so a window that
+    // reaches the bottom of the screen (the deck's front window) has it
+    // taken up to where the whole label shows.
+    NSRect area = [self screenArea];
+    slot = NSIntersectionRect(slot, area);
+    CGFloat lowest = NSMaxY(area) - URSFlowTitleBottomMargin;
+    if (NSMaxY(slot) > lowest) {
+        slot.size.height = MAX(0.0, lowest - NSMinY(slot));
+    }
     if (!self.titleLabel) {
         self.titleLabel = [[URSOverviewTitleLabel alloc] init];
     }
@@ -190,8 +217,9 @@ static const double URSFlowBackdropDimming = 0.6;
     if (!item) {
         return NO;
     }
-    NSRect slot = [URSFlowLayout slotForWindowSize:item.windowRect.size
+    NSRect slot = [self.layout slotForWindowSize:item.windowRect.size
                                            atIndex:item.index
+                                             count:[self.items count]
                                           position:[self.slide progress]
                                             inArea:[self screenArea]];
     *paintRect = URSInterpolateRect(windowRect, slot, [self.transition progress]);
@@ -207,7 +235,7 @@ static const double URSFlowBackdropDimming = 0.6;
     }
     NSSet *painted = [NSSet setWithArray:windowIds];
     NSMutableArray *order = [NSMutableArray arrayWithCapacity:[self.items count]];
-    for (NSNumber *index in [URSFlowLayout paintOrderForCount:[self.items count]
+    for (NSNumber *index in [self.layout paintOrderForCount:[self.items count]
                                                      position:[self.slide progress]]) {
         URSFlowItem *item = [self.items objectAtIndex:[index unsignedIntegerValue]];
         NSNumber *frameId = @([item.frame window]);
@@ -216,7 +244,7 @@ static const double URSFlowBackdropDimming = 0.6;
             [order addObject:frameId];
         }
     }
-    return [URSFlowLayout stack:windowIds reorderedAs:order];
+    return [self.layout stack:windowIds reorderedAs:order];
 }
 
 - (double)opacityForWindow:(xcb_window_t)windowId {

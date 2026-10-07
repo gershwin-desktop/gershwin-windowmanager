@@ -75,6 +75,17 @@ NSString * const URSWindowSwitcherStyleKey = @"URSWindowSwitcherStyle";
     }
 }
 
++ (BOOL)deckStyleSelected {
+    return [[[NSUserDefaults standardUserDefaults] stringForKey:URSWindowSwitcherStyleKey]
+            isEqualToString:@"deck"];
+}
+
+// Both flying styles show the windows themselves; only the arrangement differs.
++ (BOOL)windowsFlyStyleSelected {
+    NSString *style = [[NSUserDefaults standardUserDefaults] stringForKey:URSWindowSwitcherStyleKey];
+    return [style isEqualToString:@"flow"] || [style isEqualToString:@"deck"];
+}
+
 #pragma mark - Singleton
 
 + (instancetype)sharedSwitcherWithConnection:(XCBConnection *)conn {
@@ -1050,8 +1061,7 @@ NSString * const URSWindowSwitcherStyleKey = @"URSWindowSwitcherStyle";
     
     if (!titles || [titles count] == 0) return;
 
-    if ([[[NSUserDefaults standardUserDefaults] stringForKey:URSWindowSwitcherStyleKey]
-         isEqualToString:@"flow"]) {
+    if ([URSWindowSwitcher windowsFlyStyleSelected]) {
         NSMutableArray *frames = [NSMutableArray array];
         for (URSWindowEntry *entry in self.windowEntries) {
             [frames addObject:entry.frame];

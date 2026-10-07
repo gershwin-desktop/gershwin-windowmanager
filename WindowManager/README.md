@@ -62,6 +62,7 @@ Options:
 defaults write WindowManager URSHopOnWindowSwitch YES
 defaults write WindowManager URSOverviewHotCorner top-left
 defaults write WindowManager URSWobblyWindows YES
+defaults write WindowManager URSWindowSwitcherStyle deck
 ```
 
 The overview and Show Desktop settings take effect when the window manager
@@ -105,6 +106,16 @@ starts.
   compositing, with fewer than two windows on the screen, or with `list`,
   a strip of application icons and names is shown instead. Takes effect
   on the next switch.
+  `deck` flies the windows into a deck instead, as an endless carousel:
+  the chosen window stands in front with its middle at the golden section
+  of the screen height, low on the screen, and the others stand behind it,
+  each smaller and higher so that only their top strips show. Each Tab
+  sends the front window down out of the screen, growing as it comes nearer
+  to the viewer, and brings it back in from behind at the top while every
+  other window moves one place forward; Shift-Tab goes the other way.
+  Windows are shown at most at their own size at rest and always leave some
+  room above the bottom edge. Off unless set, since `flow` is the default:
+  `defaults write WindowManager URSWindowSwitcherStyle deck`.
 - `URSWindowFlipEnabled` (default `YES`): "Flip Window" in the titlebar's
   context menu turns the window over, in perspective, to its plain back;
   choosing it again turns it back. Only the picture turns: the window

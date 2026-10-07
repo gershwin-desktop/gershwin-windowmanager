@@ -76,6 +76,14 @@ static const double URSFlowCoverSpacing = 0.40;
     return NSMakeRect(midX - width * 0.5, midY - height * 0.5, width, height);
 }
 
++ (NSRect)slotForWindowSize:(NSSize)windowSize
+                    atIndex:(NSUInteger)index
+                      count:(NSUInteger)count
+                   position:(double)position
+                     inArea:(NSRect)area {
+    return [self slotForWindowSize:windowSize atIndex:index position:position inArea:area];
+}
+
 + (NSArray *)slotsForWindowSizes:(NSArray *)windowSizes
                         position:(double)position
                           inArea:(NSRect)area {
@@ -83,6 +91,7 @@ static const double URSFlowCoverSpacing = 0.40;
     for (NSUInteger i = 0; i < [windowSizes count]; i++) {
         NSRect slot = [self slotForWindowSize:[[windowSizes objectAtIndex:i] sizeValue]
                                       atIndex:i
+                                        count:[windowSizes count]
                                      position:position
                                        inArea:area];
         [slots addObject:[NSValue valueWithRect:slot]];

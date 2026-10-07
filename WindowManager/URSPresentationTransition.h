@@ -15,6 +15,8 @@
 
 @property (weak, nonatomic) URSCompositingManager *compositingManager;
 @property (readonly, nonatomic) double targetProgress;
+// How long a run takes; set between runs, not during one.
+@property (assign, nonatomic) NSTimeInterval duration;
 
 // The action is sent to the target, with the transition as argument, when a
 // run back to 0 has ended.

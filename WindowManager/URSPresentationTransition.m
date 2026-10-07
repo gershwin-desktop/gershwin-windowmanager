@@ -20,7 +20,6 @@ NSRect URSInterpolateRect(NSRect from, NSRect to, double p) {
 }
 
 @interface URSPresentationTransition ()
-@property (assign, nonatomic) NSTimeInterval duration;
 @property (weak, nonatomic) id target;
 @property (assign, nonatomic) SEL closedAction;
 @property (assign, nonatomic) double fromProgress;
