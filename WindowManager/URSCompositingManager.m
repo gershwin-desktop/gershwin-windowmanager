@@ -4286,8 +4286,11 @@ static const double URSProjectiveEdgeMargin = 0.25;
     if (cw.shadowPicture == XCB_NONE && ![self.connection resizeState]) {
         [self createShadowForWindow:cw];
         // Same reason as in paintWindow: - the ring is outside every client
-        // draw, so nothing else will stage it for the present.
-        [self damageWindowArea:cw];
+        // draw, so nothing else will stage it for the present.  And only when
+        // there is a shadow, as there.
+        if (cw.shadowPicture != XCB_NONE) {
+            [self damageWindowArea:cw];
+        }
     }
     if (cw.shadowPicture == XCB_NONE) return;
     if (!cw.damaged) return;
@@ -5635,7 +5638,16 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
             // freshRegion reaches and the present only stages what was
             // damaged, so without this the new shadow shows up partially -
             // or never reaches the screen at all.
-            [self damageWindowArea:cw];
+            // Only when there is a shadow to show.  A window that has none,
+            // like the Dock, was damaged here on every paint, and each paint's
+            // completion started the next one: the compositor repainted and
+            // presented continuously for nothing.  A window whose background
+            // is still undecided (it is probed once it has been painted, see
+            // createShadowForWindow:) gets its shadow on the paint that its
+            // first damage event starts anyway.
+            if (cw.shadowPicture != XCB_NONE) {
+                [self damageWindowArea:cw];
+            }
         }
     }
 #endif
