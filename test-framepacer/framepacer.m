@@ -105,6 +105,39 @@ int main(void)
   }
   END_SET("paced by presentation")
 
+  START_SET("a presentation that is late")
+  {
+    // An animation is timed by the clock, not by the screen: a frame that the
+    // display reports late (a second, at the moment a menu closes) must not
+    // swallow the whole animation.  The compositor asks whether the frame in
+    // flight has been late for too long.
+    URSFramePacer *p = [[URSFramePacer alloc] initWithMinimumInterval: frame];
+    p.pacedByPresentation = YES;
+    [p notePaintAt: 10.0];
+    [p notePresentationQueuedAt: 10.0];
+    PASS(![p presentationStalledAt: 10.02 after: 0.05],
+         "a frame in flight for 20 ms is not late yet");
+    PASS([p presentationStalledAt: 10.06 after: 0.05],
+         "a frame still in flight after 50 ms is late");
+    PASS([p delayBeforePaintAt: 10.06] == URSFramePacerWaitForPresentation,
+         "being late does not by itself let the pacer paint: the compositor decides");
+    [p notePresentationCompleted];
+    PASS(![p presentationStalledAt: 10.5 after: 0.05], "a shown frame is never late");
+
+    [p notePresentationQueuedAt: 11.0];
+    [p reset];
+    PASS(![p presentationStalledAt: 12.0 after: 0.05],
+         "replacing the presentation buffers forgets the frame in flight");
+    [p release];
+
+    p = [[URSFramePacer alloc] initWithMinimumInterval: frame];
+    [p notePresentationQueuedAt: 10.0];
+    PASS(![p presentationStalledAt: 20.0 after: 0.05],
+         "without presentation feedback no frame is ever late");
+    [p release];
+  }
+  END_SET("a presentation that is late")
+
   START_SET("a continuous scroll at 60.05 Hz refresh")
   {
     // A client damages every 4 ms; the display refreshes every 16.653 ms and

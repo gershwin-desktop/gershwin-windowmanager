@@ -37,6 +37,10 @@ extern const NSTimeInterval URSFramePacerWaitForPresentation;
 
 - (void)notePaintAt:(NSTimeInterval)now;
 - (void)notePresentationQueued;
+- (void)notePresentationQueuedAt:(NSTimeInterval)now;
+/** YES when the frame in flight has been waiting for the screen for longer
+ *  than `limit` seconds. Never without presentation feedback. */
+- (BOOL)presentationStalledAt:(NSTimeInterval)now after:(NSTimeInterval)limit;
 - (void)notePresentationCompleted;
 
 // Forgets the frame in flight, for when the buffers it was presented from

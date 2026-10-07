@@ -11,6 +11,7 @@ const NSTimeInterval URSFramePacerWaitForPresentation = -1.0;
 @implementation URSFramePacer
 {
     NSTimeInterval _lastPaint;
+    NSTimeInterval _pendingSince;
 }
 
 - (instancetype)initWithMinimumInterval:(NSTimeInterval)interval
@@ -44,10 +45,21 @@ const NSTimeInterval URSFramePacerWaitForPresentation = -1.0;
 
 - (void)notePresentationQueued
 {
+    [self notePresentationQueuedAt:[NSDate timeIntervalSinceReferenceDate]];
+}
+
+- (void)notePresentationQueuedAt:(NSTimeInterval)now
+{
     // Without completion reports nothing would ever clear the flag.
     if (_pacedByPresentation) {
         _presentationPending = YES;
+        _pendingSince = now;
     }
+}
+
+- (BOOL)presentationStalledAt:(NSTimeInterval)now after:(NSTimeInterval)limit
+{
+    return _presentationPending && now - _pendingSince > limit;
 }
 
 - (void)notePresentationCompleted

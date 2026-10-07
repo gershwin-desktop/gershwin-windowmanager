@@ -47,6 +47,13 @@ static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
 // each at 1920x1080) that only a window manager that keeps painting needs. After
 // this long without a frame they are freed, and made again by the next paint.
 static const NSTimeInterval URSPresentIdleSeconds = 5.0;
+
+// A presented frame is reported as shown by the display, sometimes about a
+// second late (right after a context menu closed, for one). Painting waits for
+// that report, so an animation, which runs by the clock, lost all its frames
+// to the wait. After this long an animation paints on, into the frame that is
+// still in flight (see -copyIntoPendingPresent:).
+static const NSTimeInterval URSPresentStallSeconds = 0.05;
 // The longest step an effect that plays every frame may take between two
 // paints: two 60 Hz frames, so a stall slows it rather than skipping it.
 static const NSTimeInterval URSEffectMaxFrameGap = 2.0 / 60.0;
@@ -312,6 +319,8 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // When the last frame was presented, and whether the idle check is queued.
 @property (assign, nonatomic) NSTimeInterval lastPresentAt;
 @property (assign, nonatomic) BOOL presentIdleArmed;
+// The next paint goes into the frame in flight instead of a new presentation.
+@property (assign, nonatomic) BOOL paintIntoPendingPresent;
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, id> *parentFrameCache;
 
 // OPTIMIZATION: MIT-SHM shared memory support for zero-copy transfers
@@ -1186,6 +1195,30 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         xcb_free_pixmap(conn, self.presentPixmap1);
         self.presentPixmap1 = XCB_NONE;
     }
+}
+
+/* The frame in flight is the buffer that was presented last. Until the display
+ * reports it, it is what the screen will show: updating it in place puts the
+ * newest frame there, with no stale frame to appear when the report comes, and
+ * no second presentation on top of one that has not been shown yet. The other
+ * buffer misses these pixels and takes them with its next presentation. */
+- (void)copyIntoPendingPresent:(xcb_xfixes_region_t)region {
+    xcb_connection_t *conn = [self.connection connection];
+    int last = 1 - self.currentPresentIndex;
+    xcb_render_picture_t picture = (last == 0) ? self.presentPicture0 : self.presentPicture1;
+    xcb_xfixes_region_t otherPending = (last == 0) ? self.presentPendingDamage1
+                                                   : self.presentPendingDamage0;
+    if (region != XCB_NONE) {
+        xcb_xfixes_set_picture_clip_region(conn, picture, region, 0, 0);
+    }
+    xcb_render_composite(conn, XCB_RENDER_PICT_OP_SRC, self.rootBuffer, XCB_NONE,
+                         picture, 0, 0, 0, 0, 0, 0,
+                         self.screenWidth, self.screenHeight);
+    xcb_xfixes_set_picture_clip_region(conn, picture, XCB_NONE, 0, 0);
+    if (otherPending != XCB_NONE && region != XCB_NONE) {
+        xcb_xfixes_union_region(conn, otherPending, region, otherPending);
+    }
+    [self.connection flush];
 }
 
 /* One check queued at a time, not one per frame: it looks at how long ago the
@@ -3226,9 +3259,14 @@ static inline xcb_rectangle_t URSRectIntersection(xcb_rectangle_t a,
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     NSTimeInterval delay = [self.framePacer delayBeforePaintAt:now];
     if (delay == URSFramePacerWaitForPresentation) {
-        self.repairScheduled = NO;
-        URS_PROFILE_END(performRepair);
-        return;
+        if ([self needsAnimationFrames] && self.presentPixmap0 != XCB_NONE &&
+            [self.framePacer presentationStalledAt:now after:URSPresentStallSeconds]) {
+            self.paintIntoPendingPresent = YES;
+        } else {
+            self.repairScheduled = NO;
+            URS_PROFILE_END(performRepair);
+            return;
+        }
     }
     if (delay > 0) {
         self.repairScheduled = YES;
@@ -4753,6 +4791,15 @@ static const double URSProjectiveEdgeMargin = 0.25;
 
     if (freshRegion != XCB_NONE) {
         xcb_xfixes_destroy_region(conn, freshRegion);
+    }
+
+    if (self.paintIntoPendingPresent) {
+        self.paintIntoPendingPresent = NO;
+        if (self.presentAvailable && self.presentPixmap0 != XCB_NONE) {
+            [self copyIntoPendingPresent:region];
+            URS_PROFILE_END(paintAll);
+            return;
+        }
     }
 
     if (self.presentAvailable) {
