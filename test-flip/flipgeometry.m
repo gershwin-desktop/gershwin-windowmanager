@@ -10,6 +10,7 @@
 #import <Foundation/Foundation.h>
 #import "Testing.h"
 #include "../WindowManager/URSFlipGeometry.m"
+#include "../WindowManager/URSWindowFlipEffect.m"
 
 static NSString * const URSFlipTestName = @"window flip geometry";
 
@@ -242,6 +243,14 @@ int main(void) {
     PASS([URSFlipGeometry angleAtProgress:2.0 fromAngle:0.0 toAngle:180.0] == 180.0 &&
          [URSFlipGeometry angleAtProgress:-1.0 fromAngle:0.0 toAngle:180.0] == 0.0,
          "progress outside 0..1 stays at the ends");
+
+    // The display may report a presented frame late (a second, right after a
+    // context menu closed); the flip must then wait for its frames, not lose
+    // them: it asks to be played frame by frame.
+    URSWindowFlipEffect *turn = [[URSWindowFlipEffect alloc] initFromAngle:0.0 toAngle:180.0];
+    PASS([turn respondsToSelector:@selector(playsEveryFrame)] && [turn playsEveryFrame],
+         "a window flip shows every frame of its turn, however late the screen reports them");
+    [turn release];
 
     END_SET([URSFlipTestName UTF8String])
     [pool release];

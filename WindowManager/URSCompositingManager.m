@@ -5597,7 +5597,11 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
         if ([cw.effect respondsToSelector:@selector(playsEveryFrame)] && [cw.effect playsEveryFrame]) {
             // A stall (the client flooding requests as it shows a window)
             // postpones the rest of the effect instead of skipping frames.
-            if (cw.lastEffectPaint > 0 && now - cw.lastEffectPaint > URSEffectMaxFrameGap) {
+            if (cw.lastEffectPaint == 0) {
+                // The clock starts with the first frame that is painted, which
+                // can be later than the effect was asked for.
+                cw.animationStart = now;
+            } else if (now - cw.lastEffectPaint > URSEffectMaxFrameGap) {
                 cw.animationStart += now - cw.lastEffectPaint - URSEffectMaxFrameGap;
             }
             cw.lastEffectPaint = now;

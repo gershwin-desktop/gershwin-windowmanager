@@ -92,4 +92,12 @@ static const NSTimeInterval URSWindowFlipFullTurnDuration = 0.5;
     return YES;
 }
 
+// The turn lasts half a second, and the display can report a frame late for
+// longer than that. Playing every frame starts its clock with the first frame
+// that is painted and postpones the rest when painting stalls, so the whole
+// turn is seen, a little late at worst.
+- (BOOL)playsEveryFrame {
+    return YES;
+}
+
 @end

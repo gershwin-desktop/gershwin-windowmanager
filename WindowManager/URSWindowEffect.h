@@ -52,7 +52,8 @@
 // YES when the effect must show every step of its motion: a stall of the
 // window manager (a client flooding it with requests as it shows the
 // window) then postpones the rest of the effect instead of skipping ahead,
-// so a window sliding out never jumps half way out at once.
+// so a window sliding out never jumps half way out at once. The effect's
+// clock starts with the first frame that is painted, not when it was asked for.
 - (BOOL)playsEveryFrame;
 
 @end
