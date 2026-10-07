@@ -42,6 +42,11 @@
 // frame instead of triggering an uncapped series of paints.  With Present,
 // the display's refresh paces painting instead (see URSFramePacer).
 static const NSTimeInterval URSMinPaintInterval = 1.0 / 60.0;
+
+// The two flip pixmaps of the Present chain are full-screen buffers (about 8 MB
+// each at 1920x1080) that only a window manager that keeps painting needs. After
+// this long without a frame they are freed, and made again by the next paint.
+static const NSTimeInterval URSPresentIdleSeconds = 5.0;
 // The longest step an effect that plays every frame may take between two
 // paints: two 60 Hz frames, so a stall slows it rather than skipping it.
 static const NSTimeInterval URSEffectMaxFrameGap = 2.0 / 60.0;
@@ -304,6 +309,9 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // screen.
 @property (assign, nonatomic) xcb_xfixes_region_t presentPendingDamage0;
 @property (assign, nonatomic) xcb_xfixes_region_t presentPendingDamage1;
+// When the last frame was presented, and whether the idle check is queued.
+@property (assign, nonatomic) NSTimeInterval lastPresentAt;
+@property (assign, nonatomic) BOOL presentIdleArmed;
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, id> *parentFrameCache;
 
 // OPTIMIZATION: MIT-SHM shared memory support for zero-copy transfers
@@ -1122,6 +1130,92 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     }
 }
 
+/* The vblank-synced flip chain: two screen-sized pixmaps that are presented in
+ * turn. Fresh pixmaps have undefined content, so each one is marked as missing
+ * the whole screen and is fully refreshed from rootBuffer on its first
+ * presentation. */
+- (void)createPresentChain {
+    xcb_connection_t *conn = [self.connection connection];
+    XCBScreen *screen = [[self.connection screens] firstObject];
+
+    self.presentPixmap0 = xcb_generate_id(conn);
+    xcb_create_pixmap(conn, [screen screen]->root_depth, self.presentPixmap0,
+                      self.rootWindow, self.screenWidth, self.screenHeight);
+    self.presentPicture0 = xcb_generate_id(conn);
+    xcb_render_create_picture(conn, self.presentPicture0, self.presentPixmap0,
+                              self.rootFormat, 0, NULL);
+    self.presentPixmap1 = xcb_generate_id(conn);
+    xcb_create_pixmap(conn, [screen screen]->root_depth, self.presentPixmap1,
+                      self.rootWindow, self.screenWidth, self.screenHeight);
+    self.presentPicture1 = xcb_generate_id(conn);
+    xcb_render_create_picture(conn, self.presentPicture1, self.presentPixmap1,
+                              self.rootFormat, 0, NULL);
+    self.currentPresentIndex = 0;
+    if (self.presentPendingDamage0 != XCB_NONE)
+        xcb_xfixes_destroy_region(conn, self.presentPendingDamage0);
+    if (self.presentPendingDamage1 != XCB_NONE)
+        xcb_xfixes_destroy_region(conn, self.presentPendingDamage1);
+    self.presentPendingDamage0 = [self getScreenRegion];
+    self.presentPendingDamage1 = [self getScreenRegion];
+}
+
+- (void)destroyPresentChain {
+    xcb_connection_t *conn = [self.connection connection];
+
+    if (self.presentPendingDamage0 != XCB_NONE) {
+        xcb_xfixes_destroy_region(conn, self.presentPendingDamage0);
+        self.presentPendingDamage0 = XCB_NONE;
+    }
+    if (self.presentPendingDamage1 != XCB_NONE) {
+        xcb_xfixes_destroy_region(conn, self.presentPendingDamage1);
+        self.presentPendingDamage1 = XCB_NONE;
+    }
+    if (self.presentPicture0 != XCB_NONE) {
+        xcb_render_free_picture(conn, self.presentPicture0);
+        self.presentPicture0 = XCB_NONE;
+    }
+    if (self.presentPixmap0 != XCB_NONE) {
+        xcb_free_pixmap(conn, self.presentPixmap0);
+        self.presentPixmap0 = XCB_NONE;
+    }
+    if (self.presentPicture1 != XCB_NONE) {
+        xcb_render_free_picture(conn, self.presentPicture1);
+        self.presentPicture1 = XCB_NONE;
+    }
+    if (self.presentPixmap1 != XCB_NONE) {
+        xcb_free_pixmap(conn, self.presentPixmap1);
+        self.presentPixmap1 = XCB_NONE;
+    }
+}
+
+/* One check queued at a time, not one per frame: it looks at how long ago the
+ * last frame was presented and either queues itself again for the rest of the
+ * time or, when the desktop really is idle, releases the flip chain. */
+- (void)armPresentIdleCheckAfter:(NSTimeInterval)delay {
+    if (self.presentIdleArmed) return;
+    self.presentIdleArmed = YES;
+    [self performSelector:@selector(presentIdleCheck) withObject:nil afterDelay:delay];
+}
+
+- (void)presentIdleCheck {
+    self.presentIdleArmed = NO;
+    if (self.presentPixmap0 == XCB_NONE) return;
+
+    NSTimeInterval idle = [NSDate timeIntervalSinceReferenceDate] - self.lastPresentAt;
+    if (idle < URSPresentIdleSeconds) {
+        [self armPresentIdleCheckAfter:URSPresentIdleSeconds - idle];
+        return;
+    }
+    // A frame that has not reached the screen yet still reads its pixmap.
+    if (self.framePacer.presentationPending) {
+        [self armPresentIdleCheckAfter:URSPresentIdleSeconds];
+        return;
+    }
+    [self destroyPresentChain];
+    [self.connection flush];
+}
+
+
 - (BOOL)createRootBuffer {
     @try {
         xcb_connection_t *conn = [self.connection connection];
@@ -1157,31 +1251,8 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         //NSLog(@"[CompositingManager] Root buffer created (%dx%d)",
               //self.screenWidth, self.screenHeight);
 
-        // Create present pixmaps for vblank-synced display (flip chain)
-        if (self.presentAvailable) {
-            self.presentPixmap0 = xcb_generate_id(conn);
-            xcb_create_pixmap(conn, [screen screen]->root_depth,
-                             self.presentPixmap0,
-                             self.rootWindow,
-                             self.screenWidth, self.screenHeight);
-            self.presentPicture0 = xcb_generate_id(conn);
-            xcb_render_create_picture(conn, self.presentPicture0,
-                                     self.presentPixmap0, self.rootFormat, 0, NULL);
-            self.presentPixmap1 = xcb_generate_id(conn);
-            xcb_create_pixmap(conn, [screen screen]->root_depth,
-                             self.presentPixmap1,
-                             self.rootWindow,
-                             self.screenWidth, self.screenHeight);
-            self.presentPicture1 = xcb_generate_id(conn);
-            xcb_render_create_picture(conn, self.presentPicture1,
-                                     self.presentPixmap1, self.rootFormat, 0, NULL);
-            self.currentPresentIndex = 0;
-            // Fresh flip pixmaps have undefined content, so each buffer must
-            // be fully refreshed on its first presentation.
-            self.presentPendingDamage0 = [self getScreenRegion];
-            self.presentPendingDamage1 = [self getScreenRegion];
-            //NSLog(@"[CompositingManager] Present flip chain created (2 pixmaps)");
-        }
+        // The Present flip chain is made by the first paint (createPresentChain),
+        // and made again after it has been released while idle.
 
         return YES;
         
@@ -4685,6 +4756,9 @@ static const double URSProjectiveEdgeMargin = 0.25;
     }
 
     if (self.presentAvailable) {
+        if (self.presentPixmap0 == XCB_NONE) {
+            [self createPresentChain];
+        }
         // Vblank-synced presentation via X Present extension, using a flip
         // chain of 2 persistent pixmaps.  Every paint pass presents exactly
         // once, and the next pass waits for this frame's CompleteNotify
@@ -4756,6 +4830,8 @@ static const double URSProjectiveEdgeMargin = 0.25;
                           0,
                           NULL);
         [self.framePacer notePresentationQueued];
+        self.lastPresentAt = [NSDate timeIntervalSinceReferenceDate];
+        [self armPresentIdleCheckAfter:URSPresentIdleSeconds];
         [self.connection flush];
     } else {
         // Non-vblank-synced path: direct copy to screen (fallback).
@@ -6230,38 +6306,10 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
                              vals);
     }
 
-    // Recreate present pixmaps (if using X Present)
+    // The flip pixmaps have the old size: drop them, the next paint (the full
+    // repaint below) makes them again at the new one.
     if (self.presentAvailable) {
-        if (self.presentPixmap0 != XCB_NONE)
-            xcb_free_pixmap(conn, self.presentPixmap0);
-        if (self.presentPixmap1 != XCB_NONE)
-            xcb_free_pixmap(conn, self.presentPixmap1);
-        if (self.presentPicture0 != XCB_NONE)
-            xcb_render_free_picture(conn, self.presentPicture0);
-        if (self.presentPicture1 != XCB_NONE)
-            xcb_render_free_picture(conn, self.presentPicture1);
-
-        XCBScreen *screen = [[self.connection screens] firstObject];
-        self.presentPixmap0 = xcb_generate_id(conn);
-        xcb_create_pixmap(conn, [screen screen]->root_depth,
-                          self.presentPixmap0, self.rootWindow, newW, newH);
-        self.presentPixmap1 = xcb_generate_id(conn);
-        xcb_create_pixmap(conn, [screen screen]->root_depth,
-                          self.presentPixmap1, self.rootWindow, newW, newH);
-        self.presentPicture0 = xcb_generate_id(conn);
-        xcb_render_create_picture(conn, self.presentPicture0,
-                                  self.presentPixmap0, self.rootFormat, 0, NULL);
-        self.presentPicture1 = xcb_generate_id(conn);
-        xcb_render_create_picture(conn, self.presentPicture1,
-                                  self.presentPixmap1, self.rootFormat, 0, NULL);
-        // Recreated flip pixmaps have undefined content: both buffers must
-        // be fully refreshed on their next presentations.
-        if (self.presentPendingDamage0 != XCB_NONE)
-            xcb_xfixes_destroy_region(conn, self.presentPendingDamage0);
-        if (self.presentPendingDamage1 != XCB_NONE)
-            xcb_xfixes_destroy_region(conn, self.presentPendingDamage1);
-        self.presentPendingDamage0 = [self getScreenRegion];
-        self.presentPendingDamage1 = [self getScreenRegion];
+        [self destroyPresentChain];
     }
 
     [self.connection flush];
@@ -6402,32 +6450,13 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
             self.overlayWindow = XCB_NONE;
         }
         
-                // Free present extension resources (flip chain)
-        if (self.presentPendingDamage0 != XCB_NONE) {
-            xcb_xfixes_destroy_region(conn, self.presentPendingDamage0);
-            self.presentPendingDamage0 = XCB_NONE;
-        }
-        if (self.presentPendingDamage1 != XCB_NONE) {
-            xcb_xfixes_destroy_region(conn, self.presentPendingDamage1);
-            self.presentPendingDamage1 = XCB_NONE;
-        }
+        // Free present extension resources (flip chain)
+        [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                                 selector:@selector(presentIdleCheck)
+                                                   object:nil];
+        self.presentIdleArmed = NO;
         [self.framePacer reset];
-        if (self.presentPicture0 != XCB_NONE) {
-            xcb_render_free_picture(conn, self.presentPicture0);
-            self.presentPicture0 = XCB_NONE;
-        }
-        if (self.presentPixmap0 != XCB_NONE) {
-            xcb_free_pixmap(conn, self.presentPixmap0);
-            self.presentPixmap0 = XCB_NONE;
-        }
-        if (self.presentPicture1 != XCB_NONE) {
-            xcb_render_free_picture(conn, self.presentPicture1);
-            self.presentPicture1 = XCB_NONE;
-        }
-        if (self.presentPixmap1 != XCB_NONE) {
-            xcb_free_pixmap(conn, self.presentPixmap1);
-            self.presentPixmap1 = XCB_NONE;
-        }
+        [self destroyPresentChain];
 
         // Invalidate the animation timer to prevent it from continuing
         // to fire after cleanup (e.g. when compositing is deactivated).
