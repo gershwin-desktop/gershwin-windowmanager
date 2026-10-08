@@ -528,6 +528,12 @@
         [self.windowSwitcher completeSwitching];
         [self stopAltReleasePoll];
     }
+    // Waiting for the keymap reply moved every event that came with it
+    // into XCB's queue, where the drained socket no longer wakes the run
+    // loop for them.  Polled twenty times a second while Alt is held, this
+    // kept maps and damage (the Alt-Tab flow's title) unhandled until
+    // unrelated input arrived, often seconds later.
+    [self.eventProcessor processAvailableXCBEvents];
 }
 
 @end

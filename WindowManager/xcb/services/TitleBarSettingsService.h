@@ -30,4 +30,9 @@
 - (uint16_t)height;
 - (uint16_t) defaultHeight;
 
+// Effective titlebar height for a client window: the normal (possibly
+// theme-configured) height, or a fixed 16px (scaled by GSScaleFactor,
+// never below 1px) for a utility panel - see XCBWindow's isUtilityPanel.
+- (uint16_t) heightForUtility:(BOOL)isUtility;
+
 @end

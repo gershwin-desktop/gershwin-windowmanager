@@ -25,13 +25,56 @@ $(APP_NAME)_OBJC_FILES = \
 		URSTitlebarController.m \
 		URSSnappingMenuController.m \
 		URSCompositingManager.m \
+		URSAttentionHopEffect.m \
+		URSOverviewLayout.m \
+		URSOverviewController.m \
+		URSWindowListFilter.m \
+		URSOverviewTitleLabel.m \
+		URSGlobalKey.m \
+		URSHotCorner.m \
+		URSPresentationTransition.m \
+		URSScreenWindow.m \
+		URSShowDesktopLayout.m \
+		URSShowDesktopController.m \
+		URSSheetLayout.m \
+		URSAttachmentSlideEffect.m \
+		URSHoldLastFrameEffect.m \
+		URSSheetSlideEffect.m \
+		URSAttachmentController.m \
+		URSSheetController.m \
+		URSDrawerController.m \
+		URSDrawerLayout.m \
+		URSAttachedDeformation.m \
+		URSAttachmentRegistry.m \
+		URSWindowRole.m \
+		URSWobblyModel.m \
+		URSTriangleSpans.m \
+		URSWobblyWindowsController.m \
 		URSRenderingContext.m \
 		URSWindowSwitcher.m \
 		URSWindowSwitcherOverlay.m \
+		URSFlowLayout.m \
+		URSDeckLayout.m \
+		URSSourceDirectory.m \
+		URSWindowFlowController.m \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \
 		URSProfiler.m \
 		URSImageUpload.m \
+		URSBackgroundRender.m \
+		URSShapePath.m \
+		URSShadowOverrides.m \
+		URSUtilityRestackOrder.m \
+		URSFramePacer.m \
+		URSTitlebarRegistry.m \
+		URSProjection.m \
+		URSFlipGeometry.m \
+		URSWindowFlipEffect.m \
+		URSCompositingManager+WindowFlip.m \
+		URSFlipSideGeometry.m \
+		URSFlipSidePlan.m \
+		URSFlipSideOrphans.m \
+		URSFlipSideController.m \
 		GSThemeTitleBar.m \
 		xcb/XCBConnection.m \
 		xcb/XCBWindow.m \
@@ -72,6 +115,7 @@ $(APP_NAME)_HEADER_FILES = \
 		URSThemeIntegration.h \
 		URSProfiler.h \
 		URSImageUpload.h \
+		URSBackgroundRender.h \
 		GSThemeTitleBar.h \
 		xcb/XCBConnection.h \
 		xcb/XCBWindow.h \

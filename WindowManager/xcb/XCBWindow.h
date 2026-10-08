@@ -78,6 +78,17 @@ typedef NS_ENUM(NSInteger, WindowState)
 @property (strong, nonatomic) XCBCursor *cursor;
 @property (strong, nonatomic) NSMutableArray *windowClass;
 @property (strong, nonatomic) NSString *windowType;
+// YES for a GNUstep NSPanel created with NSUtilityWindowMask.  Set once at
+// MapRequest time (XCBConnection) from the client's _GNUSTEP_WM_ATTR
+// window_style bits - NOT from _NET_WM_WINDOW_TYPE: the active Eau theme
+// swizzles -setwindowlevel:: (GSDisplayServer+Eau.m) and republishes EVERY
+// NSPanel's _NET_WM_WINDOW_TYPE as _NET_WM_WINDOW_TYPE_DIALOG (its own fix
+// for popup-menu misclassification), so that EWMH property can no longer
+// tell a utility panel from an ordinary dialog once Eau has touched it.
+// Utility panels get a fixed-height titlebar, are exempt from
+// WM_MIN_CLIENT_WIDTH/HEIGHT, and never show minimize/maximize controls -
+// see XCBFrame.h and TitleBarSettingsService.
+@property (nonatomic, assign) BOOL isUtilityPanel;
 @property (strong, nonatomic) XCBWindow *leaderWindow;
 @property (strong, nonatomic) XCBShape* shape;
 
@@ -87,6 +98,9 @@ typedef NS_ENUM(NSInteger, WindowState)
 @property (nonatomic, assign) BOOL skipPager;
 @property (nonatomic, assign) BOOL isAbove;
 @property (nonatomic, assign) BOOL isBelow;
+// A window kept directly below another one, which every restack must leave
+// it under (a drawer below its parent's frame); nil for most windows.
+@property (weak, nonatomic) XCBWindow *stackedBelowWindow;
 @property (nonatomic, assign) BOOL maximizedVertically;
 @property (nonatomic, assign) BOOL maximizedHorizontally;
 @property (nonatomic, assign) BOOL shaded;
@@ -129,7 +143,19 @@ typedef NS_ENUM(NSInteger, WindowState)
 // respond to WM_DELETE_WINDOW within the timeout.
 @property (nonatomic, strong) NSTimer *closeTimer;
 
+// A client the window manager shows as an ordinary window although its
+// hints ask for no decoration and a fixed size (an orphaned flip side, see
+// URSFlipSideController): it is framed, and may be resized, whatever they
+// say.  Set before it is framed.
+@property (nonatomic, assign) BOOL framedAsOrdinary;
+// Run by -close instead of sending WM_DELETE_WINDOW, for a client that
+// offers no close of its own; the window manager ends it some other way.
+@property (nonatomic, copy) void (^closeHandler)(void);
+
 - (void) cancelCloseTimer;
+// YES when -close can ask the client to close: it takes WM_DELETE_WINDOW,
+// or the window manager closes it through closeHandler.
+- (BOOL) supportsCloseRequest;
 
 - (xcb_window_t) window;
 - (void) setWindow:(xcb_window_t) aWindow;
@@ -201,7 +227,7 @@ typedef NS_ENUM(NSInteger, WindowState)
 - (void) showResizeCursorForPosition:(MousePosition)position;
 - (void) putWindowBackgroundWithPixmap:(xcb_pixmap_t)aPixmap;
 - (void) refreshBorder;
-- (void) reframeForScaleChange;
+- (void) reframeForDecorationChange;
 - (BOOL) updatePid;
 - (BOOL) updateLeaderWindow;
 
