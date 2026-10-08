@@ -10,6 +10,7 @@
 #import "XCBScreen.h"
 #import "XCBWindow.h"
 #import "URSCompositingManager+WindowFlip.h"
+#import "URSFlipSideController.h"
 
 @implementation URSSnappingMenuController
 
@@ -163,6 +164,16 @@
     return menu;
 }
 
+// Greyed out when the window's application has no source directory to show
+// on its back.
+- (BOOL)validateMenuItem:(NSMenuItem *)item
+{
+    if ([item action] == @selector(snapMenuFlipWindow:)) {
+        return [self.flipSideController canFlipFrame:[item representedObject]];
+    }
+    return YES;
+}
+
 #pragma mark - Button Watchdog
 
 - (void)buttonWatchdog:(NSTimer *)timer
@@ -276,7 +287,7 @@
 {
     XCBFrame *frame = [sender representedObject];
     if (frame && [self.connection windowForXCBId:[frame window]]) {
-        [[URSCompositingManager sharedManager] flipWindow:[frame window]];
+        [self.flipSideController flipFrame:frame];
     }
 }
 

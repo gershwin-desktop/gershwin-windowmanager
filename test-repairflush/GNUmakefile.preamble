@@ -60,6 +60,13 @@ WM_COLLABORATORS = \
 	../WindowManager/URSFlipGeometry.m \
 	../WindowManager/URSWindowFlipEffect.m \
 	../WindowManager/URSCompositingManager+WindowFlip.m \
+	../WindowManager/URSFlipSideGeometry.m \
+	../WindowManager/URSFlipSidePlan.m \
+	../WindowManager/URSFlipSideOrphans.m \
+	../WindowManager/URSFlipSideController.m \
+	../WindowManager/URSSourceDirectory.m \
+	../WindowManager/URSDeckLayout.m \
+	../WindowManager/URSBackgroundRender.m \
 	../WindowManager/GSThemeTitleBar.m \
 	../WindowManager/xcb/XCBConnection.m \
 	../WindowManager/xcb/XCBWindow.m \

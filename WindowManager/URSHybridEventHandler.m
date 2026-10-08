@@ -242,8 +242,12 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                                          focusManager:self.focusManager
                                                                        windowSwitcher:self.windowSwitcher
                                                                       workareaManager:self.workareaManager];
+    self.flipSideController = [[URSFlipSideController alloc] initWithConnection:connection];
     self.attachmentControllers = @[ [[URSSheetController alloc] initWithConnection:connection],
-                                    [[URSDrawerController alloc] initWithConnection:connection] ];
+                                    [[URSDrawerController alloc] initWithConnection:connection],
+                                    self.flipSideController ];
+    self.snappingMenuController.flipSideController = self.flipSideController;
+    self.flipSideController.framer = self;
 
     // Check if compositing was requested via command-line
     self.compositingRequested = [[NSUserDefaults standardUserDefaults] 
@@ -530,6 +534,31 @@ static CGFloat WMLastScaleFactor = 1.0;
     return focusable;
 }
 
+// Shown as a window of its own: it is undecorated and borderless by its
+// hints, and would otherwise be neither movable nor closable.
+- (void)adoptOrphanedFlipSide:(xcb_window_t)winId {
+    if ([self frameWindowAsOrdinary:winId
+                       closeHandler:[self.flipSideController closeHandlerForAdoptedOrphan:winId]] == nil) {
+        NSLog(@"[FlipSide] Orphaned terminal window %u cannot be framed; it is left as it is", winId);
+    }
+}
+
+- (XCBWindow *)frameWindowAsOrdinary:(xcb_window_t)winId closeHandler:(void (^)(void))closeHandler {
+    [connection frameNextMapOfWindow:winId asOrdinaryClosedBy:closeHandler];
+    [self adoptExistingWindow:winId];
+    XCBWindow *client = [connection windowForXCBId:winId];
+    if (![[client parentWindow] isKindOfClass:[XCBFrame class]]) {
+        return nil;
+    }
+    // It turns up without the user asking for it, so it must be seen to:
+    // in front and focused, as a newly mapped window is.
+    if (!connection.adoptingExistingWindows &&
+        [self.focusManager isWindowFocusable:client allowDesktop:NO]) {
+        [self performSelector:@selector(focusNewlyMappedWindow:) withObject:client afterDelay:0.1];
+    }
+    return client;
+}
+
 - (void)decorateExistingWindowsOnStartup {
     @try {
         XCBScreen *screen = [[connection screens] objectAtIndex:0];
@@ -602,6 +631,10 @@ static CGFloat WMLastScaleFactor = 1.0;
                 [attachedWindows addObject:@(winId)];
                 continue;
             }
+            if ([self.flipSideController isOrphanedFlipSide:winId]) {
+                [self adoptOrphanedFlipSide:winId];
+                continue;
+            }
 
             XCBWindow *adopted = [self adoptExistingWindow:winId];
             if (adopted) {
@@ -614,6 +647,11 @@ static CGFloat WMLastScaleFactor = 1.0;
                 if (self.compositingManager && [self.compositingManager compositingActive]) {
                     [self.compositingManager registerWindow:attachedId];
                 }
+                continue;
+            }
+            // A flip side whose window went while no window manager ran.
+            if ([self attachmentControllerOfKind:attachedId] == self.flipSideController) {
+                [self adoptOrphanedFlipSide:attachedId];
                 continue;
             }
             // Its parent is undecorated: framed like any other window.
@@ -1311,6 +1349,9 @@ static CGFloat WMLastScaleFactor = 1.0;
             // Apply GSTheme immediately with no delay
             [self applyGSThemeToRecentlyMappedWindow:[NSNumber numberWithUnsignedInt:mapRequestEvent->window]];
 
+            // A restarted application takes back the terminal its window had.
+            [self.flipSideController clientWindowFramed:mappedClient];
+
             // If the window has _NET_WM_STATE_FULLSCREEN set in its properties
             // (e.g. browser video fullscreen), immediately enter fullscreen mode.
             {
@@ -1472,6 +1513,7 @@ static CGFloat WMLastScaleFactor = 1.0;
             [self.workareaManager handleStrutPropertyChange:propEvent];
             [self handleWindowTitlePropertyChange:propEvent];
             [connection handlePropertyNotify:propEvent];
+            [self.flipSideController windowPropertyChanged:propEvent];
             // Re-evaluate fixed-size status: a client's WM_NORMAL_HINTS can
             // be published as a placeholder at map time (see
             // -adjustBorderForFixedSizeWindow:) and corrected afterward once
@@ -2089,6 +2131,14 @@ static CGFloat WMLastScaleFactor = 1.0;
 }
 
 - (void)adjustBorderForFixedSizeWindow:(xcb_window_t)clientWindowId {
+    XCBWindow *ordinary = [connection windowForXCBId:clientWindowId];
+    if ([ordinary framedAsOrdinary]) {
+        // Its hints pin the size its borderless window had; the window
+        // manager shows it as an ordinary, sizable window.
+        [URSThemeIntegration unregisterFixedSizeWindow:clientWindowId];
+        [ordinary setCanResize:YES];
+        return;
+    }
     @try {
         // Check if window has fixed size (min == max in WM_NORMAL_HINTS)
         xcb_size_hints_t sizeHints;
@@ -2780,6 +2830,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         [self.keyboardManager cleanupKeyboardGrabbing];
         [self.overviewController tearDown];
         [self.showDesktopController tearDown];
+        [self.flipSideController windowManagerWillExit];
         
         // Step 2: Undecorate and restore all client windows
         //NSLog(@"[WindowManager] Step 2: Restoring all client windows");

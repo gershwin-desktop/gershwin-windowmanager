@@ -159,6 +159,16 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 
 - (void) reparentWindow: (XCBWindow*) aWindow toWindow:(XCBWindow*)parentWindow position:(XCBPoint)position;
 - (void) releaseClientWindow:(XCBWindow*)aClient toRootAt:(XCBPoint)position;
+/* Takes a framed client out of its frame onto the root window, where it is
+ * on the screen now, destroys the frame and forgets the client, frame and
+ * titlebar. */
+- (void) unframeClientWindow:(XCBWindow *)aClient root:(XCBWindow *)rootWindow;
+/* The next map request for this window (real or synthesized) frames it as
+ * an ordinary window although its hints ask for none, with its client area
+ * left where it is on the screen (XCBWindow framedAsOrdinary), and closing
+ * it runs closeHandler: a client whose window has no decoration offers no
+ * close of its own. */
+- (void) frameNextMapOfWindow:(xcb_window_t)aWindow asOrdinaryClosedBy:(void (^)(void))closeHandler;
 - (void) mapWindow: (XCBWindow*) aWindow;
 - (void) unmapWindow:(XCBWindow*)aWindow;
 - (void) addDamagedRegion:(XCBRegion*) damagedRegion;

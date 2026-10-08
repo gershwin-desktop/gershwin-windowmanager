@@ -196,6 +196,8 @@ static void killOtherInstances(void) {
     // Last titlebar ButtonPress, for double-click (WindowShade toggle) detection.
     xcb_timestamp_t _lastTitlebarClickTime;
     xcb_window_t _lastTitlebarClickWindow;
+    // Window -> its close handler; see -frameNextMapOfWindow:asOrdinaryClosedBy:.
+    NSMutableDictionary<NSNumber *, id> *_windowsToFrameAsOrdinary;
 }
 - (NSSet *)dockOwnerLeaders;
 - (BOOL)isDockPopup:(XCBWindow *)aWindow forDockOwnerLeaders:(NSSet *)dockOwnerLeaders;
@@ -1220,6 +1222,57 @@ static XCBConnection *sharedInstance;
     [aClient setDecorated:NO];
 }
 
+- (void)unframeClientWindow:(XCBWindow *)window root:(XCBWindow *)rootWindow
+{
+    XCBFrame *frameWindow = (XCBFrame *)[window parentWindow];
+
+    // Reparent using root-relative coordinates. windowRect is frame-relative
+    // for decorated clients and causes visible position drift if used directly.
+    xcb_translate_coordinates_reply_t *translated =
+        xcb_translate_coordinates_reply(connection,
+                                       xcb_translate_coordinates(connection,
+                                                                 [window window],
+                                                                 [rootWindow window],
+                                                                 0,
+                                                                 0),
+                                       NULL);
+
+    XCBPoint reparentPos = XCBMakePoint(0, 0);
+    if (translated) {
+        reparentPos = XCBMakePoint(translated->dst_x, translated->dst_y);
+        free(translated);
+    } else {
+        XCBRect frameRect = [frameWindow windowRect];
+        XCBRect clientRect = [window windowRect];
+        reparentPos = XCBMakePoint(frameRect.position.x + clientRect.position.x,
+                                   frameRect.position.y + clientRect.position.y);
+    }
+
+    [self releaseClientWindow:window toRootAt:reparentPos];
+    [self unregisterWindow:frameWindow];
+    XCBTitleBar *titleBar = (XCBTitleBar *) [frameWindow childWindowForKey:TitleBar];
+    if (titleBar != nil) {
+        [self unregisterWindow:[titleBar hideWindowButton]];
+        [self unregisterWindow:[titleBar minimizeWindowButton]];
+        [self unregisterWindow:[titleBar maximizeWindowButton]];
+        [self unregisterWindow:titleBar];
+        // See the matching comment in -handleDestroyNotify:: without this,
+        // the buttons' -parentWindow back-references keep titleBar (and
+        // through it, frameWindow) retained forever.
+        [titleBar releaseButtons];
+    }
+    [[frameWindow getChildren] removeAllObjects];
+    [frameWindow destroy];
+    [self unregisterWindow:window];
+}
+
+- (void)frameNextMapOfWindow:(xcb_window_t)aWindow asOrdinaryClosedBy:(void (^)(void))closeHandler
+{
+    if (_windowsToFrameAsOrdinary == nil)
+        _windowsToFrameAsOrdinary = [NSMutableDictionary dictionary];
+    _windowsToFrameAsOrdinary[@(aWindow)] = [closeHandler copy];
+}
+
 - (void)handleMapNotify:(xcb_map_notify_event_t *)anEvent
 {
     XCBWindow *window = [self windowForXCBId:anEvent->window];
@@ -1466,44 +1519,7 @@ static XCBConnection *sharedInstance;
 
         //NSLog(@"Destroying window %u", [frameWindow window]);
 
-        // Reparent using root-relative coordinates. windowRect is frame-relative
-        // for decorated clients and causes visible position drift if used directly.
-        xcb_translate_coordinates_reply_t *translated =
-            xcb_translate_coordinates_reply(connection,
-                                           xcb_translate_coordinates(connection,
-                                                                     [window window],
-                                                                     [rootWindow window],
-                                                                     0,
-                                                                     0),
-                                           NULL);
-
-        XCBPoint reparentPos = XCBMakePoint(0, 0);
-        if (translated) {
-            reparentPos = XCBMakePoint(translated->dst_x, translated->dst_y);
-            free(translated);
-        } else {
-            XCBRect frameRect = [frameWindow windowRect];
-            XCBRect clientRect = [window windowRect];
-            reparentPos = XCBMakePoint(frameRect.position.x + clientRect.position.x,
-                                       frameRect.position.y + clientRect.position.y);
-        }
-
-        [self releaseClientWindow:window toRootAt:reparentPos];
-        [self unregisterWindow:frameWindow];
-        XCBTitleBar *titleBar = (XCBTitleBar *) [frameWindow childWindowForKey:TitleBar];
-        if (titleBar != nil) {
-            [self unregisterWindow:[titleBar hideWindowButton]];
-            [self unregisterWindow:[titleBar minimizeWindowButton]];
-            [self unregisterWindow:[titleBar maximizeWindowButton]];
-            [self unregisterWindow:titleBar];
-            // See the matching comment in -handleDestroyNotify:: without this,
-            // the buttons' -parentWindow back-references keep titleBar (and
-            // through it, frameWindow) retained forever.
-            [titleBar releaseButtons];
-        }
-        [[frameWindow getChildren] removeAllObjects];
-        [frameWindow destroy];
-        [self unregisterWindow:window];
+        [self unframeClientWindow:window root:rootWindow];
     }
 
     window = nil;
@@ -1681,6 +1697,8 @@ static XCBConnection *sharedInstance;
 
     BOOL isManaged = NO;
     XCBWindow *window = [self windowForXCBId:anEvent->window];
+    void (^ordinaryCloseHandler)(void) = _windowsToFrameAsOrdinary[@(anEvent->window)];
+    [_windowsToFrameAsOrdinary removeObjectForKey:@(anEvent->window)];
     
     isWindowsMapUpdated = NO;
 
@@ -1962,6 +1980,8 @@ static XCBConnection *sharedInstance;
     if ([window decorated] == NO && !isManaged)
     {
         window = [[XCBWindow alloc] initWithXCBWindow:anEvent->window andConnection:self];
+        [window setFramedAsOrdinary:ordinaryCloseHandler != nil];
+        [window setCloseHandler:ordinaryCloseHandler];
         [window updateAttributes];
 
         uint32_t clientMask[] = {CLIENT_SELECT_INPUT_EVENT_MASK};
@@ -2237,7 +2257,8 @@ static XCBConnection *sharedInstance;
         {
             xcb_atom_t *atom = (xcb_atom_t *) xcb_get_property_value(motifHints);
             
-            if (atom[0] == 3 && atom[1] == 0 && atom[2] == 0 && atom[3] == 0 && atom[4] == 0)
+            if (![window framedAsOrdinary] &&
+                atom[0] == 3 && atom[1] == 0 && atom[2] == 0 && atom[3] == 0 && atom[4] == 0)
             {
                 //NSLog(@"Motif undecorated window: %d", [window window]);
                 free(motifHints);
@@ -2265,7 +2286,7 @@ static XCBConnection *sharedInstance;
                 name = nil;
                 return;
             }
-
+            free(motifHints);
         }
         else
         {
@@ -2415,7 +2436,7 @@ static XCBConnection *sharedInstance;
     BOOL shouldReposition = NO;
     BOOL isDialog = NO;
 
-    if (!self.adoptingExistingWindows) {
+    if (!self.adoptingExistingWindows && ![window framedAsOrdinary]) {
         // The WM is the authority on window placement.  Cascade all
         // newly mapped non-dialog, non-desktop, non-fullscreen windows
         // whose position the application did not set itself.
@@ -2462,7 +2483,12 @@ static XCBConnection *sharedInstance;
     uint16_t winWidth = reqW + 2 * (uint16_t)cb;
     uint16_t winHeight = reqH + titleHeight + (uint16_t)cb;
 
-    if (self.adoptingExistingWindows) {
+    if ([window framedAsOrdinary]) {
+        // It was on the screen without a frame until now; the frame goes
+        // around it, so its content stays where the user saw it.
+        xPos = reqX - cb;
+        yPos = reqY - (int16_t)titleHeight;
+    } else if (self.adoptingExistingWindows) {
         // When the previous window manager died, the X server left each
         // client where its content was, one titlebar below its frame.
         // Framing it at that point moved every window down by a titlebar on

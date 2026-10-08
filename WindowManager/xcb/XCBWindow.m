@@ -829,7 +829,11 @@
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
 
-    if ([icccmService hasProtocol:[icccmService WMDeleteWindow] forWindow:self])
+    if (self.closeHandler != nil)
+    {
+        self.closeHandler();
+    }
+    else if ([icccmService hasProtocol:[icccmService WMDeleteWindow] forWindow:self])
     {
         event.type = [atomService atomFromCachedAtomsWithKey:[icccmService WMProtocols]];
         event.format = 32;
@@ -855,6 +859,16 @@
                                                 selector:@selector(closeTimerFired:)
                                                 userInfo:nil
                                                  repeats:NO];
+}
+
+- (BOOL)supportsCloseRequest
+{
+    if (self.closeHandler != nil)
+    {
+        return YES;
+    }
+    ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
+    return [icccmService hasProtocol:[icccmService WMDeleteWindow] forWindow:self];
 }
 
 - (void)cancelCloseTimer

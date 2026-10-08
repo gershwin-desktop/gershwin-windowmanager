@@ -448,8 +448,7 @@ static xcb_window_t primaryActiveFrameId = XCB_NONE;
     if (!clientWindow || ![clientWindow canClose]) {
         return styleMask;
     }
-    ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[frame connection]];
-    if (![icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow]) {
+    if (![clientWindow supportsCloseRequest]) {
         return styleMask;
     }
 
@@ -867,8 +866,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 
         BOOL showClose = NO;
         if (clientWindow && [clientWindow canClose]) {
-            ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[titlebar connection]];
-            if ([icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow]) {
+            if ([clientWindow supportsCloseRequest]) {
                 showClose = YES;
             }
         }
@@ -1076,8 +1074,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         NSUInteger styleMask = NSTitledWindowMask;
         if (clientWindow) {
             // Require both canClose and WM_DELETE_WINDOW support before showing controls
-            ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[titlebar connection]];
-            BOOL supportsDelete = [icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow];
+            BOOL supportsDelete = [clientWindow supportsCloseRequest];
 
             if (![clientWindow canClose] || !supportsDelete) {
                 NSDebugLog(@"GSTheme: Client %u reports canClose=NO or lacks WM_DELETE_WINDOW - omitting control buttons", [clientWindow window]);

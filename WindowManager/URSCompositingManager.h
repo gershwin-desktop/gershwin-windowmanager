@@ -96,6 +96,12 @@ typedef void (^dispatch_block_t)(void);
 // Play an effect on the window where it stands.  Ignored while the window
 // already animates, unless the effect replaces a running one.
 - (void)playEffect:(id<URSWindowEffect>)effect onWindow:(xcb_window_t)windowId;
+// The same, NO when it was ignored.  completion runs when the effect ends
+// (also when the window is unmapped first), but not if another effect or an
+// animation takes its place.
+- (BOOL)playEffect:(id<URSWindowEffect>)effect
+          onWindow:(xcb_window_t)windowId
+        completion:(dispatch_block_t)completion;
 // Keeps the window's last picture when its client unmaps it, so that an
 // effect started just before the unmap can play to its end on it (a sheet
 // sliding back under its parent's titlebar).  Costs a named pixmap per
@@ -157,6 +163,21 @@ typedef void (^dispatch_block_t)(void);
 // Re-acquire and repaint one window's content right now.  Used by direct
 // X-drawing animations (titlebar spinner) that bypass the damage pipeline.
 - (void)repairRegionForWindow:(xcb_window_t)windowId;
+
+// A flip side (URSFlipSideController): a window that is seen only on the
+// back of a frame turned over, painted into the frame's client area there.
+// From now until it is destroyed it is never painted as a window of its own
+// (nor its shadow) and never bypasses the compositor, whatever it asks for:
+// the frame's back is painted from its picture.
+- (void)setFlipSideWindow:(xcb_window_t)windowId ofFrame:(xcb_window_t)frameId;
+// The window no longer belongs to a frame's back; it is still never painted.
+- (void)detachFlipSideWindow:(xcb_window_t)windowId;
+// The window is no flip side any more (its frame went and it lives on as a
+// window of its own): it is painted like any other window again.
+- (void)releaseFlipSideWindow:(xcb_window_t)windowId;
+// Runs block once, as soon as the window has drawn something (its first
+// damage since it was mapped); at once if it has already.
+- (void)performWhenWindowHasContent:(xcb_window_t)windowId block:(dispatch_block_t)block;
 
 // Mark a window to skip shadow rendering (e.g. snap preview overlay)
 - (void)setSkipShadowForWindow:(xcb_window_t)windowId;

@@ -86,8 +86,20 @@
 // Directly above the parent's frame (a sheet over the content) or directly
 // below it (a drawer behind the parent's edge).
 - (BOOL)stacksAboveParent;
+// The same for one window, for a kind that changes sides (a flip side goes
+// above its parent while the parent shows its back); stacksAboveParent by
+// default.
+- (BOOL)stacksAboveParentForWindow:(xcb_window_t)window;
 // A focus the parent gets belongs to its attached window (a sheet).
 - (BOOL)takesParentFocus;
+// The same for one window; takesParentFocus by default.
+- (BOOL)takesParentFocusOfWindow:(xcb_window_t)window;
+// YES (the default) when the window slides out from under its parent when
+// shown and back when dismissed; NO for one that is never seen as itself.
+- (BOOL)slidesWindow:(xcb_window_t)window;
+// The window has been attached to its parent and is about to be placed and
+// mapped.
+- (void)willShowAttachedWindow:(xcb_window_t)window parent:(xcb_window_t)parent;
 // The way the window comes out of its parent.
 - (URSAttachmentEdge)slideEdgeOfWindow:(xcb_window_t)window;
 
@@ -111,5 +123,24 @@
                  screen:(NSRect)screen;
 // The window is no longer attached.
 - (void)forgetAttachmentOfWindow:(xcb_window_t)window;
+
+// For subclasses.
+@property (readonly, nonatomic) XCBConnection *connection;
+- (XCBFrame *)frameOfClient:(xcb_window_t)client;
+// The client a window names in WM_TRANSIENT_FOR when it carries this
+// controller's role, or XCB_NONE.
+- (xcb_window_t)markedParentOfWindow:(xcb_window_t)window;
+// Attaches, places and maps a window that carries the role only after its
+// map request was seen; NO when it cannot hang from its parent.
+- (BOOL)attachMarkedWindow:(xcb_window_t)window;
+// Puts an attached window where it belongs now, also in the stacking order.
+- (void)placeWindow:(xcb_window_t)window;
+// Gives the parent the focus if the attached window had it.
+- (void)returnFocusFromWindow:(xcb_window_t)window toParent:(xcb_window_t)parent;
+// The window stops hanging from its parent and is left as it is, mapped
+// where it is, for the caller to show some other way.
+- (void)releaseAttachedWindow:(xcb_window_t)window;
+// YES when the window carries this controller's role but names no parent.
+- (BOOL)carriesRoleWithoutParent:(xcb_window_t)window;
 
 @end

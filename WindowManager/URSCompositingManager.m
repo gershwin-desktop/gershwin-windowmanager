@@ -17,6 +17,7 @@
 #import "URSShadowOverrides.h"
 #import "URSProfiler.h"
 #import "URSHoldLastFrameEffect.h"
+#import "URSFlipSideGeometry.h"
 #import "XCBScreen.h"
 #import <xcb/xcb.h>
 #import <xcb/composite.h>
@@ -339,6 +340,12 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 @property (strong, nonatomic) NSMutableSet<NSNumber *> *inputOnlyWindows;
 // Frame window -> @[URSShapePath, client x, client y] of its client's outline
 @property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSArray *> *shapePaths;
+// Flip side window -> the frame whose back shows it (0 once detached), and
+// the other way round; see setFlipSideWindow:ofFrame:.
+@property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSNumber *> *flipSideFrames;
+@property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSNumber *> *frameFlipSides;
+// Window -> what to run on its first content (performWhenWindowHasContent:).
+@property (strong, nonatomic) NSMutableDictionary<NSNumber *, dispatch_block_t> *contentHandlers;
 @property (assign, nonatomic) xcb_render_pictformat_t a8Format;
 // While a window is painted: the clip it is painted with (window-local) and
 // where that is on the screen, so an outlined window can split its paint
@@ -423,6 +430,9 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         _shadowOverrides = [[URSShadowOverrides alloc] init];
         _inputOnlyWindows = [[NSMutableSet alloc] init];
         _shapePaths = [[NSMutableDictionary alloc] init];
+        _flipSideFrames = [[NSMutableDictionary alloc] init];
+        _frameFlipSides = [[NSMutableDictionary alloc] init];
+        _contentHandlers = [[NSMutableDictionary alloc] init];
 
         // OPTIMIZATION: Initialize MIT-SHM (will be checked during extension query)
         _shmAvailable = NO;
@@ -1632,7 +1642,9 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         return;
 
     BOOL wantBypass = NO;
-    if (self.bypassCompositorAtom != XCB_NONE) {
+    // A flip side is seen only through its picture on a frame's back; drawn
+    // straight to the screen it would have none and stand there as itself.
+    if (self.bypassCompositorAtom != XCB_NONE && self.flipSideFrames[@(windowId)] == nil) {
         xcb_get_property_cookie_t prop_cookie =
             xcb_get_property(conn, 0, windowId,
                              self.bypassCompositorAtom, XCB_ATOM_CARDINAL, 0, 1);
@@ -1987,6 +1999,9 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     // usually reuses the id of the Dock panel or notification overlay that
     // was shadowless before it.
     [self.shadowOverrides forgetWindow:window];
+    if (destroyed) {
+        [self forgetFlipSideOfDestroyedWindow:window];
+    }
 
     NSArray<NSNumber *> *group = [self trackedWindowGroupForWindow:window destroyed:destroyed];
     if ([group count] == 0) {
@@ -2534,8 +2549,10 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         if (cw.parentWindowId != self.rootWindow) {
             return;
         }
-        // Create shadow for newly mapped window
-        if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE) {
+        // Create shadow for newly mapped window; a flip side is never painted
+        // as a window, so it never shows one.
+        if (cw.shadowPicture == XCB_NONE && self.argbFormat != XCB_NONE &&
+            self.flipSideFrames[@(windowId)] == nil) {
             [self createShadowForWindow:cw];
         }
         // A window appearing changes only the pixels under its own extents.
@@ -2630,6 +2647,13 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     [self.connection noteClientContentDamage:windowId area:area];
 
     URSCompositeWindow *cw = [self findCWindow:windowId];
+
+    NSNumber *flipSideFrame = self.flipSideFrames[@(windowId)];
+    if (flipSideFrame != nil && cw != nil && cw.damage != XCB_NONE) {
+        [self repairFlipSide:cw ofFrame:[flipSideFrame unsignedIntValue]];
+        URS_PROFILE_END(damageNotify);
+        return;
+    }
 
     if (cw) {
         if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != self.rootWindow) {
@@ -3613,8 +3637,14 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
 }
 
 - (void)playEffect:(id<URSWindowEffect>)effect onWindow:(xcb_window_t)windowId {
+    [self playEffect:effect onWindow:windowId completion:nil];
+}
+
+- (BOOL)playEffect:(id<URSWindowEffect>)effect
+          onWindow:(xcb_window_t)windowId
+        completion:(dispatch_block_t)completion {
     if (!self.compositingActive || windowId == XCB_NONE) {
-        return;
+        return NO;
     }
     URSCompositeWindow *cw = [self findCWindow:windowId];
     // A window that is already animating (restored from the Dock, just born)
@@ -3628,7 +3658,7 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     BOOL replaces = cw.effect != nil && mayReplace;
     if (!cw || !cw.viewable || (cw.animating && !replaces) ||
         (cw.heldEffect && !mayReplace)) {
-        return;
+        return NO;
     }
     if (!cw.animating) {
         self.activeAnimations += 1;
@@ -3642,9 +3672,13 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     cw.effect = effect;
     cw.lastEffectPaint = 0;
     cw.heldEffect = nil;
+    // Also when replacing: the replaced effect never ends, so what was to
+    // follow it must not run when this one does.
+    cw.animationCompletion = completion;
 
     [self startAnimationTimerIfNeeded];
     [self scheduleComposite];
+    return YES;
 }
 
 - (void)setKeepsContentAfterUnmap:(BOOL)keep forWindow:(xcb_window_t)windowId {
@@ -3695,6 +3729,105 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
     if (cw && cw.animating && cw.viewable) {
         [self captureCloseSnapshotForWindow:cw];
     }
+}
+
+#pragma mark - Flip side
+
+- (void)setFlipSideWindow:(xcb_window_t)windowId ofFrame:(xcb_window_t)frameId {
+    if (!self.compositingActive || windowId == XCB_NONE || frameId == XCB_NONE) {
+        return;
+    }
+    self.flipSideFrames[@(windowId)] = @(frameId);
+    self.frameFlipSides[@(frameId)] = @(windowId);
+    URSCompositeWindow *side = [self findCWindow:windowId];
+    if (side) {
+        // It may have asked to bypass the compositor before it was known as
+        // a flip side.
+        [self updateBypassCompositorForWindow:windowId];
+        if (side.shadowPicture != XCB_NONE) {
+            [self damageWindowArea:side];
+            [self discardShadowForWindow:side];
+        }
+    }
+    URSCompositeWindow *frame = [self findCWindow:frameId];
+    if (frame) {
+        [self damageWindowArea:frame];
+    }
+}
+
+- (void)detachFlipSideWindow:(xcb_window_t)windowId {
+    NSNumber *frameId = self.flipSideFrames[@(windowId)];
+    if (frameId == nil || [frameId unsignedIntValue] == XCB_NONE) {
+        return;
+    }
+    if ([self.frameFlipSides[frameId] unsignedIntValue] == windowId) {
+        [self.frameFlipSides removeObjectForKey:frameId];
+    }
+    self.flipSideFrames[@(windowId)] = @(XCB_NONE);
+    URSCompositeWindow *frame = [self findCWindow:[frameId unsignedIntValue]];
+    if (frame) {
+        [self damageWindowArea:frame];
+    }
+}
+
+- (void)forgetFlipSideWindow:(xcb_window_t)windowId {
+    [self detachFlipSideWindow:windowId];
+    [self.flipSideFrames removeObjectForKey:@(windowId)];
+    [self.contentHandlers removeObjectForKey:@(windowId)];
+}
+
+- (void)releaseFlipSideWindow:(xcb_window_t)windowId {
+    [self forgetFlipSideWindow:windowId];
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (cw) {
+        // A bypass it asked for was ignored while it was a flip side.
+        [self updateBypassCompositorForWindow:windowId];
+        [self damageWindowArea:cw];
+    }
+}
+
+// Both ids are free for reuse by unrelated windows once the window is gone.
+- (void)forgetFlipSideOfDestroyedWindow:(xcb_window_t)windowId {
+    [self forgetFlipSideWindow:windowId];
+    NSNumber *side = self.frameFlipSides[@(windowId)];
+    if (side != nil) {
+        [self.frameFlipSides removeObjectForKey:@(windowId)];
+        self.flipSideFrames[side] = @(XCB_NONE);
+    }
+}
+
+- (void)performWhenWindowHasContent:(xcb_window_t)windowId block:(dispatch_block_t)block {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (cw && cw.viewable && cw.damaged) {
+        block();
+        return;
+    }
+    self.contentHandlers[@(windowId)] = [block copy];
+}
+
+- (void)windowHasContent:(xcb_window_t)windowId {
+    dispatch_block_t handler = self.contentHandlers[@(windowId)];
+    if (handler) {
+        [self.contentHandlers removeObjectForKey:@(windowId)];
+        handler();
+    }
+}
+
+// The flip side's own picture is never painted, so its damage only matters
+// where its frame shows its back at rest; during a turn the turn repaints
+// its whole reach every frame anyway.  The damage is drained either way: a
+// NON_EMPTY damage object reports nothing more until it is.
+- (void)repairFlipSide:(URSCompositeWindow *)side ofFrame:(xcb_window_t)frameId {
+    URSCompositeWindow *frame = frameId != XCB_NONE ? [self findCWindow:frameId] : nil;
+    if (frame.heldEffect != nil) {
+        [self repairWindow:side];
+    } else {
+        if (side.damage != XCB_NONE) {
+            xcb_damage_subtract([self.connection connection], side.damage, XCB_NONE, XCB_NONE);
+        }
+        side.damaged = YES;
+    }
+    [self windowHasContent:side.windowId];
 }
 
 static inline NSRect URSWindowRectOf(URSCompositeWindow *cw) {
@@ -4085,6 +4218,11 @@ static const double URSProjectiveEdgeMargin = 0.25;
     NSRect window = NSMakeRect(0.0, 0.0, (double)cw.width + 2.0 * cw.borderWidth,
                                (double)cw.height + 2.0 * cw.borderWidth);
     NSRect face = URSProjectiveMatrixMapRectBounds(projection->toScreen, window);
+    URSCompositeWindow *side = projection->backFace ? [self flipSideOnBackOfWindow:cw] : nil;
+    if (side) {
+        [self paintFlipSide:side onBackOfWindow:cw projection:projection clip:clip];
+        return;
+    }
     xcb_render_picture_t source = cw.picture;
     xcb_render_picture_t mask = XCB_NONE;
     if (projection->backFace) {
@@ -4100,6 +4238,76 @@ static const double URSProjectiveEdgeMargin = 0.25;
         xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0 a:projection->shading];
         [self compositeProjectedSource:veil mask:cw.picture transformed:cw.picture
                            pictureSize:window.size toPicture:projection->toFace area:face
+                              ofWindow:cw clip:clip];
+        xcb_render_free_picture(conn, veil);
+    }
+}
+
+// The flip side shown on the window's back, with a picture to paint, or nil
+// when the back is the plain panel.
+- (URSCompositeWindow *)flipSideOnBackOfWindow:(URSCompositeWindow *)cw {
+    NSNumber *sideId = self.frameFlipSides[@(cw.windowId)];
+    URSCompositeWindow *side = sideId != nil ? [self findCWindow:[sideId unsignedIntValue]] : nil;
+    if (!side || !side.viewable || !side.redirected) {
+        return nil;
+    }
+    [self ensurePictureOfWindow:side];
+    return side.picture != XCB_NONE ? side : nil;
+}
+
+// The back with the flip side on it: the panel, the front's titlebar strip
+// on top so the window still reads as itself and its buttons are drawn
+// where the real ones are, the flip side in the client area, all in the
+// window's plane, then shaded as the face turns away.
+- (void)paintFlipSide:(URSCompositeWindow *)side
+       onBackOfWindow:(URSCompositeWindow *)cw
+           projection:(const URSWindowProjection *)projection
+                 clip:(xcb_xfixes_region_t)clip {
+    xcb_connection_t *conn = [self.connection connection];
+    NSSize frameSize = NSMakeSize((double)cw.width + 2.0 * cw.borderWidth,
+                                  (double)cw.height + 2.0 * cw.borderWidth);
+    NSRect window = NSMakeRect(0.0, 0.0, frameSize.width, frameSize.height);
+    NSRect face = URSProjectiveMatrixMapRectBounds(projection->toScreen, window);
+    // Both pictures start inside their windows' borders.
+    NSPoint offset = NSMakePoint((double)(side.x + side.borderWidth) - (double)(cw.x + cw.borderWidth),
+                                 (double)(side.y + side.borderWidth) - (double)(cw.y + cw.borderWidth));
+    URSFlipSideGeometry *geometry =
+        [[URSFlipSideGeometry alloc] initWithFrameSize:frameSize
+                                          clientOffset:offset
+                                          flipSideSize:NSMakeSize(side.width, side.height)];
+
+    // The panel is still the back under the frame's edges and corners.
+    xcb_render_picture_t panel = [self createSolidPicture:URSWindowBackFaceGrey
+                                                        g:URSWindowBackFaceGrey
+                                                        b:URSWindowBackFaceGrey
+                                                        a:1.0];
+    [self compositeProjectedSource:panel mask:cw.picture transformed:cw.picture pictureSize:frameSize
+                         toPicture:projection->toFace area:face ofWindow:cw clip:clip];
+    xcb_render_free_picture(conn, panel);
+
+    // Restricted to the strip by its size: a perspective composite is cut
+    // to the pixels that land inside the picture size it is given.  At rest
+    // (affine) the edge pixel row below the strip is covered by the flip
+    // side painted next.
+    NSRect strip = [geometry titlebarStrip];
+    if (!NSIsEmptyRect(strip)) {
+        [self compositeProjectedSource:cw.picture mask:XCB_NONE transformed:cw.picture
+                           pictureSize:strip.size toPicture:projection->toFace
+                                  area:URSProjectiveMatrixMapRectBounds(projection->toScreen, strip)
+                              ofWindow:cw clip:clip];
+    }
+
+    [self compositeProjectedSource:side.picture mask:XCB_NONE transformed:side.picture
+                       pictureSize:[geometry flipSideSize]
+                         toPicture:[geometry flipSideMatrixForFaceMatrix:projection->toFace]
+                              area:URSProjectiveMatrixMapRectBounds(projection->toScreen,
+                                                                    [geometry flipSideRect])
+                          ofWindow:cw clip:clip];
+
+    if (projection->shading > 0.001) {
+        xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0 a:projection->shading];
+        [self compositeProjectedSource:veil mask:cw.picture transformed:cw.picture
+                           pictureSize:frameSize toPicture:projection->toFace area:face
                               ofWindow:cw clip:clip];
         xcb_render_free_picture(conn, veil);
     }
@@ -4571,6 +4779,10 @@ static const double URSProjectiveEdgeMargin = 0.25;
         // Only paint top-level windows (root children). Child windows are
         // composited via IncludeInferiors on their parent.
         if (cw.parentWindowId != XCB_NONE && cw.parentWindowId != rootWindow) {
+            continue;
+        }
+        // Seen only on its frame's back (paintProjectedWindow:).
+        if (self.flipSideFrames[key] != nil) {
             continue;
         }
         [paintList addObject:cw];
@@ -5779,24 +5991,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     }
 #endif
 
-    // OPTIMIZATION: Lazy picture creation - only create when first painting
-    // NOTE: The underlying NameWindowPixmap is automatically updated by X server on damage
-    // so we only need to recreate when pictureValid is false (size change, etc.)
-    if ((!cw.pictureValid || cw.needsPictureCreation) && !cw.closeAnimating) {
-        if (cw.picture != XCB_NONE) {
-            xcb_render_free_picture(conn, cw.picture);
-            cw.picture = XCB_NONE;
-        }
-        cw.picture = [self getWindowPicture:cw];
-        if (cw.picture != XCB_NONE) {
-            cw.pictureValid = YES;
-            cw.needsPictureCreation = NO;
-            // Record the window dimensions at capture time so we can detect
-            // a size mismatch and apply a scale transform during live resize.
-            cw.pictureWidth  = cw.width  + 2 * cw.borderWidth;
-            cw.pictureHeight = cw.height + 2 * cw.borderWidth;
-        }
-    }
+    [self ensurePictureOfWindow:cw];
 
     BOOL isMenuApp = URSWindowLooksLikeMenuBar(cw.y, cw.width, cw.height,
                                                self.screenWidth);
@@ -6031,6 +6226,27 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
 
 // Note: Child window painting is handled automatically by IncludeInferiors
 // No need for explicit recursive painting
+
+// OPTIMIZATION: Lazy picture creation - only create when first painting
+// NOTE: The underlying NameWindowPixmap is automatically updated by X server on damage
+// so we only need to recreate when pictureValid is false (size change, etc.)
+- (void)ensurePictureOfWindow:(URSCompositeWindow *)cw {
+    if ((!cw.pictureValid || cw.needsPictureCreation) && !cw.closeAnimating) {
+        if (cw.picture != XCB_NONE) {
+            xcb_render_free_picture([self.connection connection], cw.picture);
+            cw.picture = XCB_NONE;
+        }
+        cw.picture = [self getWindowPicture:cw];
+        if (cw.picture != XCB_NONE) {
+            cw.pictureValid = YES;
+            cw.needsPictureCreation = NO;
+            // Record the window dimensions at capture time so we can detect
+            // a size mismatch and apply a scale transform during live resize.
+            cw.pictureWidth  = cw.width  + 2 * cw.borderWidth;
+            cw.pictureHeight = cw.height + 2 * cw.borderWidth;
+        }
+    }
+}
 
 /* Freeze the window's current content (frame + client, via IncludeInferiors)
  * into a fresh pixmap so a close animation can keep painting it after the app

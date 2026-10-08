@@ -55,6 +55,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSWindowSwitcherOverlay.m \
 		URSFlowLayout.m \
 		URSDeckLayout.m \
+		URSSourceDirectory.m \
 		URSWindowFlowController.m \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \
@@ -70,6 +71,10 @@ $(APP_NAME)_OBJC_FILES = \
 		URSFlipGeometry.m \
 		URSWindowFlipEffect.m \
 		URSCompositingManager+WindowFlip.m \
+		URSFlipSideGeometry.m \
+		URSFlipSidePlan.m \
+		URSFlipSideOrphans.m \
+		URSFlipSideController.m \
 		GSThemeTitleBar.m \
 		xcb/XCBConnection.m \
 		xcb/XCBWindow.m \

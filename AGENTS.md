@@ -30,6 +30,8 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
 - Window overview layout: `gnustep-tests test-overview` (headless).
 - Alt-Tab flow layout: `gnustep-tests test-flowswitch` (headless).
 - Alt-Tab deck layout: `gnustep-tests test-deck` (headless).
+- Application source directory lookup (APP_NAME): `gnustep-tests test-sourcedir` (headless).
+- Flip side layout, plan and orphans: `gnustep-tests test-flipside` (headless).
 - Show Desktop layout: `gnustep-tests test-showdesktop` (headless).
 - Wobbly window model: `gnustep-tests test-wobbly` (headless).
 - `test/` is a manual app (KillTest.app), not part of the automated suite.
@@ -80,6 +82,18 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
   (gershwin-developer DriveUI) read it; change both sides together.
 - Hit testing and the property share `+[URSThemeIntegration buttonRect:...]`,
   so a click lands where the property says.
+
+## Flip side terminal (cross-repo contract)
+
+- The WM starts gershwin-terminal as `Terminal -FlipSideDirectory <dir>
+  -FlipSideParent <decimal client xid>`; its one window carries
+  `WM_WINDOW_ROLE` `flipside` and `WM_TRANSIENT_FOR` = that client, set
+  after the map request (the WM holds the map until they arrive). The WM
+  rewrites `WM_TRANSIENT_FOR` itself when the terminal outlives its window
+  (deleted) and goes back onto a restarted application's window (the new
+  client), and ends an orphaned terminal with SIGTERM, since its borderless
+  window offers no `WM_DELETE_WINDOW`. Change both sides together; see
+  ARCHITECTURE.md "Flip side".
 
 ## Logging / error-noise conventions
 

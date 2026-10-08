@@ -14,6 +14,8 @@
 extern NSString * const URSWindowRolePropertyName;
 extern NSString * const URSWindowRoleSheet;
 extern NSString * const URSWindowRoleDrawer;
+// A terminal shown on the back of a turned window (URSFlipSideController).
+extern NSString * const URSWindowRoleFlipSide;
 
 @interface URSWindowRole : NSObject
 

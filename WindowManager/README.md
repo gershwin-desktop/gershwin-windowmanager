@@ -121,6 +121,24 @@ starts.
   choosing it again turns it back. Only the picture turns: the window
   stays where it is and keeps working. Needs compositing. Takes effect
   the next time the menu is opened.
+- `URSWindowFlipSideTerminal` (default `YES`): the back of a window turned
+  over with "Flip Window" shows a terminal in the source directory of the
+  window's application, under the window's own titlebar, which stays
+  usable. The directory is the one whose GNUmakefile declares the
+  application's name as `APP_NAME` under `/Developer/Library/Sources`,
+  subdirectories included; no plist is needed. The first turn starts Terminal and waits
+  for its window (at most 10 seconds); the shell is then there on every
+  turn, and typing `exit` turns the window back to its front. With the back
+  shown, keys and clicks over the client area go to the terminal. The
+  terminal outlives its window: when the window goes (its application
+  quits, is killed or closes it), the terminal stays where it was as a
+  window of its own, with a titlebar, in front and focused; its close
+  button ends it. When the application is started again, its next window
+  takes the terminal back onto its back (the one left longest, if there
+  are several), with the shell as it was. Applications without such a directory turn to
+  the plain back. Read at every flip; set to `NO` to always get the plain
+  back (a terminal already running for a window then quits):
+  `defaults write WindowManager URSWindowFlipSideTerminal NO`.
 
 **Note:** The display number `:1` is what you set for Xephyr. It cannot run on the same display where X11 is already running.
 

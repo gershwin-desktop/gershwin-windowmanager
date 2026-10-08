@@ -11,9 +11,14 @@
 #import "XCBConnection.h"
 #import "XCBFrame.h"
 
+@class URSFlipSideController;
+
 @interface URSSnappingMenuController : NSObject
 
 @property (weak, nonatomic) XCBConnection *connection;
+// "Flip Window" turns the window through it, so the back can show its flip
+// side.
+@property (weak, nonatomic) URSFlipSideController *flipSideController;
 @property (strong, nonatomic) NSMenu *activeMenu;
 
 - (instancetype)initWithConnection:(XCBConnection *)connection;

@@ -9,6 +9,7 @@
 NSString * const URSWindowRolePropertyName = @"WM_WINDOW_ROLE";
 NSString * const URSWindowRoleSheet = @"sheet";
 NSString * const URSWindowRoleDrawer = @"drawer";
+NSString * const URSWindowRoleFlipSide = @"flipside";
 
 @implementation URSWindowRole
 

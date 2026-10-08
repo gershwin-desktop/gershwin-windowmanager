@@ -26,9 +26,10 @@
 #import "URSOverviewController.h"
 #import "URSShowDesktopController.h"
 #import "URSSheetController.h"
+#import "URSFlipSideController.h"
 #import "URSWobblyWindowsController.h"
 
-@interface URSHybridEventHandler : NSObject <NSApplicationDelegate, RunLoopEvents>
+@interface URSHybridEventHandler : NSObject <NSApplicationDelegate, RunLoopEvents, URSFlipSideFraming>
 
 // XCB Integration
 @property (strong, nonatomic) XCBConnection *connection;
@@ -64,6 +65,8 @@
 // Sheets and drawers: windows that hang from a parent instead of being
 // framed.
 @property (strong, nonatomic) NSArray<URSAttachmentController *> *attachmentControllers;
+// One of attachmentControllers; also what "Flip Window" goes through.
+@property (strong, nonatomic) URSFlipSideController *flipSideController;
 
 // Window manager lifecycle
 - (BOOL)registerAsWindowManager;

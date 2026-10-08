@@ -157,7 +157,11 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     [connection setIsWindowsMapUpdated:NO];
     
     ICCCMService* icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-    xcb_size_hints_t *sizeHints = [icccmService wmNormalHintsForWindow:aClientWindow];
+    // A client framed as an ordinary window against its hints is held to
+    // none of them: they pin the size its borderless window had.
+    xcb_size_hints_t *sizeHints = [aClientWindow framedAsOrdinary]
+                                      ? NULL
+                                      : [icccmService wmNormalHintsForWindow:aClientWindow];
 
     /* A client need not set WM_NORMAL_HINTS, and then there is nothing to
      * read: -wmNormalHintsForWindow: hands back NULL for it.  No hints means

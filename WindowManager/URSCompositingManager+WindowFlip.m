@@ -17,8 +17,12 @@ static const double URSWindowFlipBack = 180.0;
 }
 
 - (void)flipWindow:(xcb_window_t)frameId {
+    [self flipWindow:frameId completion:nil];
+}
+
+- (BOOL)flipWindow:(xcb_window_t)frameId completion:(dispatch_block_t)completion {
     if (![self canFlipWindows]) {
-        return;
+        return NO;
     }
     // The compositor, not a table here, knows whether the window is turned:
     // it forgets that when the window goes, so a reused window id can never
@@ -32,10 +36,21 @@ static const double URSWindowFlipBack = 180.0;
         target = [turn toAngle] == URSWindowFlipBack ? URSWindowFlipFront : URSWindowFlipBack;
     }
     if (angle == target) {
-        return;
+        return NO;
     }
-    [self playEffect:[[URSWindowFlipEffect alloc] initFromAngle:angle toAngle:target]
-            onWindow:frameId];
+    return [self playEffect:[[URSWindowFlipEffect alloc] initFromAngle:angle toAngle:target]
+                   onWindow:frameId
+                 completion:completion];
+}
+
+- (BOOL)showsBackOfWindow:(xcb_window_t)frameId {
+    id<URSWindowEffect> current = [self effectOnWindow:frameId];
+    return [current isKindOfClass:[URSWindowFlipEffect class]] &&
+           [(URSWindowFlipEffect *)current toAngle] == URSWindowFlipBack;
+}
+
+- (BOOL)restsOnBackOfWindow:(xcb_window_t)frameId {
+    return [self showsBackOfWindow:frameId] && ![self windowIsAnimating:frameId];
 }
 
 @end

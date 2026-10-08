@@ -60,6 +60,11 @@
     return _registry;
 }
 
+- (XCBConnection *)connection
+{
+    return _connection;
+}
+
 #pragma mark - What subclasses decide
 
 - (NSString *)role
@@ -83,9 +88,28 @@
     return YES;
 }
 
+- (BOOL)stacksAboveParentForWindow:(xcb_window_t)window
+{
+    return [self stacksAboveParent];
+}
+
 - (BOOL)takesParentFocus
 {
     return NO;
+}
+
+- (BOOL)takesParentFocusOfWindow:(xcb_window_t)window
+{
+    return [self takesParentFocus];
+}
+
+- (BOOL)slidesWindow:(xcb_window_t)window
+{
+    return YES;
+}
+
+- (void)willShowAttachedWindow:(xcb_window_t)window parent:(xcb_window_t)parent
+{
 }
 
 - (URSAttachmentEdge)slideEdgeOfWindow:(xcb_window_t)window
@@ -129,6 +153,19 @@
 // window it is and WM_TRANSIENT_FOR alone is any dialog or child window.
 - (xcb_window_t)markedParentOfWindow:(xcb_window_t)window
 {
+    BOOL hasRole = NO;
+    return [self markedParentOfWindow:window hasRole:&hasRole];
+}
+
+- (BOOL)carriesRoleWithoutParent:(xcb_window_t)window
+{
+    BOOL hasRole = NO;
+    return [self markedParentOfWindow:window hasRole:&hasRole] == XCB_NONE && hasRole;
+}
+
+- (xcb_window_t)markedParentOfWindow:(xcb_window_t)window hasRole:(BOOL *)hasRole
+{
+    *hasRole = NO;
     if (_roleAtom == XCB_NONE) {
         return XCB_NONE;
     }
@@ -144,8 +181,8 @@
     NSString *role = mark ? [URSWindowRole roleFromPropertyBytes:xcb_get_property_value(mark)
                                                           length:xcb_get_property_value_length(mark)]
                           : nil;
-    if ([role isEqualToString:[self role]] &&
-        transient && xcb_get_property_value_length(transient) >= 4) {
+    *hasRole = [role isEqualToString:[self role]];
+    if (*hasRole && transient && xcb_get_property_value_length(transient) >= 4) {
         parent = *(xcb_window_t *)xcb_get_property_value(transient);
     }
     free(mark);
@@ -240,7 +277,8 @@
             XCB_CONFIG_WINDOW_STACK_MODE;
     values[n++] = 0;
     values[n++] = frameWindow;
-    values[n++] = [self stacksAboveParent] ? XCB_STACK_MODE_ABOVE : XCB_STACK_MODE_BELOW;
+    values[n++] = [self stacksAboveParentForWindow:window] ? XCB_STACK_MODE_ABOVE
+                                                           : XCB_STACK_MODE_BELOW;
     xcb_configure_window([_connection connection], window, mask, values);
     _placedRects[@(window)] = [NSValue valueWithRect:r];
 }
@@ -261,7 +299,8 @@
     }
     // The window manager's own restacks (raising an application's
     // undecorated windows with it) must leave it there too.
-    [[_connection windowForXCBId:window] setStackedBelowWindow:[self stacksAboveParent] ? nil : frame];
+    [[_connection windowForXCBId:window] setStackedBelowWindow:
+        [self stacksAboveParentForWindow:window] ? nil : frame];
     [self configureWindow:window toRect:r currentSize:current.size parentFrame:[frame window]];
     [_connection flush];
 }
@@ -358,6 +397,7 @@
     [attached updatePid];
 
     [_registry attachWindow:window toParent:parent exclusive:[self attachesExclusively]];
+    [self willShowAttachedWindow:window parent:parent];
     [self applyOutlineOfWindow:window];
     [self placeWindow:window];
     [_connection mapWindow:attached];
@@ -406,6 +446,17 @@
     return YES;
 }
 
+- (BOOL)attachMarkedWindow:(xcb_window_t)window
+{
+    xcb_window_t parent = [self attachableParentOfWindow:window];
+    if (parent == XCB_NONE) {
+        return NO;
+    }
+    XCBScreen *screen = [[_connection screens] firstObject];
+    [self attachWindow:window toParent:parent mapStackParent:[[screen rootWindow] window]];
+    return YES;
+}
+
 - (BOOL)isAttachedKind:(xcb_window_t)window
 {
     return [self markedParentOfWindow:window] != XCB_NONE;
@@ -438,7 +489,7 @@
     [self attachWindow:window toParent:parent mapStackParent:[[screen rootWindow] window]];
     // No MapNotify follows for a window that is mapped already, and the
     // slide-out after its unmap needs the picture kept.
-    if ([self.compositingManager compositingActive]) {
+    if ([self.compositingManager compositingActive] && [self slidesWindow:window]) {
         [self.compositingManager setKeepsContentAfterUnmap:YES forWindow:window];
     }
     return YES;
@@ -502,11 +553,9 @@
 
 - (BOOL)passFocusToAttachedWindowOfWindow:(xcb_window_t)window
 {
-    if (![self takesParentFocus]) {
-        return NO;
-    }
     xcb_window_t attached = [[[self attachedWindowsOfWindow:window] firstObject] unsignedIntValue];
-    if (attached == XCB_NONE || [_registry isWindowHiddenWithParent:attached]) {
+    if (attached == XCB_NONE || ![self takesParentFocusOfWindow:attached] ||
+        [_registry isWindowHiddenWithParent:attached]) {
         return NO;
     }
     [[_connection windowForXCBId:attached] focus];
@@ -545,7 +594,7 @@
         return;
     }
     if ([_registry parentOfWindow:window] == XCB_NONE ||
-        ![self.compositingManager compositingActive]) {
+        ![self.compositingManager compositingActive] || ![self slidesWindow:window]) {
         return;
     }
     [self.compositingManager setKeepsContentAfterUnmap:YES forWindow:window];
@@ -564,11 +613,12 @@
         }
         xcb_window_t parent = [_registry parentOfWindow:window];
         URSAttachmentEdge edge = [self slideEdgeOfWindow:window];
+        BOOL slides = [self slidesWindow:window];
         [_registry detachWindow:window];
         [self forgetAttachmentOfWindow:window];
         [[_connection windowForXCBId:window] setStackedBelowWindow:nil];
         [self returnFocusFromWindow:window toParent:parent];
-        if ([self.compositingManager compositingActive]) {
+        if (slides && [self.compositingManager compositingActive]) {
             URSAttachmentSlideEffect *slideOut = [[URSAttachmentSlideEffect alloc]
                                                      initAppearing:NO outward:edge];
             [self.compositingManager playEffect:slideOut onWindow:window];
@@ -621,6 +671,20 @@
     }
 }
 
+- (void)releaseAttachedWindow:(xcb_window_t)window
+{
+    if ([_registry parentOfWindow:window] == XCB_NONE) {
+        return;
+    }
+    [_registry detachWindow:window];
+    [self forgetAttachmentOfWindow:window];
+    [[_connection windowForXCBId:window] setStackedBelowWindow:nil];
+    if (_placedRects[@(window)] != nil && [self.compositingManager compositingActive]) {
+        [self.compositingManager setShapePath:nil clientOriginX:0 y:0 forWindow:window];
+    }
+    [_placedRects removeObjectForKey:@(window)];
+}
+
 - (void)windowDestroyed:(xcb_window_t)window
 {
     if ([_registry parentOfWindow:window] != XCB_NONE) {
@@ -646,7 +710,8 @@
         // the frame has some other window below it, which says nothing; the
         // frame's own ConfigureNotify puts it back.
         XCBFrame *frame = [self frameOfClient:parent];
-        if ([self stacksAboveParent] && frame && event->above_sibling != [frame window]) {
+        if ([self stacksAboveParentForWindow:event->window] && frame &&
+            event->above_sibling != [frame window]) {
             [self placeWindow:event->window];
         }
         return;

@@ -214,8 +214,7 @@
     if (clientWindow) {
         // If close is not supported or the client does not implement WM_DELETE_WINDOW,
         // do not render any control buttons (alerts/sheets and similar transient dialogs).
-        ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:[self connection]];
-        BOOL supportsDelete = [icccm hasProtocol:[icccm WMDeleteWindow] forWindow:clientWindow];
+        BOOL supportsDelete = [clientWindow supportsCloseRequest];
 
         if (![clientWindow canClose] || !supportsDelete) {
             //NSLog(@"GSThemeTitleBar: Client %u reports canClose=NO or lacks WM_DELETE_WINDOW - omitting control buttons", [clientWindow window]);

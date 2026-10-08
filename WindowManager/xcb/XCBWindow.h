@@ -143,7 +143,19 @@ typedef NS_ENUM(NSInteger, WindowState)
 // respond to WM_DELETE_WINDOW within the timeout.
 @property (nonatomic, strong) NSTimer *closeTimer;
 
+// A client the window manager shows as an ordinary window although its
+// hints ask for no decoration and a fixed size (an orphaned flip side, see
+// URSFlipSideController): it is framed, and may be resized, whatever they
+// say.  Set before it is framed.
+@property (nonatomic, assign) BOOL framedAsOrdinary;
+// Run by -close instead of sending WM_DELETE_WINDOW, for a client that
+// offers no close of its own; the window manager ends it some other way.
+@property (nonatomic, copy) void (^closeHandler)(void);
+
 - (void) cancelCloseTimer;
+// YES when -close can ask the client to close: it takes WM_DELETE_WINDOW,
+// or the window manager closes it through closeHandler.
+- (BOOL) supportsCloseRequest;
 
 - (xcb_window_t) window;
 - (void) setWindow:(xcb_window_t) aWindow;
