@@ -4125,14 +4125,20 @@ static const double URSProjectiveEdgeMargin = 0.25;
 // (transformed, pictureSize big) sampled through toPicture.  Source and mask
 // origins are the area's window-local origin, so the map receives
 // window-local screen points and its entries stay small enough for 16.16
-// fixed point.  clip is the rootBuffer clip in force, restored afterwards.
+// fixed point; origin is where window-local (0, 0) lies on the screen: the
+// window itself, or the rect a presentation shows it in, so a presented
+// window's map only scales and never carries the distance it was moved.
+// fade (a solid alpha picture, or XCB_NONE) stands in for a missing mask so
+// a faded window fades all its layers.  clip is the rootBuffer clip in
+// force, restored afterwards.
 - (void)compositeProjectedSource:(xcb_render_picture_t)source
                             mask:(xcb_render_picture_t)mask
                      transformed:(xcb_render_picture_t)transformed
                      pictureSize:(NSSize)pictureSize
                        toPicture:(URSProjectiveMatrix)toPicture
                             area:(NSRect)area
-                        ofWindow:(URSCompositeWindow *)cw
+                          origin:(NSPoint)origin
+                            fade:(xcb_render_picture_t)fade
                             clip:(xcb_xfixes_region_t)clip {
     // One more pixel for the filtered edge.
     NSRect r = NSIntegralRect(NSInsetRect(area, -1.0, -1.0));
@@ -4142,6 +4148,11 @@ static const double URSProjectiveEdgeMargin = 0.25;
     xcb_connection_t *conn = [self.connection connection];
     int16_t x = (int16_t)NSMinX(r);
     int16_t y = (int16_t)NSMinY(r);
+    int16_t originX = (int16_t)lround(origin.x);
+    int16_t originY = (int16_t)lround(origin.y);
+    if (mask == XCB_NONE) {
+        mask = fade;
+    }
     xcb_xfixes_region_t inside = XCB_NONE;
     if (toPicture.m[2][0] != 0.0 || toPicture.m[2][1] != 0.0) {
         // pixman (0.44) samples garbage for a pixel whose perspective source
@@ -4154,8 +4165,8 @@ static const double URSProjectiveEdgeMargin = 0.25;
         NSUInteger count = URSProjectiveInsideSpans(toPicture, pictureSize, URSProjectiveEdgeMargin,
                                                     r, spans, capacity);
         for (NSUInteger i = 0; i < count; i++) {
-            rects[i] = (xcb_rectangle_t){ (int16_t)(cw.x + NSMinX(spans[i])),
-                                          (int16_t)(cw.y + NSMinY(spans[i])),
+            rects[i] = (xcb_rectangle_t){ (int16_t)(originX + NSMinX(spans[i])),
+                                          (int16_t)(originY + NSMinY(spans[i])),
                                           (uint16_t)NSWidth(spans[i]), 1 };
         }
         free(spans);
@@ -4173,7 +4184,7 @@ static const double URSProjectiveEdgeMargin = 0.25;
     }
     xcb_render_set_picture_transform(conn, transformed, URSRenderTransformFromMatrix(toPicture, r));
     xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER, source, mask, self.rootBuffer,
-                         x, y, x, y, (int16_t)(cw.x + x), (int16_t)(cw.y + y),
+                         x, y, x, y, (int16_t)(originX + x), (int16_t)(originY + y),
                          (uint16_t)NSWidth(r), (uint16_t)NSHeight(r));
     xcb_render_set_picture_transform(conn, transformed, URSIdentityTransform());
     if (inside != XCB_NONE) {
@@ -4185,13 +4196,19 @@ static const double URSProjectiveEdgeMargin = 0.25;
 // The window turned in depth: shadow first, in the same plane, then the
 // front (shaded as it turns away) or the back, both cut to the window's
 // outline by its own picture.  XRender divides by w itself, so the
-// perspective is exact, not approximated by triangles.  clip is the
-// rootBuffer clip in force (screen coordinates).
+// perspective is exact, not approximated by triangles.  origin is where the
+// projection's window-local (0, 0) is on the screen (see
+// compositeProjectedSource:); opacity fades it like any other window (hover
+// peek).  clip is the rootBuffer clip in force (screen coordinates).
 - (void)paintProjectedWindow:(URSCompositeWindow *)cw
                   projection:(const URSWindowProjection *)projection
+                      origin:(NSPoint)origin
+                     opacity:(double)opacity
                   withShadow:(BOOL)withShadow
                         clip:(xcb_xfixes_region_t)clip {
     xcb_connection_t *conn = [self.connection connection];
+    xcb_render_picture_t fade = opacity < 0.999
+        ? [self createSolidPicture:0.0 g:0.0 b:0.0 a:opacity] : XCB_NONE;
     if (withShadow) {
         // Filtered only while it is turned: at rest the shadow is copied
         // pixel for pixel, as everywhere else.
@@ -4208,7 +4225,8 @@ static const double URSProjectiveEdgeMargin = 0.25;
                            pictureSize:NSMakeSize(cw.shadowWidth, cw.shadowHeight)
                              toPicture:toShadow
                                   area:URSProjectiveMatrixMapRectBounds(projection->toScreen, shadowFace)
-                              ofWindow:cw
+                                origin:origin
+                                  fade:fade
                                   clip:clip];
         xcb_render_set_picture_filter(conn, cw.shadowPicture, strlen(nearest), nearest, 0, NULL);
     }
@@ -4220,26 +4238,33 @@ static const double URSProjectiveEdgeMargin = 0.25;
     NSRect face = URSProjectiveMatrixMapRectBounds(projection->toScreen, window);
     URSCompositeWindow *side = projection->backFace ? [self flipSideOnBackOfWindow:cw] : nil;
     if (side) {
-        [self paintFlipSide:side onBackOfWindow:cw projection:projection clip:clip];
-        return;
+        [self paintFlipSide:side onBackOfWindow:cw projection:projection origin:origin
+                    opacity:opacity fade:fade clip:clip];
+    } else {
+        xcb_render_picture_t source = cw.picture;
+        xcb_render_picture_t mask = XCB_NONE;
+        if (projection->backFace) {
+            // The window's picture is the mask here, so the fade goes into
+            // the (premultiplied) colour.
+            double grey = URSWindowBackFaceGrey * (1.0 - projection->shading) * opacity;
+            source = [self createSolidPicture:grey g:grey b:grey a:opacity];
+            mask = cw.picture;
+        }
+        [self compositeProjectedSource:source mask:mask transformed:cw.picture pictureSize:window.size
+                             toPicture:projection->toFace area:face origin:origin fade:fade clip:clip];
+        if (projection->backFace) {
+            xcb_render_free_picture(conn, source);
+        } else if (projection->shading > 0.001) {
+            xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0
+                                                               a:projection->shading * opacity];
+            [self compositeProjectedSource:veil mask:cw.picture transformed:cw.picture
+                               pictureSize:window.size toPicture:projection->toFace area:face
+                                    origin:origin fade:fade clip:clip];
+            xcb_render_free_picture(conn, veil);
+        }
     }
-    xcb_render_picture_t source = cw.picture;
-    xcb_render_picture_t mask = XCB_NONE;
-    if (projection->backFace) {
-        double grey = URSWindowBackFaceGrey * (1.0 - projection->shading);
-        source = [self createSolidPicture:grey g:grey b:grey a:1.0];
-        mask = cw.picture;
-    }
-    [self compositeProjectedSource:source mask:mask transformed:cw.picture pictureSize:window.size
-                         toPicture:projection->toFace area:face ofWindow:cw clip:clip];
-    if (projection->backFace) {
-        xcb_render_free_picture(conn, source);
-    } else if (projection->shading > 0.001) {
-        xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0 a:projection->shading];
-        [self compositeProjectedSource:veil mask:cw.picture transformed:cw.picture
-                           pictureSize:window.size toPicture:projection->toFace area:face
-                              ofWindow:cw clip:clip];
-        xcb_render_free_picture(conn, veil);
+    if (fade != XCB_NONE) {
+        xcb_render_free_picture(conn, fade);
     }
 }
 
@@ -4262,6 +4287,9 @@ static const double URSProjectiveEdgeMargin = 0.25;
 - (void)paintFlipSide:(URSCompositeWindow *)side
        onBackOfWindow:(URSCompositeWindow *)cw
            projection:(const URSWindowProjection *)projection
+               origin:(NSPoint)origin
+              opacity:(double)opacity
+                 fade:(xcb_render_picture_t)fade
                  clip:(xcb_xfixes_region_t)clip {
     xcb_connection_t *conn = [self.connection connection];
     NSSize frameSize = NSMakeSize((double)cw.width + 2.0 * cw.borderWidth,
@@ -4277,12 +4305,10 @@ static const double URSProjectiveEdgeMargin = 0.25;
                                           flipSideSize:NSMakeSize(side.width, side.height)];
 
     // The panel is still the back under the frame's edges and corners.
-    xcb_render_picture_t panel = [self createSolidPicture:URSWindowBackFaceGrey
-                                                        g:URSWindowBackFaceGrey
-                                                        b:URSWindowBackFaceGrey
-                                                        a:1.0];
+    double grey = URSWindowBackFaceGrey * opacity;
+    xcb_render_picture_t panel = [self createSolidPicture:grey g:grey b:grey a:opacity];
     [self compositeProjectedSource:panel mask:cw.picture transformed:cw.picture pictureSize:frameSize
-                         toPicture:projection->toFace area:face ofWindow:cw clip:clip];
+                         toPicture:projection->toFace area:face origin:origin fade:fade clip:clip];
     xcb_render_free_picture(conn, panel);
 
     // Restricted to the strip by its size: a perspective composite is cut
@@ -4294,7 +4320,7 @@ static const double URSProjectiveEdgeMargin = 0.25;
         [self compositeProjectedSource:cw.picture mask:XCB_NONE transformed:cw.picture
                            pictureSize:strip.size toPicture:projection->toFace
                                   area:URSProjectiveMatrixMapRectBounds(projection->toScreen, strip)
-                              ofWindow:cw clip:clip];
+                                origin:origin fade:fade clip:clip];
     }
 
     [self compositeProjectedSource:side.picture mask:XCB_NONE transformed:side.picture
@@ -4302,13 +4328,14 @@ static const double URSProjectiveEdgeMargin = 0.25;
                          toPicture:[geometry flipSideMatrixForFaceMatrix:projection->toFace]
                               area:URSProjectiveMatrixMapRectBounds(projection->toScreen,
                                                                     [geometry flipSideRect])
-                          ofWindow:cw clip:clip];
+                            origin:origin fade:fade clip:clip];
 
     if (projection->shading > 0.001) {
-        xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0 a:projection->shading];
+        xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0
+                                                           a:projection->shading * opacity];
         [self compositeProjectedSource:veil mask:cw.picture transformed:cw.picture
                            pictureSize:frameSize toPicture:projection->toFace area:face
-                              ofWindow:cw clip:clip];
+                                origin:origin fade:fade clip:clip];
         xcb_render_free_picture(conn, veil);
     }
 }
@@ -6008,16 +6035,35 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     // A window turned in depth, while turning or left turned over.  While it
     // turns its shadow turns with it; once held (at rest, e.g. on its back)
     // it lies where the window is, so the ordinary shadow below fits.
-    id<URSWindowEffect> turning = presented ? nil : (animating ? cw.effect : cw.heldEffect);
+    // A presentation (Alt-Tab, the overview, Show Desktop) shows the side the
+    // user was looking at, scaled into its rect like every other window: a
+    // window flying as its front would show a picture that was not on the
+    // screen.  A turn still running when the presentation takes the window
+    // shows where it will come to rest (its clock runs on and ends after the
+    // presentation); a turn back to the front holds nothing and shows the
+    // front.
+    id<URSWindowEffect> turning = animating ? cw.effect : cw.heldEffect;
+    if (presented) {
+        turning = !cw.animating ? cw.heldEffect
+            : ([cw.effect respondsToSelector:@selector(holdsFinalFrame)] && [cw.effect holdsFinalFrame]
+                   ? cw.effect : nil);
+    }
     BOOL turned = cw.picture != XCB_NONE &&
         [turning respondsToSelector:@selector(getProjection:atProgress:windowSize:)];
     if (turned) {
         double t = animating ? URSClampDouble((now - cw.animationStart) / cw.animationDuration, 0.0, 1.0)
                              : 1.0;
+        NSSize windowSize = NSMakeSize((double)cw.width + 2.0 * cw.borderWidth,
+                                       (double)cw.height + 2.0 * cw.borderWidth);
         URSWindowProjection projection;
-        if ([turning getProjection:&projection atProgress:t windowSize:NSMakeSize(destW, destH)]) {
+        if ([turning getProjection:&projection atProgress:t windowSize:windowSize] &&
+            (!presented || URSWindowProjectionScaledToSize(&projection, windowSize,
+                                                          NSMakeSize(floor(URSClampDouble(destW, 1.0, 65535.0)),
+                                                                     floor(URSClampDouble(destH, 1.0, 65535.0)))))) {
             [self paintProjectedWindow:cw
                             projection:&projection
+                                origin:NSMakePoint(llround(destX), llround(destY))
+                               opacity:opacity
                             withShadow:animating && cw.shadowPicture != XCB_NONE && !skipShadow &&
                                        cw.pictureValid
                                   clip:clipRegion];

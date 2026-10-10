@@ -41,7 +41,10 @@ extern NSString * const URSWindowFlipSideTerminalKey;
 - (XCBWindow *)frameWindowAsOrdinary:(xcb_window_t)window closeHandler:(void (^)(void))closeHandler;
 @end
 
-@interface URSFlipSideController : URSAttachmentController
+// While the back is shown, the terminal is what the user sees of the
+// window: a sheet of the terminal hangs from the window (see
+// URSAttachmentController host), and closing the window closes the terminal.
+@interface URSFlipSideController : URSAttachmentController <URSAttachmentHosting>
 
 @property (weak, nonatomic) id<URSFlipSideFraming> framer;
 
@@ -70,6 +73,13 @@ extern NSString * const URSWindowFlipSideTerminalKey;
 - (BOOL)isOrphanedFlipSide:(xcb_window_t)window;
 // The close handler of such a window: it ends the window's process.
 - (void (^)(void))closeHandlerForAdoptedOrphan:(xcb_window_t)window;
+
+// A close request for a client (its close button, the titlebar menu's
+// Close): YES when it went to the terminal shown on the client's back, which
+// is asked to close with WM_DELETE_WINDOW (and may ask the user first), or,
+// from a Terminal that does not take it, is ended.  When the terminal has
+// gone the window turns back to its front.
+- (BOOL)closeFlipSideInsteadOfClient:(xcb_window_t)client;
 
 // The terminals outlive the window manager; it only lets go of them.
 - (void)windowManagerWillExit;

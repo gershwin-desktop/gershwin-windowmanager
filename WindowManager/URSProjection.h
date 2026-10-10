@@ -54,3 +54,11 @@ typedef struct URSWindowProjection {
     // The back of the window is in view: a plain panel, not the content.
     BOOL backFace;
 } URSWindowProjection;
+
+// The same frame painted scaled from windowSize to paintSize, window-local
+// to the painted rect's top left: a presentation (Alt-Tab, the overview)
+// shows every window that way, and a window left turned over has to fly as
+// the side that is in view, not as its front.  NO when there is nothing to
+// paint (an empty size).
+BOOL URSWindowProjectionScaledToSize(URSWindowProjection *projection, NSSize windowSize,
+                                     NSSize paintSize);

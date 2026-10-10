@@ -13,6 +13,13 @@
 @class URSCompositingManager;
 @class URSAttachmentRegistry;
 
+// Windows that are shown in another window's place without a frame of their
+// own (the terminal on the back of a turned window).
+@protocol URSAttachmentHosting <NSObject>
+// The client whose frame shows window in its place right now, or XCB_NONE.
+- (xcb_window_t)clientShowingWindow:(xcb_window_t)window;
+@end
+
 // Windows that hang from a decorated parent window instead of being framed
 // themselves: sheets and drawers.  A client marks such a window with its
 // ICCCM WM_WINDOW_ROLE (see URSWindowRole) and names the parent in
@@ -26,6 +33,10 @@
 @interface URSAttachmentController : NSObject
 
 @property (weak, nonatomic) URSCompositingManager *compositingManager;
+// A window that names an unframed parent shown in a client's place hangs
+// from that client's frame instead, kept directly above the parent it
+// named: a sheet of the terminal on a window's back hangs from the window.
+@property (weak, nonatomic) id<URSAttachmentHosting> host;
 
 - (instancetype)initWithConnection:(XCBConnection *)connection;
 
@@ -53,6 +64,12 @@
 - (xcb_window_t)parentOfWindow:(xcb_window_t)window;
 // The attached windows hanging from a frame or its client.
 - (NSArray<NSNumber *> *)attachedWindowsOfWindow:(xcb_window_t)window;
+// YES when an attached window hangs from the client, or names it as the
+// parent it hangs from through the host.
+- (BOOL)hasAttachedWindowNamingWindow:(xcb_window_t)window;
+// The unframed window an attached window named as its parent when it hangs
+// from the client that window is shown for, or XCB_NONE.
+- (xcb_window_t)namedParentOfWindow:(xcb_window_t)window;
 // YES when the window, a client or its frame, has an attached window that
 // takes its input, which has then been given the focus.
 - (BOOL)passFocusToAttachedWindowOfWindow:(xcb_window_t)window;

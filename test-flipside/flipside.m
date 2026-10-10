@@ -13,6 +13,7 @@
 #include "../WindowManager/URSFlipSideGeometry.m"
 #include "../WindowManager/URSFlipSidePlan.m"
 #include "../WindowManager/URSFlipSideOrphans.m"
+#include "../WindowManager/URSCloseRequestPlan.m"
 #import "URSFlipGeometry.h"
 
 static BOOL near(double a, double b, double tolerance) {
@@ -194,6 +195,48 @@ int main(void) {
     PASS([orphans oldestOrphanOfApplication:@"Ink" directory:@"/src/Ink"] == nil,
          "nor is it taken once it is the only one left");
     END_SET("orphaned flip sides")
+
+    START_SET("closing a turned window")
+    PASS([URSFlipSidePlan closeGoesToFlipSideWithBackInView:YES hasFlipSide:YES],
+         "with the back in view the close button closes the terminal");
+    PASS(![URSFlipSidePlan closeGoesToFlipSideWithBackInView:NO hasFlipSide:YES],
+         "with the front in view it closes the application's window");
+    PASS(![URSFlipSidePlan closeGoesToFlipSideWithBackInView:YES hasFlipSide:NO],
+         "a plain back has no terminal to close");
+    PASS([URSFlipSidePlan orphansFlipSideWithTurnPending:NO hasFlipSide:YES],
+         "a terminal the user has seen outlives its window");
+    PASS(![URSFlipSidePlan orphansFlipSideWithTurnPending:YES hasFlipSide:YES],
+         "a terminal still waited for goes with its window");
+    PASS(![URSFlipSidePlan orphansFlipSideWithTurnPending:NO hasFlipSide:NO],
+         "a terminal without a window yet goes with its window");
+    END_SET("closing a turned window")
+
+    START_SET("close requests")
+    PASS([URSCloseRequestPlan actionWithRequestPending:NO showsSheet:NO acceptsCloseRequest:YES
+                                       hasCloseHandler:YES] == URSCloseRequestActionAskClient,
+         "a client that takes WM_DELETE_WINDOW is asked, even with a close handler");
+    PASS([URSCloseRequestPlan actionWithRequestPending:NO showsSheet:NO acceptsCloseRequest:NO
+                                       hasCloseHandler:YES] == URSCloseRequestActionRunHandler,
+         "a client that does not is ended by its close handler");
+    PASS([URSCloseRequestPlan actionWithRequestPending:NO showsSheet:NO acceptsCloseRequest:NO
+                                       hasCloseHandler:NO] == URSCloseRequestActionWatch,
+         "a client that can be asked nothing is only watched");
+    PASS([URSCloseRequestPlan actionWithRequestPending:YES showsSheet:NO acceptsCloseRequest:YES
+                                       hasCloseHandler:NO] == URSCloseRequestActionOfferForceQuit,
+         "a second request for a window that did not close offers force quit");
+    PASS([URSCloseRequestPlan actionWithRequestPending:YES showsSheet:YES acceptsCloseRequest:YES
+                                       hasCloseHandler:NO] == URSCloseRequestActionWaitForUser,
+         "not while the window asks the user in a sheet");
+    PASS([URSCloseRequestPlan actionWithRequestPending:NO showsSheet:YES acceptsCloseRequest:YES
+                                       hasCloseHandler:YES] == URSCloseRequestActionWaitForUser,
+         "nor is a window with a sheet asked again");
+    PASS([URSCloseRequestPlan offersForceQuitWithSheet:NO frontmost:YES],
+         "an unanswered request on the frontmost window offers force quit");
+    PASS(![URSCloseRequestPlan offersForceQuitWithSheet:YES frontmost:YES],
+         "a sheet is an answer in progress");
+    PASS(![URSCloseRequestPlan offersForceQuitWithSheet:NO frontmost:NO],
+         "the user moved on to another window");
+    END_SET("close requests")
 
     [pool drain];
     return 0;

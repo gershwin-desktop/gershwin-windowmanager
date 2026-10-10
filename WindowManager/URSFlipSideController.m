@@ -163,6 +163,42 @@ static const NSTimeInterval URSFlipSideStartTimeout = 10.0;
     }
 }
 
+- (xcb_window_t)clientShowingWindow:(xcb_window_t)window
+{
+    xcb_window_t parent = [self.registry parentOfWindow:window];
+    return (parent != XCB_NONE && [_backShown containsObject:@(parent)]) ? parent : XCB_NONE;
+}
+
+- (BOOL)closeFlipSideInsteadOfClient:(xcb_window_t)client
+{
+    NSNumber *key = @(client);
+    xcb_window_t side = [self.registry windowOfParent:client];
+    if (![URSFlipSidePlan closeGoesToFlipSideWithBackInView:[_flipSideInView containsObject:key]
+                                                hasFlipSide:side != XCB_NONE]) {
+        return NO;
+    }
+    XCBWindow *sideWindow = [self.connection windowForXCBId:side];
+    if (sideWindow == nil) {
+        NSLog(@"[FlipSide] The terminal window %u on the back of window %u is not known; "
+              @"it is not closed", side, client);
+        return YES;
+    }
+    ICCCMService *icccm = [ICCCMService sharedInstanceWithConnection:self.connection];
+    if ([icccm hasProtocol:[icccm WMDeleteWindow] forWindow:sideWindow]) {
+        [sideWindow close];
+        return YES;
+    }
+    // A Terminal from before it took WM_DELETE_WINDOW on its flip side.
+    id token = _helpers[key] ?: _adoptedHelperPids[key];
+    if (token == nil) {
+        NSLog(@"[FlipSide] The terminal on the back of window %u cannot be ended: "
+              @"its process is not known", client);
+        return YES;
+    }
+    [self endHelper:token];
+    return YES;
+}
+
 - (void)forgetAttachmentOfWindow:(xcb_window_t)window
 {
     NSNumber *parent = _parents[@(window)];
@@ -598,8 +634,10 @@ static const NSTimeInterval URSFlipSideStartTimeout = 10.0;
 {
     NSNumber *key = @(parent);
     xcb_window_t side = [self.registry windowOfParent:parent];
-    if (side == XCB_NONE) {
-        // Its terminal had not shown its window yet: the user never saw it.
+    if (![URSFlipSidePlan orphansFlipSideWithTurnPending:_pendingTurns[key] != nil
+                                            hasFlipSide:side != XCB_NONE]) {
+        // Its terminal had not shown its window yet, or the turn to it had
+        // not begun: the user never saw it.
         [self endFlipSideOfParent:parent];
         return;
     }
@@ -636,8 +674,10 @@ static const NSTimeInterval URSFlipSideStartTimeout = 10.0;
                         token:token];
 }
 
-// Its borderless window takes no WM_DELETE_WINDOW, so its close button
-// ends its terminal, taking the shell with it as typing exit would.
+// For a Terminal whose borderless window takes no WM_DELETE_WINDOW (one from
+// before it did): its close button ends its terminal, taking the shell with
+// it as typing exit would.  A newer one is asked like any window and may ask
+// the user first (XCBWindow -close prefers WM_DELETE_WINDOW).
 - (void (^)(void))closeHandlerForWindow:(xcb_window_t)window token:(id)token
 {
     __weak URSFlipSideController *weakSelf = self;
@@ -655,6 +695,11 @@ static const NSTimeInterval URSFlipSideStartTimeout = 10.0;
               window);
         return;
     }
+    // Reached only when the window did not list WM_DELETE_WINDOW at the
+    // close request; said in the log so that a missing confirmation can be
+    // told apart from a Terminal that never asks.
+    NSLog(@"[FlipSide] The terminal in window %u takes no WM_DELETE_WINDOW (a Terminal from "
+          @"before the close confirmation); it is ended", window);
     [self endHelper:token];
 }
 

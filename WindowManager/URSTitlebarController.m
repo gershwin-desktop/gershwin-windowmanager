@@ -240,8 +240,7 @@ static const NSTimeInterval URSZoomAnimationDuration = 0.22;
 
         switch (button) {
             case GSThemeTitleBarButtonClose:
-                if (clientWindow) {
-                    [clientWindow close];
+                if (clientWindow && [clientWindow close]) {
                     [frame setNeedDestroy:YES];
                 }
                 break;

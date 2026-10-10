@@ -47,6 +47,16 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 @class XCBAtomService;
 @class XCBRegion;
 
+// What only the window manager above XCBKit knows about closing a client:
+// whether another window stands in for it, and whether it shows a sheet.
+@protocol XCBCloseRequestRouting <NSObject>
+// YES when the request was dealt with by closing another window shown in
+// the client's place (the terminal on the back of a turned window).
+- (BOOL)closeRequestTakenOverForClient:(XCBWindow *)client;
+// YES when the client shows a sheet, which is the client asking the user.
+- (BOOL)clientShowsSheet:(XCBWindow *)client;
+@end
+
 @interface XCBConnection : NSObject
 {
     xcb_connection_t *connection;
@@ -83,6 +93,7 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 @property (nonatomic, strong) XCBFrame *draggedFrame;
 @property (nonatomic, assign) BOOL snapPreviewShown;
 @property (nonatomic, assign) BOOL adoptingExistingWindows;
+@property (nonatomic, weak) id<XCBCloseRequestRouting> closeRequestRouter;
 
 + (XCBConnection *) sharedConnectionAsWindowManager:(BOOL)asWindowManager;
 - (xcb_connection_t *) connection;

@@ -252,6 +252,35 @@ int main(void) {
          "a window flip shows every frame of its turn, however late the screen reports them");
     [turn release];
 
+    // A presentation (Alt-Tab, the overview) paints a window scaled into a
+    // rect of its own; a window resting on its back has to fly as its back,
+    // so its projection is scaled along: the back's corners land on the
+    // presented rect's corners (still mirrored upright) and the face map
+    // stays the exact inverse.
+    {
+        URSFlipGeometry *rest = [[URSFlipGeometry alloc] initWithSize:size];
+        URSWindowProjection back;
+        [rest getProjection:&back atAngle:180.0];
+        NSSize paint = NSMakeSize(100.0, 75.0);
+        PASS(URSWindowProjectionScaledToSize(&back, size, paint),
+             "a resting back can be scaled into a presented rect");
+        NSPoint topLeft = URSProjectiveMatrixMapPoint(back.toScreen, NSMakePoint(0.0, 0.0));
+        NSPoint bottomRight = URSProjectiveMatrixMapPoint(back.toScreen, NSMakePoint(size.width, size.height));
+        PASS(pointNear(topLeft, NSMakePoint(0.0, 0.0), 1e-6) &&
+             pointNear(bottomRight, NSMakePoint(paint.width, paint.height), 1e-6),
+             "the scaled back covers the presented rect exactly (%.2f,%.2f %.2f,%.2f)",
+             topLeft.x, topLeft.y, bottomRight.x, bottomRight.y);
+        NSPoint face = URSProjectiveMatrixMapPoint(back.toFace, NSMakePoint(25.0, 30.0));
+        PASS(pointNear(URSProjectiveMatrixMapPoint(back.toScreen, face), NSMakePoint(25.0, 30.0), 1e-6),
+             "the scaled face map is the inverse of the scaled screen map");
+        PASS(back.backFace && back.toFace.m[2][0] == 0.0 && back.toFace.m[2][1] == 0.0, "scaling keeps the back face and the flat map");
+        URSWindowProjection front;
+        [rest getProjection:&front atAngle:0.0];
+        PASS(!URSWindowProjectionScaledToSize(&front, size, NSMakeSize(0.0, 75.0)),
+             "an empty presented rect has nothing to paint");
+        [rest release];
+    }
+
     END_SET([URSFlipTestName UTF8String])
     [pool release];
     return 0;

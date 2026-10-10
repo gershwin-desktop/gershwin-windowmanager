@@ -3301,8 +3301,8 @@ static XCBConnection *sharedInstance;
 
         clientWindow = [frame childWindowForKey:ClientWindow];
 
-        [clientWindow close];
-        [frame setNeedDestroy:YES];
+        if ([clientWindow close])
+            [frame setNeedDestroy:YES];
 
         frame = nil;
         window = nil;
@@ -3522,7 +3522,13 @@ static XCBConnection *sharedInstance;
     // discovery block ran above (frame click, titlebar click, or frame-child click).
     // Apps without WM_TAKE_FOCUS (e.g. Chrome) rely entirely on this update
     // because focus() alone does not reach updateNetActiveWindow for those apps.
-    if (clientWindow) {
+    // A click on a floating palette must not move X focus or the active
+    // window: the palette's application asks for focus itself (it becomes
+    // key only when a text field needs it), and until then the document
+    // stays active, keeps its active titlebar and its menu in Menu.app.
+    BOOL isPaletteClick = clientWindow && [clientWindow isUtilityPanel];
+
+    if (clientWindow && !isPaletteClick) {
         self.expectedFocusWindow = [clientWindow window];
         self.expectedFocusTimestamp = anEvent->time;
         EWMHService *ewmhActiveService = [EWMHService sharedInstanceWithConnection:self];
@@ -3559,7 +3565,8 @@ static XCBConnection *sharedInstance;
     // CRITICAL: ALWAYS set focus when clicking on a window
     // This ensures that no matter what, clicking allows typing in that window
     if (clientWindow && frame) {
-        [clientWindow focus];
+        if (!isPaletteClick)
+            [clientWindow focus];
         // Don't raise desktop windows - they should always stay at the bottom
         if (!isDesktopWindow) {
             // Check if this window is already the topmost — if so, skip raising.

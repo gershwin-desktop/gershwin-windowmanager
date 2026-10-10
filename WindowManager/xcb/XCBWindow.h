@@ -203,7 +203,10 @@ typedef NS_ENUM(NSInteger, WindowState)
 - (void) maximizeToSize:(XCBSize)aSize andPosition:(XCBPoint)aPosition;
 - (void) minimize;
 - (void) hide;
-- (void) close;
+// Asks the client to close.  YES when this window was asked and is expected
+// to go (its frame may be marked as going); NO when another window was
+// closed in its place or the client is busy asking the user in a sheet.
+- (BOOL) close;
 - (void) restoreDimensionAndPosition;
 - (void) restoreFromIconified;
 - (void) destroy;

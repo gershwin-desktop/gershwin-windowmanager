@@ -243,7 +243,11 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                                        windowSwitcher:self.windowSwitcher
                                                                       workareaManager:self.workareaManager];
     self.flipSideController = [[URSFlipSideController alloc] initWithConnection:connection];
-    self.attachmentControllers = @[ [[URSSheetController alloc] initWithConnection:connection],
+    self.sheetController = [[URSSheetController alloc] initWithConnection:connection];
+    // A sheet of the terminal on a window's back hangs from that window.
+    self.sheetController.host = self.flipSideController;
+    connection.closeRequestRouter = self;
+    self.attachmentControllers = @[ self.sheetController,
                                     [[URSDrawerController alloc] initWithConnection:connection],
                                     self.flipSideController ];
     self.snappingMenuController.flipSideController = self.flipSideController;
@@ -541,6 +545,16 @@ static CGFloat WMLastScaleFactor = 1.0;
                        closeHandler:[self.flipSideController closeHandlerForAdoptedOrphan:winId]] == nil) {
         NSLog(@"[FlipSide] Orphaned terminal window %u cannot be framed; it is left as it is", winId);
     }
+}
+
+#pragma mark - XCBCloseRequestRouting
+
+- (BOOL)closeRequestTakenOverForClient:(XCBWindow *)client {
+    return [self.flipSideController closeFlipSideInsteadOfClient:[client window]];
+}
+
+- (BOOL)clientShowsSheet:(XCBWindow *)client {
+    return [self.sheetController hasAttachedWindowNamingWindow:[client window]];
 }
 
 - (XCBWindow *)frameWindowAsOrdinary:(xcb_window_t)winId closeHandler:(void (^)(void))closeHandler {
@@ -1132,6 +1146,11 @@ static CGFloat WMLastScaleFactor = 1.0;
                 // shows as the active window while it has the focus, and the
                 // parent passes on a focus it gets while its sheet is up.
                 xcb_window_t focused = focusInEvent->event;
+                // The terminal on a window's back is itself attached, but a
+                // sheet it shows comes first.
+                if ([self.sheetController passFocusToAttachedWindowOfWindow:focused]) {
+                    break;
+                }
                 xcb_window_t attachedParent = [self parentOfAttachedWindow:focused];
                 if (attachedParent != XCB_NONE) {
                     focused = attachedParent;

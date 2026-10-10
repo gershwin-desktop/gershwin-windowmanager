@@ -19,6 +19,7 @@
 #import "TitleBarSettingsService.h"
 #import "XCBFrame.h"
 #import <AppKit/NSAlert.h>
+#import "URSCloseRequestPlan.h"
 
 #define BUTTONMASK  (XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE)
 
@@ -814,26 +815,44 @@
     [connection setNeedFlush:YES];
 }
 
-- (void) close
+- (BOOL) close
 {
-    // If close was already requested (timer is running), the app ignored
-    // the first request — show the force-quit dialog immediately.
-    if (closeTimer != nil)
+    id<XCBCloseRequestRouting> router = [connection closeRequestRouter];
+    if ([router closeRequestTakenOverForClient:self])
     {
-        [self cancelCloseTimer];
-        [self closeTimerFired:nil];
-        return;
+        return NO;
     }
 
     xcb_client_message_event_t event;
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
 
-    if (self.closeHandler != nil)
+    URSCloseRequestAction action =
+        [URSCloseRequestPlan actionWithRequestPending:closeTimer != nil
+                                           showsSheet:[router clientShowsSheet:self]
+                                  acceptsCloseRequest:[icccmService hasProtocol:[icccmService WMDeleteWindow]
+                                                                      forWindow:self]
+                                      hasCloseHandler:self.closeHandler != nil];
+    if (action == URSCloseRequestActionWaitForUser)
+    {
+        // The client is asking the user whether to close; a pending watch
+        // would offer force quit while the user is still reading the sheet.
+        [self cancelCloseTimer];
+        return NO;
+    }
+    if (action == URSCloseRequestActionOfferForceQuit)
+    {
+        // The first request was ignored.
+        [self cancelCloseTimer];
+        [self closeTimerFired:nil];
+        return YES;
+    }
+
+    if (action == URSCloseRequestActionRunHandler)
     {
         self.closeHandler();
     }
-    else if ([icccmService hasProtocol:[icccmService WMDeleteWindow] forWindow:self])
+    else if (action == URSCloseRequestActionAskClient)
     {
         event.type = [atomService atomFromCachedAtomsWithKey:[icccmService WMProtocols]];
         event.format = 32;
@@ -859,6 +878,7 @@
                                                 selector:@selector(closeTimerFired:)
                                                 userInfo:nil
                                                  repeats:NO];
+    return YES;
 }
 
 - (BOOL)supportsCloseRequest
@@ -923,7 +943,8 @@
             }
             free(focReply);
         }
-        if (!frontmost)
+        BOOL showsSheet = [[connection closeRequestRouter] clientShowsSheet:self];
+        if (![URSCloseRequestPlan offersForceQuitWithSheet:showsSheet frontmost:frontmost])
         {
             closeTimer = nil;
             return;

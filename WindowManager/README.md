@@ -132,8 +132,16 @@ starts.
   shown, keys and clicks over the client area go to the terminal. The
   terminal outlives its window: when the window goes (its application
   quits, is killed or closes it), the terminal stays where it was as a
-  window of its own, with a titlebar, in front and focused; its close
-  button ends it. When the application is started again, its next window
+  window of its own, with a titlebar, in front and focused. Its close
+  button asks the terminal to close: while a program other than the shell
+  runs in it, Terminal asks first in a sheet (Cancel keeps it, Close ends
+  it); an idle shell closes at once. While the back of a window is shown,
+  its close button (and Close in the titlebar menu) closes the terminal the
+  same way, not the application's window, which then turns back to its
+  front; with the front shown it closes the application's window as
+  always. A window that shows a sheet is not offered "Force Quit" when it
+  does not close. A Terminal from before WM_DELETE_WINDOW on its flip side
+  is simply ended. When the application is started again, its next window
   takes the terminal back onto its back (the one left longest, if there
   are several), with the shell as it was. Applications without such a directory turn to
   the plain back. Read at every flip; set to `NO` to always get the plain

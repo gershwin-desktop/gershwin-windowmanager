@@ -7,6 +7,8 @@
 #import "URSSheetController.h"
 #import "URSSheetLayout.h"
 #import "URSWindowRole.h"
+#import "XCBConnection.h"
+#import "XCBWindow.h"
 
 @implementation URSSheetController
 
@@ -35,6 +37,15 @@
 - (BOOL)takesParentFocus
 {
     return YES;
+}
+
+// A sheet that comes up after a close request is the client answering it,
+// typically asking the user whether to close: the watch that would offer
+// force quit ends, so a second close after Cancel asks again instead.
+- (void)willShowAttachedWindow:(xcb_window_t)window parent:(xcb_window_t)parent
+{
+    xcb_window_t named = [self namedParentOfWindow:window];
+    [[self.connection windowForXCBId:named != XCB_NONE ? named : parent] cancelCloseTimer];
 }
 
 - (URSAttachmentEdge)slideEdgeOfWindow:(xcb_window_t)window

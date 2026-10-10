@@ -73,6 +73,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSCompositingManager+WindowFlip.m \
 		URSFlipSideGeometry.m \
 		URSFlipSidePlan.m \
+		URSCloseRequestPlan.m \
 		URSFlipSideOrphans.m \
 		URSFlipSideController.m \
 		GSThemeTitleBar.m \

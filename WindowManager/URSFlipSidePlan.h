@@ -42,4 +42,14 @@ typedef NS_ENUM(NSInteger, URSFlipSideAction) {
 // sees the front go.
 + (BOOL)flipSideStacksAboveParentWithBackShown:(BOOL)backShown;
 
+// Whether closing the window (its close button, the titlebar menu's Close)
+// closes the terminal rather than the application's window: the user sees
+// the terminal once the back is in view or on its way.
++ (BOOL)closeGoesToFlipSideWithBackInView:(BOOL)backInView hasFlipSide:(BOOL)hasFlipSide;
+
+// Whether the terminal of a window that goes stays on as an orphan: only
+// one the user has seen.  One still waited for (the turn has not begun)
+// goes with the window.
++ (BOOL)orphansFlipSideWithTurnPending:(BOOL)turnPending hasFlipSide:(BOOL)hasFlipSide;
+
 @end

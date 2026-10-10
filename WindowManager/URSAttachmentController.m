@@ -30,6 +30,9 @@
     NSMutableDictionary<NSNumber *, NSValue *> *_placedRects;
     // Attached window -> its parent client's origin before adoption.
     NSMutableDictionary<NSNumber *, NSValue *> *_parentOriginsBeforeAdoption;
+    // Attached window -> the unframed window it named as its parent, when
+    // it hangs from the client that window is shown for (see host).
+    NSMutableDictionary<NSNumber *, NSNumber *> *_namedParents;
 }
 
 - (instancetype)initWithConnection:(XCBConnection *)connection
@@ -41,6 +44,7 @@
         _contentInsets = [NSMutableDictionary new];
         _placedRects = [NSMutableDictionary new];
         _parentOriginsBeforeAdoption = [NSMutableDictionary new];
+        _namedParents = [NSMutableDictionary new];
         const char *name = [URSWindowRolePropertyName UTF8String];
         xcb_connection_t *c = [connection connection];
         xcb_intern_atom_reply_t *reply =
@@ -276,11 +280,19 @@
     mask |= XCB_CONFIG_WINDOW_BORDER_WIDTH | XCB_CONFIG_WINDOW_SIBLING |
             XCB_CONFIG_WINDOW_STACK_MODE;
     values[n++] = 0;
-    values[n++] = frameWindow;
+    values[n++] = [self stackSiblingOfWindow:window frame:frameWindow];
     values[n++] = [self stacksAboveParentForWindow:window] ? XCB_STACK_MODE_ABOVE
                                                            : XCB_STACK_MODE_BELOW;
     xcb_configure_window([_connection connection], window, mask, values);
     _placedRects[@(window)] = [NSValue valueWithRect:r];
+}
+
+// The window it named lies above the frame while it is shown there, and
+// would otherwise cover this one and take its clicks.
+- (xcb_window_t)stackSiblingOfWindow:(xcb_window_t)window frame:(xcb_window_t)frameWindow
+{
+    NSNumber *named = _namedParents[@(window)];
+    return named != nil ? [named unsignedIntValue] : frameWindow;
 }
 
 - (void)placeWindow:(xcb_window_t)window
@@ -411,6 +423,16 @@
 - (xcb_window_t)attachableParentOfWindow:(xcb_window_t)window
 {
     xcb_window_t parent = [self markedParentOfWindow:window];
+    xcb_window_t named = XCB_NONE;
+    if (parent != XCB_NONE && [self frameOfClient:parent] == nil && self.host != nil) {
+        xcb_window_t client = [self.host clientShowingWindow:parent];
+        // Not when the client has one of its own: it would be pushed off.
+        if (client != XCB_NONE && !([self attachesExclusively] &&
+                                    [_registry windowOfParent:client] != XCB_NONE)) {
+            named = parent;
+            parent = client;
+        }
+    }
     if (parent == XCB_NONE || [self frameOfClient:parent] == nil) {
         return XCB_NONE;
     }
@@ -432,6 +454,11 @@
     if (![self prepareAttachmentOfWindow:window rect:rect parentFrame:parentFrame
                            parentContent:parentContent]) {
         return XCB_NONE;
+    }
+    if (named != XCB_NONE) {
+        _namedParents[@(window)] = @(named);
+    } else {
+        [_namedParents removeObjectForKey:@(window)];
     }
     return parent;
 }
@@ -551,11 +578,36 @@
     return found;
 }
 
+- (BOOL)hasAttachedWindowNamingWindow:(xcb_window_t)window
+{
+    return [[_registry windowsOfParent:window] count] > 0 ||
+           [[_namedParents allKeysForObject:@(window)] count] > 0;
+}
+
+- (xcb_window_t)namedParentOfWindow:(xcb_window_t)window
+{
+    return [_namedParents[@(window)] unsignedIntValue];
+}
+
+// Shown in the client's place no longer (the window turned to its front),
+// the parent it named lies under the frame and this window with it, so the
+// focus stays with the client the user sees.
+- (BOOL)namedParentIsShownForWindow:(xcb_window_t)window
+{
+    NSNumber *named = _namedParents[@(window)];
+    return named == nil || [self.host clientShowingWindow:[named unsignedIntValue]] != XCB_NONE;
+}
+
 - (BOOL)passFocusToAttachedWindowOfWindow:(xcb_window_t)window
 {
     xcb_window_t attached = [[[self attachedWindowsOfWindow:window] firstObject] unsignedIntValue];
+    if (attached == XCB_NONE) {
+        // The window it named takes the focus when its parent turns to it
+        // (the terminal on the back), and the focus belongs to the sheet.
+        attached = [[[_namedParents allKeysForObject:@(window)] firstObject] unsignedIntValue];
+    }
     if (attached == XCB_NONE || ![self takesParentFocusOfWindow:attached] ||
-        [_registry isWindowHiddenWithParent:attached]) {
+        [_registry isWindowHiddenWithParent:attached] || ![self namedParentIsShownForWindow:attached]) {
         return NO;
     }
     [[_connection windowForXCBId:attached] focus];
@@ -615,6 +667,7 @@
         URSAttachmentEdge edge = [self slideEdgeOfWindow:window];
         BOOL slides = [self slidesWindow:window];
         [_registry detachWindow:window];
+        [_namedParents removeObjectForKey:@(window)];
         [self forgetAttachmentOfWindow:window];
         [[_connection windowForXCBId:window] setStackedBelowWindow:nil];
         [self returnFocusFromWindow:window toParent:parent];
@@ -677,6 +730,7 @@
         return;
     }
     [_registry detachWindow:window];
+    [_namedParents removeObjectForKey:@(window)];
     [self forgetAttachmentOfWindow:window];
     [[_connection windowForXCBId:window] setStackedBelowWindow:nil];
     if (_placedRects[@(window)] != nil && [self.compositingManager compositingActive]) {
@@ -698,6 +752,10 @@
         [self forgetAttachmentOfWindow:[attached unsignedIntValue]];
     }
     [_registry forgetWindow:window];
+    [_namedParents removeObjectForKey:@(window)];
+    // Stacked against a window that is gone, it would make every later
+    // placement fail; the frame is what it hangs from anyway.
+    [_namedParents removeObjectsForKeys:[_namedParents allKeysForObject:@(window)]];
     [_contentInsets removeObjectForKey:@(window)];
     [_placedRects removeObjectForKey:@(window)];
 }
@@ -711,12 +769,17 @@
         // frame's own ConfigureNotify puts it back.
         XCBFrame *frame = [self frameOfClient:parent];
         if ([self stacksAboveParentForWindow:event->window] && frame &&
-            event->above_sibling != [frame window]) {
+            event->above_sibling != [self stackSiblingOfWindow:event->window frame:[frame window]]) {
             [self placeWindow:event->window];
         }
         return;
     }
     for (NSNumber *attached in [self attachedWindowsOfWindow:event->window]) {
+        [self placeWindow:[attached unsignedIntValue]];
+    }
+    // The parent it named went above or below the frame (the window turned):
+    // it goes along, so it is seen only with the back.
+    for (NSNumber *attached in [_namedParents allKeysForObject:@(event->window)]) {
         [self placeWindow:[attached unsignedIntValue]];
     }
 }

@@ -42,4 +42,14 @@
     return backShown;
 }
 
++ (BOOL)closeGoesToFlipSideWithBackInView:(BOOL)backInView hasFlipSide:(BOOL)hasFlipSide
+{
+    return backInView && hasFlipSide;
+}
+
++ (BOOL)orphansFlipSideWithTurnPending:(BOOL)turnPending hasFlipSide:(BOOL)hasFlipSide
+{
+    return hasFlipSide && !turnPending;
+}
+
 @end

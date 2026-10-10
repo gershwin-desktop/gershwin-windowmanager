@@ -151,3 +151,18 @@ NSUInteger URSProjectiveInsideSpans(URSProjectiveMatrix toPicture, NSSize pictur
     }
     return count;
 }
+
+BOOL URSWindowProjectionScaledToSize(URSWindowProjection *projection, NSSize windowSize,
+                                     NSSize paintSize) {
+    if (windowSize.width <= 0.0 || windowSize.height <= 0.0 ||
+        paintSize.width <= 0.0 || paintSize.height <= 0.0) {
+        return NO;
+    }
+    double sx = paintSize.width / windowSize.width;
+    double sy = paintSize.height / windowSize.height;
+    URSProjectiveMatrix scale = {{ { sx, 0.0, 0.0 }, { 0.0, sy, 0.0 }, { 0.0, 0.0, 1.0 } }};
+    URSProjectiveMatrix unscale = {{ { 1.0 / sx, 0.0, 0.0 }, { 0.0, 1.0 / sy, 0.0 }, { 0.0, 0.0, 1.0 } }};
+    projection->toScreen = URSProjectiveMatrixMultiply(scale, projection->toScreen);
+    projection->toFace = URSProjectiveMatrixMultiply(projection->toFace, unscale);
+    return YES;
+}
