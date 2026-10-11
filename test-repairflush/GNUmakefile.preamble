@@ -36,6 +36,7 @@ WM_COLLABORATORS = \
 	../WindowManager/URSWindowSwitcherOverlay.m \
 	../WindowManager/URSSnapPreviewOverlay.m \
 	../WindowManager/URSThemeIntegration.m \
+	../WindowManager/URSWindowOutline.m \
 	../WindowManager/URSProfiler.m \
 	../WindowManager/URSImageUpload.m \
 	../WindowManager/URSShapePath.m \

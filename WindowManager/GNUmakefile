@@ -59,6 +59,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSWindowFlowController.m \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \
+		URSWindowOutline.m \
 		URSProfiler.m \
 		URSImageUpload.m \
 		URSBackgroundRender.m \
