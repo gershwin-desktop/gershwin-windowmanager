@@ -3077,48 +3077,11 @@ static XCBConnection *sharedInstance;
 
         // Edge and corner snap detection - check if mouse is near screen edges/corners
         if (self.workareaValid) {
-            SnapZone detectedZone = SnapZoneNone;
-
-            // Calculate edge proximity (within SNAP_EDGE_THRESHOLD of edge)
-            BOOL nearTop = mouseY <= _cachedWorkareaY + SNAP_EDGE_THRESHOLD;
-            BOOL nearBottom = mouseY >= _cachedWorkareaY + (int32_t)_cachedWorkareaHeight - SNAP_EDGE_THRESHOLD;
-            BOOL nearLeft = mouseX <= _cachedWorkareaX + SNAP_EDGE_THRESHOLD;
-            BOOL nearRight = mouseX >= _cachedWorkareaX + (int32_t)_cachedWorkareaWidth - SNAP_EDGE_THRESHOLD;
-
-            // Corner zones: within SNAP_CORNER_THRESHOLD of the corner
-            // These define rectangular areas in each corner where quarter-snap triggers
-            BOOL inLeftCornerZone = mouseX <= _cachedWorkareaX + SNAP_CORNER_THRESHOLD;
-            BOOL inRightCornerZone = mouseX >= _cachedWorkareaX + (int32_t)_cachedWorkareaWidth - SNAP_CORNER_THRESHOLD;
-            BOOL inTopCornerZone = mouseY <= _cachedWorkareaY + SNAP_CORNER_THRESHOLD;
-            BOOL inBottomCornerZone = mouseY >= _cachedWorkareaY + (int32_t)_cachedWorkareaHeight - SNAP_CORNER_THRESHOLD;
-
-            // Corners: must be near an edge AND in the corner zone of the perpendicular edge
-            // e.g., TopLeft = near top edge AND in the left corner zone (not just near left edge)
-            if (nearTop && inLeftCornerZone && inTopCornerZone) {
-                detectedZone = SnapZoneTopLeft;
-            } else if (nearTop && inRightCornerZone && inTopCornerZone) {
-                detectedZone = SnapZoneTopRight;
-            } else if (nearBottom && inLeftCornerZone && inBottomCornerZone) {
-                detectedZone = SnapZoneBottomLeft;
-            } else if (nearBottom && inRightCornerZone && inBottomCornerZone) {
-                detectedZone = SnapZoneBottomRight;
-            } else if (nearLeft && inTopCornerZone && inLeftCornerZone) {
-                detectedZone = SnapZoneTopLeft;
-            } else if (nearLeft && inBottomCornerZone && inLeftCornerZone) {
-                detectedZone = SnapZoneBottomLeft;
-            } else if (nearRight && inTopCornerZone && inRightCornerZone) {
-                detectedZone = SnapZoneTopRight;
-            } else if (nearRight && inBottomCornerZone && inRightCornerZone) {
-                detectedZone = SnapZoneBottomRight;
-            }
-            // Edges: must be near edge but NOT in a corner zone
-            else if (nearTop && !inLeftCornerZone && !inRightCornerZone) {
-                detectedZone = SnapZoneTop;
-            } else if (nearLeft && !inTopCornerZone && !inBottomCornerZone) {
-                detectedZone = SnapZoneLeft;
-            } else if (nearRight && !inTopCornerZone && !inBottomCornerZone) {
-                detectedZone = SnapZoneRight;
-            }
+            SnapZone detectedZone =
+                URSSnapZoneForPointer(mouseX, mouseY,
+                                      _cachedWorkareaX, _cachedWorkareaY,
+                                      _cachedWorkareaWidth, _cachedWorkareaHeight,
+                                      [[frame childWindowForKey:ClientWindow] canResize]);
 
             // Entering a zone starts the linger time; the preview then comes
             // up on a timer.  Waiting for the next motion instead meant that a
@@ -5381,6 +5344,13 @@ static XCBConnection *sharedInstance;
 - (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame {
     if (!frame || zone == SnapZoneNone) {
         //NSLog(@"[Snap] executeSnapForZone: no frame or zone is None");
+        return;
+    }
+    // The resize itself is refused for a window whose size is fixed
+    // (programmaticResizeToRect:), but the rest would still mark it snapped
+    // or maximized and remember its rect, so the next drag would "restore"
+    // a size it never left.
+    if (![[frame childWindowForKey:ClientWindow] canResize]) {
         return;
     }
 

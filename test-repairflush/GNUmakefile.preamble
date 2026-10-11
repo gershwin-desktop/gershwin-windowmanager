@@ -78,6 +78,7 @@ WM_COLLABORATORS = \
 	../WindowManager/xcb/XCBSelection.m \
 	../WindowManager/xcb/XCBRegion.m \
 	../WindowManager/xcb/XCBShape.m \
+	../WindowManager/xcb/URSSnapZone.m \
 	../WindowManager/xcb/XCBReply.m \
 	../WindowManager/xcb/XCBAttributesReply.m \
 	../WindowManager/xcb/XCBGeometryReply.m \
