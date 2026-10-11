@@ -20,6 +20,7 @@
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
 #import "URSUtilityRestackOrder.h"
+#import "URSWindowOutline.h"
 #import <GNUstepGUI/GSTheme.h>
 #import <AppKit/NSColor.h>
 #import <AppKit/NSGraphics.h>
@@ -2340,14 +2341,14 @@ static XCBConnection *sharedInstance;
         }
     }
 
-    // Without a compositor the only window outline is the frame background
-    // showing through the clientBorder strips around the client.  Theme stroke
+    // Without a compositor the frame background showing through the
+    // clientBorder strips around the client is the window's outline, and the
+    // titlebar draws the same grey along its top and sides.  Theme stroke
     // colors are tuned for composited drop shadows and can be near-invisible
-    // here, so pin the strips to a fixed mid grey that separates windows on
-    // any background.  With compositing on, drop shadows separate windows and
-    // the theme color applies.
+    // here.  With compositing on, drop shadows separate windows and the theme
+    // color applies.
     if (!compositorActive) {
-        borderPixel = 0x808080;
+        borderPixel = URSWindowOutlinePixel();
     }
 
     XCBVisual *visual = nil;
