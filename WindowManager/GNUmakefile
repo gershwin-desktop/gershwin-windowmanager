@@ -116,6 +116,7 @@ $(APP_NAME)_HEADER_FILES = \
 		URSWindowSwitcher.h \
 		URSWindowSwitcherOverlay.h \
 		URSSnapPreviewOverlay.h \
+		URSSnapPreviewFrame.h \
 		URSThemeIntegration.h \
 		URSProfiler.h \
 		URSImageUpload.h \
