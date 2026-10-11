@@ -6,6 +6,7 @@
 
 #import <AppKit/AppKit.h>
 #import "URSBackgroundRender.h"
+#import "URSCommandLine.h"
 #import "URSHybridEventHandler.h"
 #import "UROSWMApplication.h"
 #import "URSThemeIntegration.h"
@@ -80,25 +81,22 @@ int main(int argc, const char * argv[])
         // Must be set before any AppKit initialization.
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GSSuppressAppIcon"];
 
-        // Parse command-line arguments for compositing mode
-        BOOL enableCompositing = YES;
-        for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "-dc") == 0 || strcmp(argv[i], "--disable-compositing") == 0) {
-                enableCompositing = NO;
-                //NSLog(@"[WindowManager] Compositing mode disabled via command-line flag");
-                break;
-            } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-                printf("WindowManager - Objective-C Window Manager\n");
-                printf("Usage: %s [options]\n\n", argv[0]);
-                printf("Options:\n");
-                printf("  -dc, --disable-compositing  Disable XRender compositing\n");
-                printf("  -h, --help          Show this help message\n\n");
-                printf("By default, windows use XRender compositing for transparency effects.\n");
-                printf("Use -dc to force traditional direct rendering mode.\n");
-                return 0;
-            }
+        URSCommandLine *commandLine = [URSCommandLine commandLineWithArguments:argv count:argc];
+        if (commandLine.helpRequested) {
+            printf("WindowManager - Objective-C Window Manager\n");
+            printf("Usage: %s [options]\n\n", argv[0]);
+            printf("Options:\n");
+            printf("  -dc, --disable-compositing  Disable XRender compositing\n");
+            printf("  --replace           Replace the running window manager\n");
+            printf("  -h, --help          Show this help message\n\n");
+            printf("By default, windows use XRender compositing for transparency effects.\n");
+            printf("Use -dc to force traditional direct rendering mode.\n");
+            printf("Without --replace, a running window manager is only replaced after asking\n");
+            printf("(from a terminal the program exits with an error instead).\n");
+            return 0;
         }
-        
+        BOOL enableCompositing = commandLine.compositingEnabled;
+
         // Prevent GNUstep from loading user-defined AppKit bundles (DriveUI, OnDemand)
         // into the WM process - they spin on idle sockets and waste CPU.
         // Must be set before +sharedApplication triggers bundle loading.
@@ -109,6 +107,7 @@ int main(int argc, const char * argv[])
         UROSWMApplication *app = [UROSWMApplication sharedApplication];
         URSHybridEventHandler *hybridHandler = [[URSHybridEventHandler alloc] init];
         hybridHandler.compositingRequested = enableCompositing;
+        hybridHandler.replaceRequested = commandLine.replaceRequested;
 
         // Initialize TitleBar settings - height will be queried from GSTheme below (source: AppearanceMetrics.h)
         TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];

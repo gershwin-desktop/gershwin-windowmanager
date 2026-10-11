@@ -16,6 +16,7 @@
 #import <math.h>
 #import "GSThemeTitleBar.h"
 #import "ICCCMService.h"
+#import "URSWindowOutline.h"
 
 // From libs-back: the flag telling that _GNUSTEP_WM_ATTR carries a style mask.
 #define GSWindowStyleAttr (1 << 0)
@@ -824,6 +825,43 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     }
 }
 
+#pragma mark - Window Outline
+
+/* Without a compositor the frame shows a grey line in the strips it leaves
+ * beside and below the client (XCBFrame clientBorder); the titlebar has to
+ * carry that line on along its sides and top, or a window still melts into
+ * a white background there.  With a compositor clientBorder is 0 and the
+ * drop shadow separates the window instead; a theme that paints a window
+ * frame of its own (frameBorderWidth) decides about its edges itself. */
++ (void)drawOutlineForTitlebar:(XCBTitleBar *)titlebar imageSize:(NSSize)size
+{
+    XCBWindow *parent = [titlebar parentWindow];
+    if (![parent isKindOfClass:[XCBFrame class]]) {
+        return;
+    }
+    XCBFrame *frame = (XCBFrame *)parent;
+    int lineWidth = [frame clientBorder];
+    if (lineWidth <= 0 || [self frameBorderWidth] > 0) {
+        return;
+    }
+
+    // With edge buttons the titlebar sticks out past the frame on both
+    // sides; only the part inside the frame is seen.
+    XCBRect titlebarRect = [titlebar windowRect];
+    NSRect visible = NSIntersectionRect(
+        NSMakeRect(-titlebarRect.position.x, 0, [frame windowRect].size.width, size.height),
+        NSMakeRect(0, 0, size.width, size.height));
+    GSTheme *theme = [self currentTheme];
+    // The radius XCBFrame -applyCornerShapes cuts the corners with
+    int radius = [theme respondsToSelector:@selector(titlebarCornerRadius)]
+               ? (int)[theme titlebarCornerRadius] : 0;
+
+    [URSWindowOutlineColor() set];
+    for (NSValue *rect in URSTitlebarOutlineRects(visible, radius, lineWidth)) {
+        NSRectFill([rect rectValue]);
+    }
+}
+
 #pragma mark - Utility Panel Titlebar Rendering
 
 // Utility panels (NSPanel/NSUtilityWindowMask) get a fixed 16px titlebar
@@ -934,6 +972,8 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                 }
             }
         }
+
+        [self drawOutlineForTitlebar:titlebar imageSize:titlebarSize];
 
         // Read the pixels while the image is focused: -TIFFRepresentation
         // would add the bitmap to the reused image and serve that stale
@@ -1231,6 +1271,8 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             [dividers setLineWidth:(1.0 * WMScaleFactor())];
             [dividers stroke];
         }
+
+        [self drawOutlineForTitlebar:titlebar imageSize:titlebarSize];
 
         // Read the pixels while the image is focused: -TIFFRepresentation
         // would add the bitmap to the reused image and serve that stale
@@ -1921,6 +1963,8 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
             [dividers setLineWidth:(1.0 * WMScaleFactor())];
             [dividers stroke];
         }
+
+        [self drawOutlineForTitlebar:titlebar imageSize:titlebarSize];
 
         // Read the pixels while the image is focused: -TIFFRepresentation
         // would add the bitmap to the reused image and serve that stale
