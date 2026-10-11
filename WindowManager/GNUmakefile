@@ -56,6 +56,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSFlowLayout.m \
 		URSDeckLayout.m \
 		URSSourceDirectory.m \
+		URSCommandLine.m \
 		URSWindowFlowController.m \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \

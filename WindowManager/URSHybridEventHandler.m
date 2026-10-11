@@ -185,6 +185,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 @synthesize windowSwitcher;
 @synthesize compositingManager;
 @synthesize compositingRequested;
+@synthesize replaceRequested;
 @synthesize focusManager;
 @synthesize keyboardManager;
 @synthesize workareaManager;
@@ -438,6 +439,19 @@ static CGFloat WMLastScaleFactor = 1.0;
 - (BOOL)registerAsWindowManager
 {
     XCBScreen *screen = [[connection screens] objectAtIndex:0];
+
+    if (!self.replaceRequested) {
+        // Only one client can hold SubstructureRedirect on the root window; a
+        // refused request means a window manager runs, which must not be
+        // taken over unless the user asked for it.  Holding the redirect here
+        // is harmless as the registration below wants it as well.
+        uint32_t redirectMask = XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT | XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
+        if (![[screen rootWindow] changeAttributes:&redirectMask withMask:XCB_CW_EVENT_MASK checked:YES]) {
+            fprintf(stderr, "WindowManager: another window manager is already running; use --replace to replace it\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
     XCBVisual *visual = [[XCBVisual alloc] initWithVisualId:[screen screen]->root_visual];
     [visual setVisualTypeForScreen:screen];
 
@@ -3061,6 +3075,19 @@ static CGFloat WMLastScaleFactor = 1.0;
         XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
         xcb_atom_t wmS0Atom = [atomService cacheAtom:@"WM_S0"];
         
+        // A replacing window manager already owns the selection by the time
+        // this one shuts down; releasing it then would send the newcomer a
+        // SelectionClear and make it quit too.
+        xcb_get_selection_owner_reply_t *ownerReply =
+            xcb_get_selection_owner_reply([connection connection],
+                                          xcb_get_selection_owner([connection connection], wmS0Atom), NULL);
+        BOOL stillOwner = ownerReply != NULL && selectionManagerWindow != nil
+                          && ownerReply->owner == [selectionManagerWindow window];
+        free(ownerReply);
+        if (!stillOwner) {
+            return;
+        }
+
         // Set selection owner to None (releases ownership)
         xcb_set_selection_owner([connection connection],
                                XCB_NONE,

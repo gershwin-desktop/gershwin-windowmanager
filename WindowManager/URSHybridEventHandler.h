@@ -53,6 +53,8 @@
 // Compositing Manager
 @property (strong, nonatomic) URSCompositingManager *compositingManager;
 @property (assign, nonatomic) BOOL compositingRequested;
+// Set by --replace; without it a running window manager is left alone.
+@property (assign, nonatomic) BOOL replaceRequested;
 
 // --- Single-responsibility managers ---
 @property (strong, nonatomic) URSFocusManager *focusManager;
