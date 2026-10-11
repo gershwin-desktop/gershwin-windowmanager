@@ -4831,7 +4831,10 @@ static const double URSProjectiveEdgeMargin = 0.25;
     if (!self.presentation) {
         return 1.0;
     }
-    return URSClampDouble([self.presentation opacityForWindow:cw.windowId], 0.0, 1.0);
+    // A live miniature is part of its Dock on the screen, so it fades with
+    // the Dock (Alt-Tab, the overview), not as the minimized window it is.
+    xcb_window_t shownAs = cw.liveMiniature ? cw.miniatureDock : cw.windowId;
+    return URSClampDouble([self.presentation opacityForWindow:shownAs], 0.0, 1.0);
 }
 
 // Mask that fades a window's shadow with it: XCB_NONE when it is not faded,
