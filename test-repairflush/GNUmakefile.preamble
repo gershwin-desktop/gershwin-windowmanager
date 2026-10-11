@@ -66,6 +66,7 @@ WM_COLLABORATORS = \
 	../WindowManager/URSFlipSideController.m \
 	../WindowManager/URSSourceDirectory.m \
 	../WindowManager/URSDeckLayout.m \
+	../WindowManager/URSCloseRequestPlan.m \
 	../WindowManager/URSBackgroundRender.m \
 	../WindowManager/GSThemeTitleBar.m \
 	../WindowManager/xcb/XCBConnection.m \
