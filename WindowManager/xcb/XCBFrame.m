@@ -16,6 +16,7 @@
 #import "XCBAtomService.h"
 #import "URSShapePath.h"
 #import "URSFrameMove.h"
+#import "URSLiveMiniatureController.h"
 
 // Loose typing for the compositor, mirroring the NSClassFromString lookup
 // the xcb layer uses everywhere; keeps URSCompositingManager.h out of here.
@@ -2271,5 +2272,14 @@ static const NSTimeInterval URSWindowTitleActivityWindow = 2.0;
     children = nil;
 }
 
+
+// Every way of restoring a window (WM_CHANGE_STATE, _NET_ACTIVE_WINDOW,
+// the window switcher) passes through here, so this is where a live
+// miniature turns back into a window at its own place.
+- (void) setNormalState
+{
+    [[[self connection] liveMiniatures] restoreFrame:self];
+    [super setNormalState];
+}
 
 @end

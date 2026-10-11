@@ -22,6 +22,7 @@
 #import "URSThemeIntegration.h"
 #import "URSUtilityRestackOrder.h"
 #import "URSWindowOutline.h"
+#import "URSLiveMiniatureController.h"
 #import <GNUstepGUI/GSTheme.h>
 #import <AppKit/NSColor.h>
 #import <AppKit/NSGraphics.h>
@@ -2923,6 +2924,20 @@ static XCBConnection *sharedInstance;
     }
     else
     {
+        // An application brings back its own minimized window (deminiaturize,
+        // its Window menu) by mapping and raising it.  A live miniature is
+        // still mapped, so only the raise arrives.
+        XCBFrame *liveFrame = (XCBFrame *)[window parentWindow];
+        if ((anEvent->value_mask & XCB_CONFIG_WINDOW_STACK_MODE) &&
+            anEvent->stack_mode == XCB_STACK_MODE_ABOVE &&
+            [liveFrame isKindOfClass:[XCBFrame class]] &&
+            [self.liveMiniatures isLiveMiniature:liveFrame])
+        {
+            [self restoreMinimizedFrame:liveFrame
+                               titleBar:(XCBTitleBar *)[liveFrame childWindowForKey:TitleBar]
+                                 client:window
+                                 window:window];
+        }
         [window configureForEvent:anEvent];
     }
 
@@ -3852,6 +3867,8 @@ static XCBConnection *sharedInstance;
 
  - (void) handlePropertyNotify:(xcb_property_notify_event_t*)anEvent
 {
+    [self.liveMiniatures propertyChanged:anEvent->atom ofWindow:anEvent->window];
+
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:self];
 
     NSString *name = [atomService atomNameFromAtom:anEvent->atom];
@@ -3986,6 +4003,58 @@ static XCBConnection *sharedInstance;
     window = nil;
 
     return;
+}
+
+// Shows a minimized window again at its own place, with the restore
+// animation out of its icon or tile, and focuses it.
+- (void)restoreMinimizedFrame:(XCBFrame *)frame
+                     titleBar:(XCBTitleBar *)titleBar
+                       client:(XCBWindow *)clientWindow
+                       window:(XCBWindow *)window
+{
+    if (frame != nil)
+    {
+        [self mapWindow:frame];
+        [frame setIsMinimized:NO];
+        [frame setNormalState];
+    }
+
+    if (titleBar != nil)
+    {
+        [self mapWindow:titleBar];
+        [titleBar drawTitleBarComponents];
+    }
+
+    if (clientWindow)
+    {
+        [self mapWindow:clientWindow];
+        [clientWindow setIsMinimized:NO];
+        [clientWindow setNormalState];
+    }
+
+    XCBWindow *restoreTarget = frame ? (XCBWindow *)frame : window;
+    if (restoreTarget) {
+        Class compositorClass = NSClassFromString(@"URSCompositingManager");
+        id<URSCompositingManaging> compositor = nil;
+        if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
+            compositor = [compositorClass performSelector:@selector(sharedManager)];
+        }
+        if (compositor && [compositor compositingActive]) {
+            XCBWindow *iconWindow = clientWindow ? clientWindow : restoreTarget;
+            XCBRect iconRect = XCBInvalidRect;
+            [self resolveIconGeometryForWindow:iconWindow outRect:&iconRect];
+            XCBRect endRect = [restoreTarget windowRect];
+            [compositor animateWindowRestore:[restoreTarget window]
+                                   fromRect:iconRect
+                                     toRect:endRect];
+        }
+    }
+
+    [frame stackAbove];
+    [frame raiseResizeHandle];
+    [self restackDockWindowsAbove];
+    [clientWindow focus];
+    [self drawAllTitleBarsExcept:titleBar];
 }
 
 - (BOOL)resolveIconGeometryForWindow:(XCBWindow *)window outRect:(XCBRect *)rectOut
@@ -4177,10 +4246,15 @@ static XCBConnection *sharedInstance;
             XCBRect startRect = [targetWindow windowRect];
 
             if (compositor && [compositor compositingActive]) {
+                [self.liveMiniatures minimizeWillStartForFrame:frame client:clientWindow];
                 // Defer unmap until the compositor finishes the minimize
                 // animation, so the window stays in the X server tree and
                 // the compositor's stacking order cache can find it.
     void (^hideWindows)(void) = ^{
+                    // A window the Dock shows live stays mapped.
+                    if ([self.liveMiniatures minimizeDidEndForFrame:frame client:clientWindow]) {
+                        return;
+                    }
                     if (frame != nil) {
                         [frame setIconicState];
                         [frame setIsMinimized:YES];
@@ -4226,49 +4300,7 @@ static XCBConnection *sharedInstance;
     {
         //NSLog(@"[WM_CHANGE_STATE] Restoring window %u", anEvent->window);
 
-        if (frame != nil)
-        {
-            [self mapWindow:frame];
-            [frame setIsMinimized:NO];
-            [frame setNormalState];
-        }
-
-        if (titleBar != nil)
-        {
-            [self mapWindow:titleBar];
-            [titleBar drawTitleBarComponents];
-        }
-
-        if (clientWindow)
-        {
-            [self mapWindow:clientWindow];
-            [clientWindow setIsMinimized:NO];
-            [clientWindow setNormalState];
-        }
-
-        XCBWindow *restoreTarget = frame ? (XCBWindow *)frame : window;
-        if (restoreTarget) {
-            Class compositorClass = NSClassFromString(@"URSCompositingManager");
-            id<URSCompositingManaging> compositor = nil;
-            if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
-                compositor = [compositorClass performSelector:@selector(sharedManager)];
-            }
-            if (compositor && [compositor compositingActive]) {
-                XCBWindow *iconWindow = clientWindow ? clientWindow : restoreTarget;
-                XCBRect iconRect = XCBInvalidRect;
-                [self resolveIconGeometryForWindow:iconWindow outRect:&iconRect];
-                XCBRect endRect = [restoreTarget windowRect];
-                [compositor animateWindowRestore:[restoreTarget window]
-                                       fromRect:iconRect
-                                         toRect:endRect];
-            }
-        }
-
-        [frame stackAbove];
-        [frame raiseResizeHandle];
-        [self restackDockWindowsAbove];
-        [clientWindow focus];
-        [self drawAllTitleBarsExcept:titleBar];
+        [self restoreMinimizedFrame:frame titleBar:titleBar client:clientWindow window:window];
 
         //NSLog(@"[WM_CHANGE_STATE] Window restored");
     }

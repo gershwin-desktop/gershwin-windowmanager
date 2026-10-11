@@ -29,6 +29,7 @@
 @class EWMHService;
 @class XCBAtomService;
 @class XCBRegion;
+@class URSLiveMiniatureController;
 
 // What only the window manager above XCBKit knows about closing a client:
 // whether another window stands in for it, and whether it shows a sheet.
@@ -77,6 +78,7 @@
 @property (nonatomic, assign) BOOL snapPreviewShown;
 @property (nonatomic, assign) BOOL adoptingExistingWindows;
 @property (nonatomic, weak) id<XCBCloseRequestRouting> closeRequestRouter;
+@property (nonatomic, strong) URSLiveMiniatureController *liveMiniatures;
 
 + (XCBConnection *) sharedConnectionAsWindowManager:(BOOL)asWindowManager;
 - (xcb_connection_t *) connection;

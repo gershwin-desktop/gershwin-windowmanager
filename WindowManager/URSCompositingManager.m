@@ -18,6 +18,7 @@
 #import "URSProfiler.h"
 #import "URSHoldLastFrameEffect.h"
 #import "URSFlipSideGeometry.h"
+#import "URSLiveMiniatureLayout.h"
 #import "XCBScreen.h"
 #import <xcb/xcb.h>
 #import <xcb/composite.h>
@@ -180,6 +181,14 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 @property (assign, nonatomic) XCBRect animationEndRect;
 // Completion callback fired from finishAnimationForWindow:
 @property (copy, nonatomic) dispatch_block_t animationCompletion;
+// A minimized window shown live in its Dock tile (see
+// showLiveMiniatureOfWindow:inTile:aboveWindow:): painted into the tile,
+// right above the Dock window, instead of at its own place.
+@property (assign, nonatomic) BOOL liveMiniature;
+@property (assign, nonatomic) XCBRect miniatureTile;
+@property (assign, nonatomic) xcb_window_t miniatureDock;
+@property (assign, nonatomic) NSTimeInterval lastMiniaturePaint;
+@property (assign, nonatomic) BOOL miniatureRepaintPending;
 @end
 
 @implementation URSCompositeWindow
@@ -2588,6 +2597,10 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         URSCompositeWindow *cw = self.cwindows[key];
         if (!cw) continue;
 
+        if (cw.liveMiniature) {
+            [self damageLiveMiniature:cw];
+            cw.liveMiniature = NO;
+        }
         cw.viewable = NO;
         cw.damaged = NO;
 
@@ -2871,6 +2884,17 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     // picture from the live drawable would be empty and the animation would
     // paint nothing.
     if (cw.closeAnimating) {
+        return;
+    }
+
+    if (cw.liveMiniature) {
+        // The window is not on screen at its own place, so its damage says
+        // nothing about which screen pixels changed: the whole tile does.
+        if (cw.damage != XCB_NONE) {
+            xcb_damage_subtract(conn, cw.damage, XCB_NONE, XCB_NONE);
+        }
+        cw.damaged = YES;
+        [self scheduleLiveMiniatureRepaint:cw];
         return;
     }
 
@@ -3502,6 +3526,145 @@ static inline xcb_render_transform_t URSIdentityTransform(void) {
                          duration:0.4
                              fade:YES
                     minimizing:NO];
+}
+
+#pragma mark - Live miniatures
+
+// The Dock writes the rect the content goes into, inside its tile's frame.
+static const CGFloat URSLiveMiniatureInset = 0.0;
+// 30 frames per second: a video in a tile keeps moving, at a cost bounded
+// by the number of tiles rather than by how fast clients redraw.
+static const NSTimeInterval URSLiveMiniatureMinInterval = 1.0 / 30.0;
+
+- (NSRect)liveMiniaturePaintRect:(URSCompositeWindow *)cw tile:(XCBRect)tile {
+    NSRect tileRect = NSMakeRect(tile.position.x, tile.position.y,
+                                 tile.size.width, tile.size.height);
+    NSSize size = NSMakeSize((double)cw.width + 2.0 * cw.borderWidth,
+                             (double)cw.height + 2.0 * cw.borderWidth);
+    return [URSLiveMiniatureLayout paintRectForTile:tileRect
+                                         windowSize:size
+                                              inset:URSLiveMiniatureInset];
+}
+
+- (void)damageNSRect:(NSRect)r {
+    if (NSIsEmptyRect(r)) {
+        return;
+    }
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_rectangle_t rect = { (int16_t)NSMinX(r), (int16_t)NSMinY(r),
+                             (uint16_t)NSWidth(r), (uint16_t)NSHeight(r) };
+    xcb_xfixes_region_t region = xcb_generate_id(conn);
+    xcb_xfixes_create_region(conn, region, 1, &rect);
+    [self addDamage:region];
+}
+
+- (void)damageLiveMiniature:(URSCompositeWindow *)cw {
+    [self damageNSRect:[self liveMiniaturePaintRect:cw tile:cw.miniatureTile]];
+}
+
+- (void)scheduleLiveMiniatureRepaint:(URSCompositeWindow *)cw {
+    if (cw.miniatureRepaintPending) {
+        return;
+    }
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    NSTimeInterval delay = [URSLiveMiniatureLayout repaintDelaySinceLastPaint:cw.lastMiniaturePaint
+                                                                           now:now
+                                                                   minInterval:URSLiveMiniatureMinInterval];
+    if (delay <= 0) {
+        cw.lastMiniaturePaint = now;
+        [self damageLiveMiniature:cw];
+        return;
+    }
+    cw.miniatureRepaintPending = YES;
+    [self performSelector:@selector(liveMiniatureRepaintDue:)
+               withObject:@(cw.windowId)
+               afterDelay:delay];
+}
+
+- (void)liveMiniatureRepaintDue:(NSNumber *)windowId {
+    URSCompositeWindow *cw = [self findCWindow:[windowId unsignedIntValue]];
+    if (!cw) {
+        return;
+    }
+    cw.miniatureRepaintPending = NO;
+    if (!cw.liveMiniature) {
+        return;
+    }
+    cw.lastMiniaturePaint = [NSDate timeIntervalSinceReferenceDate];
+    [self damageLiveMiniature:cw];
+    [self scheduleRepair];
+}
+
+- (void)showLiveMiniatureOfWindow:(xcb_window_t)windowId
+                           inTile:(XCBRect)tile
+                      aboveWindow:(xcb_window_t)dockWindow {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw) {
+        return;
+    }
+    if (cw.liveMiniature) {
+        [self damageLiveMiniature:cw];
+    } else {
+        // It leaves its own place.
+        [self damageWindowArea:cw];
+    }
+    cw.liveMiniature = YES;
+    cw.miniatureTile = tile;
+    cw.miniatureDock = dockWindow;
+    [self damageLiveMiniature:cw];
+    [self scheduleRepair];
+}
+
+- (void)hideLiveMiniatureOfWindow:(xcb_window_t)windowId {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw || !cw.liveMiniature) {
+        return;
+    }
+    [self damageLiveMiniature:cw];
+    cw.liveMiniature = NO;
+    [self damageWindowArea:cw];
+    [self scheduleRepair];
+}
+
+- (void)retargetMinimizeOfWindow:(xcb_window_t)windowId
+                          toTile:(XCBRect)tile
+                          fading:(BOOL)fading {
+    URSCompositeWindow *cw = [self findCWindow:windowId];
+    if (!cw || !cw.animating || !cw.animatingMinimize) {
+        return;
+    }
+    NSRect target = [self liveMiniaturePaintRect:cw tile:tile];
+    if (NSIsEmptyRect(target)) {
+        return;
+    }
+    cw.animationEndRect = XCBMakeRect(XCBMakePoint(NSMinX(target), NSMinY(target)),
+                                      XCBMakeSize((uint16_t)NSWidth(target),
+                                                  (uint16_t)NSHeight(target)));
+    cw.animatingFade = fading;
+    // The frames already painted lie along the old path, which the
+    // animation's own damage (start to end) no longer covers.
+    [self damageScreen];
+    [self scheduleRepair];
+}
+
+- (void)paintLiveMiniatures:(NSArray<URSCompositeWindow *> *)miniatures
+                       clip:(xcb_xfixes_region_t)clip
+                paintedBBox:(xcb_rectangle_t)paintedBBox {
+    xcb_connection_t *conn = [self.connection connection];
+    for (URSCompositeWindow *cw in miniatures) {
+        NSRect r = [self liveMiniaturePaintRect:cw tile:cw.miniatureTile];
+        if (NSIsEmptyRect(r)) {
+            continue;
+        }
+        xcb_rectangle_t box = { (int16_t)NSMinX(r), (int16_t)NSMinY(r),
+                                (uint16_t)NSWidth(r), (uint16_t)NSHeight(r) };
+        if (!URSRectIntersects(box, paintedBBox)) {
+            continue;
+        }
+        xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clip, 0, 0);
+        [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:clip presentedRect:&r];
+        cw.lastMiniaturePaint = [NSDate timeIntervalSinceReferenceDate];
+    }
 }
 
 // Shrink (e.g. unmaximize) animation: the window's own (start) rect is the
@@ -4418,9 +4581,18 @@ static const double URSProjectiveEdgeMargin = 0.25;
     }
 
     if (wasMinimized) {
-        cw.viewable = NO;
-        cw.damaged = NO;
-        [self freeWindowData:cw delete:NO];
+        // The completion decides what becomes of the window: unmapped as
+        // always, or kept mapped as a live miniature, whose picture has to
+        // survive.
+        if (cw.animationCompletion) {
+            cw.animationCompletion();
+            cw.animationCompletion = nil;
+        }
+        if (!cw.liveMiniature) {
+            cw.viewable = NO;
+            cw.damaged = NO;
+            [self freeWindowData:cw delete:NO];
+        }
     } else if (!cw.viewable) {
         [self freeWindowData:cw delete:NO];
     } else if (cw.snapshotPixmap != XCB_NONE) {
@@ -4768,6 +4940,8 @@ static const double URSProjectiveEdgeMargin = 0.25;
     xcb_window_t rootWindow = self.rootWindow;
     uint16_t screenWidth = self.screenWidth;
     NSMutableArray<URSCompositeWindow *> *paintList = [NSMutableArray array];
+    NSMutableDictionary<NSNumber *, NSMutableArray<URSCompositeWindow *> *> *miniaturesByDock =
+        [NSMutableDictionary dictionary];
     // Find Menu.app and ensure its shadow is created early so we can
     // paint it at the desktop z-order (below all other windows).
     URSCompositeWindow *menuCW = nil;
@@ -4812,6 +4986,14 @@ static const double URSProjectiveEdgeMargin = 0.25;
         if (self.flipSideFrames[key] != nil) {
             continue;
         }
+        if (cw.liveMiniature && !cw.animating) {
+            NSNumber *dock = @(cw.miniatureDock);
+            if (!miniaturesByDock[dock]) {
+                miniaturesByDock[dock] = [NSMutableArray array];
+            }
+            [miniaturesByDock[dock] addObject:cw];
+            continue;
+        }
         [paintList addObject:cw];
     }
     if ([self.presentation respondsToSelector:@selector(paintOrderForWindows:)]) {
@@ -4835,7 +5017,17 @@ static const double URSProjectiveEdgeMargin = 0.25;
     xcb_rectangle_t paintedBBox = damageBBox;
 
     // Paint windows from bottom to top (so higher z-order windows are on top)
+    // Miniatures go right above their Dock: over its tiles, under everything
+    // stacked above the Dock (its menus, tooltips).  They are painted at the
+    // top of the next pass through the loop, since the Dock's own pass may
+    // end early with nothing to repaint.
+    NSArray<URSCompositeWindow *> *miniaturesDue = nil;
     for (URSCompositeWindow *cw in paintList) {
+        if (miniaturesDue) {
+            [self paintLiveMiniatures:miniaturesDue clip:freshRegion paintedBBox:paintedBBox];
+            miniaturesDue = nil;
+        }
+        miniaturesDue = miniaturesByDock[@(cw.windowId)];
 
         NSRect presentedRect;
         BOOL presented = self.presentation != nil && cw.viewable &&
@@ -5021,6 +5213,10 @@ static const double URSProjectiveEdgeMargin = 0.25;
             }
             menuShadowPainted = YES;
         }
+    }
+
+    if (miniaturesDue) {
+        [self paintLiveMiniatures:miniaturesDue clip:freshRegion paintedBBox:paintedBBox];
     }
 
     // Reset the clip region on rootBuffer so no stale clip affects
@@ -6247,7 +6443,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     // vanishing would read as a blink.
     BOOL playingEffect = animating && cw.effect != nil;
     BOOL repositioned = playingEffect || presented;
-    if (cw.shadowPicture != XCB_NONE && (!animating || playingEffect) && !skipShadow && cw.picture != XCB_NONE && cw.pictureValid) {
+    if (cw.shadowPicture != XCB_NONE && (!animating || playingEffect) && !skipShadow && !cw.liveMiniature && cw.picture != XCB_NONE && cw.pictureValid) {
         // The composite above ran under a clip to the window's full rect.
         // The shadow strips are semi-transparent and must ONLY be composited
         // over pixels that are fresh this cycle (background fill or a lower

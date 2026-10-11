@@ -34,6 +34,7 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
 - Flip side layout, plan and orphans: `gnustep-tests test-flipside` (headless).
 - Which previous window manager may be terminated: `gnustep-tests test-previouswm` (headless).
 - Show Desktop layout: `gnustep-tests test-showdesktop` (headless).
+- Live miniature geometry: `gnustep-tests test-liveminiature` (headless).
 - Wobbly window model: `gnustep-tests test-wobbly` (headless).
 - `test/` is a manual app (KillTest.app), not part of the automated suite.
 
@@ -71,6 +72,19 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
   close animation is driven by `UnmapNotify`. The property is deleted after
   reading (one-shot); a re-mapped window without a fresh property must NOT
   reuse it.
+
+## Live miniature protocol (cross-repo contract)
+
+- Documented in `URSLiveMiniatureController.h`. WM advertises
+  `_WINDOW_LIVE_MINIATURE` in `_NET_SUPPORTED` and lists minimizing and
+  live-minimized client windows in the root's `_WINDOW_LIVE_MINIATURES`; the
+  Dock (gershwin-workspace `Desktop/Dock/DockMiniatureWatcher.m`) answers per
+  window with its tile rect (`_NET_WM_ICON_GEOMETRY`) and then its own window
+  in `_WINDOW_LIVE_MINIATURE`. Change both sides together.
+- A live miniature stays mapped with an empty input shape and WM_STATE Iconic;
+  every restore path goes through `-[XCBFrame setNormalState]`, which hands it
+  back to its own place. An application's own raise of it (ConfigureRequest
+  Above) restores it too, since no MapRequest comes for a mapped window.
 
 ## Titlebar button property (cross-repo contract)
 
