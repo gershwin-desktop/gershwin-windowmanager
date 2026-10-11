@@ -79,6 +79,21 @@ typedef void (^dispatch_block_t)(void);
 - (void)animateWindowRestore:(xcb_window_t)windowId
                                         fromRect:(XCBRect)startRect
                                             toRect:(XCBRect)endRect;
+// A minimize still flying gets a new destination (the Dock tile made for
+// the window after the flight started); it no longer fades when it lands in
+// a live miniature, since the miniature takes over from it.
+- (void)retargetMinimizeOfWindow:(xcb_window_t)windowId
+                          toTile:(XCBRect)tile
+                          fading:(BOOL)fading;
+
+// Live miniatures: a minimized window that stays mapped is no longer painted
+// where it is, but scaled into its Dock tile (root pixels), right above the
+// Dock window, and repainted there as its content changes.  Calling it again
+// moves the miniature.
+- (void)showLiveMiniatureOfWindow:(xcb_window_t)windowId
+                           inTile:(XCBRect)tile
+                      aboveWindow:(xcb_window_t)dockWindow;
+- (void)hideLiveMiniatureOfWindow:(xcb_window_t)windowId;
 // Bend the window's picture over the deformation's mesh until it reports
 // being flat (nil ends it at once).  Ignored while the window animates.
 - (void)setDeformation:(id<URSWindowDeformation>)deformation forWindow:(xcb_window_t)windowId;

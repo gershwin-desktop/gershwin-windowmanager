@@ -245,6 +245,9 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                                        windowSwitcher:self.windowSwitcher
                                                                       workareaManager:self.workareaManager];
     self.flipSideController = [[URSFlipSideController alloc] initWithConnection:connection];
+    self.liveMiniatureController = [[URSLiveMiniatureController alloc] initWithConnection:connection];
+    self.liveMiniatureController.focusManager = self.focusManager;
+    connection.liveMiniatures = self.liveMiniatureController;
     self.sheetController = [[URSSheetController alloc] initWithConnection:connection];
     // A sheet of the terminal on a window's back hangs from that window.
     self.sheetController.host = self.flipSideController;
@@ -306,6 +309,7 @@ static CGFloat WMLastScaleFactor = 1.0;
         self.overviewController.compositingManager = self.compositingManager;
         self.windowSwitcher.flowController.compositingManager = self.compositingManager;
         self.showDesktopController.compositingManager = self.compositingManager;
+        self.liveMiniatureController.compositingManager = self.compositingManager;
         for (URSAttachmentController *attachments in self.attachmentControllers) {
             attachments.compositingManager = self.compositingManager;
         }
@@ -1462,6 +1466,7 @@ static CGFloat WMLastScaleFactor = 1.0;
             }
             [connection handleUnMapNotify:unmapNotifyEvent];
             [self.showDesktopController windowUnmapped:unmapNotifyEvent->window];
+            [self.liveMiniatureController windowUnmapped:unmapNotifyEvent->window];
 
             // Notify compositor of unmap event. The compositor will remove the
             // entire logical window group atomically, including decorations,
@@ -1497,6 +1502,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
             [connection handleDestroyNotify:destroyNotify];
             [self.showDesktopController windowDestroyed:destroyNotify->window];
+            [self.liveMiniatureController windowDestroyed:destroyNotify->window];
             for (URSAttachmentController *attachments in self.attachmentControllers) {
                 [attachments windowDestroyed:destroyNotify->window];
             }

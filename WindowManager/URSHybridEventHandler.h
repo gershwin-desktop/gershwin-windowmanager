@@ -25,6 +25,7 @@
 #import "URSSnappingMenuController.h"
 #import "URSOverviewController.h"
 #import "URSShowDesktopController.h"
+#import "URSLiveMiniatureController.h"
 #import "URSSheetController.h"
 #import "URSFlipSideController.h"
 #import "URSWobblyWindowsController.h"
@@ -64,6 +65,7 @@
 @property (strong, nonatomic) URSSnappingMenuController *snappingMenuController;
 @property (strong, nonatomic) URSOverviewController *overviewController;
 @property (strong, nonatomic) URSShowDesktopController *showDesktopController;
+@property (strong, nonatomic) URSLiveMiniatureController *liveMiniatureController;
 @property (strong, nonatomic) URSWobblyWindowsController *wobblyWindowsController;
 // Sheets and drawers: windows that hang from a parent instead of being
 // framed.
