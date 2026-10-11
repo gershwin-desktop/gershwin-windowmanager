@@ -37,5 +37,16 @@ int main(int argc, char **argv)
     PASS(parse("--help", NULL).helpRequested, "--help asks for help");
     PASS(!parse("-replace", NULL).replaceRequested, "only the double-dash spelling counts");
   END_SET("URSCommandLine")
+
+  START_SET("takeover")
+    PASS([URSCommandLine takeoverActionWithReplaceRequested: NO otherManagerRunning: NO fromTerminal: NO]
+         == URSTakeoverProceed, "a free screen is taken without asking");
+    PASS([URSCommandLine takeoverActionWithReplaceRequested: NO otherManagerRunning: YES fromTerminal: YES]
+         == URSTakeoverRefuse, "from a terminal a running manager is not replaced unasked");
+    PASS([URSCommandLine takeoverActionWithReplaceRequested: NO otherManagerRunning: YES fromTerminal: NO]
+         == URSTakeoverAsk, "from a launcher the user is asked");
+    PASS([URSCommandLine takeoverActionWithReplaceRequested: YES otherManagerRunning: YES fromTerminal: NO]
+         == URSTakeoverProceed, "--replace needs no question");
+  END_SET("takeover")
   return 0;
 }

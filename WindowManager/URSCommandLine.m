@@ -25,4 +25,14 @@
     return line;
 }
 
++ (URSTakeoverAction)takeoverActionWithReplaceRequested:(BOOL)replaceRequested
+                                    otherManagerRunning:(BOOL)otherManagerRunning
+                                           fromTerminal:(BOOL)fromTerminal
+{
+    if (!otherManagerRunning || replaceRequested) {
+        return URSTakeoverProceed;
+    }
+    return fromTerminal ? URSTakeoverRefuse : URSTakeoverAsk;
+}
+
 @end

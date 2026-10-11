@@ -10,6 +10,7 @@
 //
 
 #import "URSHybridEventHandler.h"
+#import "URSCommandLine.h"
 #import "URSDrawerController.h"
 #import <unistd.h>
 #import <fcntl.h>
@@ -436,6 +437,18 @@ static CGFloat WMLastScaleFactor = 1.0;
 
 #pragma mark - Original URSEventHandler Methods (Preserved)
 
+// A double click on the application has no terminal to report on, and the
+// user who started it most likely wants it to take over.
+- (BOOL)askToReplaceRunningWindowManager
+{
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = NSLocalizedString(@"Another window manager is running", @"");
+    alert.informativeText = NSLocalizedString(@"Do you want to replace it with WindowManager?", @"");
+    [alert addButtonWithTitle:NSLocalizedString(@"Replace", @"")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"")];
+    return [alert runModal] == NSAlertFirstButtonReturn;
+}
+
 - (BOOL)registerAsWindowManager
 {
     XCBScreen *screen = [[connection screens] objectAtIndex:0];
@@ -446,9 +459,23 @@ static CGFloat WMLastScaleFactor = 1.0;
         // taken over unless the user asked for it.  Holding the redirect here
         // is harmless as the registration below wants it as well.
         uint32_t redirectMask = XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT | XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
-        if (![[screen rootWindow] changeAttributes:&redirectMask withMask:XCB_CW_EVENT_MASK checked:YES]) {
+        BOOL otherRunning = ![[screen rootWindow] changeAttributes:&redirectMask
+                                                          withMask:XCB_CW_EVENT_MASK
+                                                           checked:YES];
+        switch ([URSCommandLine takeoverActionWithReplaceRequested:NO
+                                               otherManagerRunning:otherRunning
+                                                      fromTerminal:isatty(STDIN_FILENO) != 0]) {
+        case URSTakeoverProceed:
+            break;
+        case URSTakeoverRefuse:
             fprintf(stderr, "WindowManager: another window manager is already running; use --replace to replace it\n");
             exit(EXIT_FAILURE);
+        case URSTakeoverAsk:
+            if (![self askToReplaceRunningWindowManager]) {
+                exit(EXIT_SUCCESS);
+            }
+            self.replaceRequested = YES;
+            break;
         }
     }
 

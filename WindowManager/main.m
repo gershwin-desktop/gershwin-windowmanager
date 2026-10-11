@@ -91,7 +91,8 @@ int main(int argc, const char * argv[])
             printf("  -h, --help          Show this help message\n\n");
             printf("By default, windows use XRender compositing for transparency effects.\n");
             printf("Use -dc to force traditional direct rendering mode.\n");
-            printf("Without --replace, the program exits if another window manager is running.\n");
+            printf("Without --replace, a running window manager is only replaced after asking\n");
+            printf("(from a terminal the program exits with an error instead).\n");
             return 0;
         }
         BOOL enableCompositing = commandLine.compositingEnabled;

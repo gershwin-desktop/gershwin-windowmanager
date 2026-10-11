@@ -51,7 +51,7 @@ Options:
   -h, --help          Show help message
 ```
 
-**Replacing a window manager:** without `--replace`, WindowManager exits with an error if another window manager is already running. With `--replace` it takes over from it (including from another WindowManager).
+**Replacing a window manager:** without `--replace`, WindowManager started from a terminal exits with an error if another window manager is already running. Started without a terminal (for example by a double click on the application) it asks whether to replace it. With `--replace` it takes over without asking, including from another WindowManager.
 
 **Compositing Mode:**
 - **Default:** Windows use XRender for transparency effects
