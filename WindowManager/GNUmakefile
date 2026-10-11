@@ -89,6 +89,7 @@ $(APP_NAME)_OBJC_FILES = \
 		xcb/XCBSelection.m \
 		xcb/XCBRegion.m \
 		xcb/XCBShape.m \
+		xcb/URSSnapZone.m \
 		xcb/XCBReply.m \
 		xcb/XCBAttributesReply.m \
 		xcb/XCBGeometryReply.m \
