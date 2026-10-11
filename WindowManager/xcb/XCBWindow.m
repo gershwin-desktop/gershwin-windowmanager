@@ -20,6 +20,7 @@
 #import "XCBFrame.h"
 #import <AppKit/NSAlert.h>
 #import "URSCloseRequestPlan.h"
+#import "URSConfigureRequestPolicy.h"
 
 #define BUTTONMASK  (XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE)
 
@@ -1187,6 +1188,58 @@
     return rect;
 }
 
+// The client lives inside the frame, so its stacking requests are carried
+// out on the frame; on the client they would only reorder it under its own
+// titlebar.  Focus is left alone: a raise request is not an activation.
+- (void) applyStackAction:(URSFrameStackAction)action
+                ofRequest:(xcb_configure_request_event_t *)anEvent
+                  toFrame:(XCBFrame *)frame
+{
+    switch (action)
+    {
+        case URSFrameStackNone:
+            break;
+
+        case URSFrameStackRaise:
+            // The same raise _NET_ACTIVE_WINDOW does, so the Dock, menus and
+            // the application's floating panels stay above the window.
+            [frame stackAbove];
+            [connection restackDockWindowsAbove];
+            break;
+
+        case URSFrameStackLowerAmongPeers:
+            [connection lowerNormalWindowBeneathAllPeers:frame];
+            break;
+
+        case URSFrameStackToBottom:
+            [frame stackBelow];
+            break;
+
+        case URSFrameStackRelative:
+        {
+            uint16_t mask = XCB_CONFIG_WINDOW_STACK_MODE;
+            uint32_t vals[2];
+            unsigned short i = 0;
+
+            if (anEvent->value_mask & XCB_CONFIG_WINDOW_SIBLING)
+            {
+                // A decorated sibling is a child of its own frame; only that
+                // frame is a sibling of ours at the root.
+                XCBWindow *sibling = [connection windowForXCBId:anEvent->sibling];
+                xcb_window_t siblingId = anEvent->sibling;
+                if ([sibling decorated] && [[sibling parentWindow] isKindOfClass:[XCBFrame class]])
+                    siblingId = [[sibling parentWindow] window];
+                mask |= XCB_CONFIG_WINDOW_SIBLING;
+                vals[i++] = siblingId;
+            }
+            vals[i++] = anEvent->stack_mode;
+            xcb_configure_window([connection connection], [frame window], mask, vals);
+            [connection restackDockWindowsAbove];
+            break;
+        }
+    }
+}
+
 - (void) configureForEvent:(xcb_configure_request_event_t *)anEvent
 {
     uint16_t config_frame_mask = 0;
@@ -1210,6 +1263,16 @@
     if (anEvent->parent == [[connection rootWindowForScreenNumber:0] window])
         return;
 
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    URSConfigureRequestInput input;
+    input.valueMask = anEvent->value_mask;
+    input.stackMode = anEvent->stack_mode;
+    input.isDesktop = [[self windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]];
+    input.keepBelow = [self isBelow];
+    input.fixedSize = ![self canResize];
+    URSConfigureRequestDecision decision = URSDecideConfigureRequest(input);
+    ewmhService = nil;
+
     if (anEvent->value_mask & XCB_CONFIG_WINDOW_X)
     {
         // GNUstep's DPSplacewindow uses _XFrameToXHints which sets the client to the
@@ -1232,32 +1295,24 @@
         frameRect.position.y = clamped.y;
     }
 
-    if (anEvent->value_mask & XCB_CONFIG_WINDOW_WIDTH)
+    if (decision.clientValueMask & XCB_CONFIG_WINDOW_WIDTH)
     {
-        if ([self canResize]) {
-            config_frame_mask |= XCB_CONFIG_WINDOW_WIDTH;
-            config_win_mask |= XCB_CONFIG_WINDOW_WIDTH;
-            config_title_mask |= XCB_CONFIG_WINDOW_WIDTH;
-            config_frame_vals[frame_i++] = anEvent->width + 2 * cb;
-            config_win_vals[win_i++] = anEvent->width;
-            config_title_vals[title_i++] = anEvent->width + 2 * cb;
-            frameRect.size.width = anEvent->width + 2 * cb;
-        } else {
-            //NSDebugLog(@"Ignoring width change request in ConfigureRequest for non-resizable window %u", window);
-        }
+        config_frame_mask |= XCB_CONFIG_WINDOW_WIDTH;
+        config_win_mask |= XCB_CONFIG_WINDOW_WIDTH;
+        config_title_mask |= XCB_CONFIG_WINDOW_WIDTH;
+        config_frame_vals[frame_i++] = anEvent->width + 2 * cb;
+        config_win_vals[win_i++] = anEvent->width;
+        config_title_vals[title_i++] = anEvent->width + 2 * cb;
+        frameRect.size.width = anEvent->width + 2 * cb;
     }
 
-    if (anEvent->value_mask & XCB_CONFIG_WINDOW_HEIGHT)
+    if (decision.clientValueMask & XCB_CONFIG_WINDOW_HEIGHT)
     {
-        if ([self canResize]) {
-            config_frame_mask |= XCB_CONFIG_WINDOW_HEIGHT;
-            config_win_mask |= XCB_CONFIG_WINDOW_HEIGHT;
-            config_frame_vals[frame_i++] = anEvent->height + titleHeight + cb;
-            config_win_vals[win_i++] = anEvent->height;
-            frameRect.size.height = anEvent->height + titleHeight + cb;
-        } else {
-            //NSDebugLog(@"Ignoring height change request in ConfigureRequest for non-resizable window %u", window);
-        }
+        config_frame_mask |= XCB_CONFIG_WINDOW_HEIGHT;
+        config_win_mask |= XCB_CONFIG_WINDOW_HEIGHT;
+        config_frame_vals[frame_i++] = anEvent->height + titleHeight + cb;
+        config_win_vals[win_i++] = anEvent->height;
+        frameRect.size.height = anEvent->height + titleHeight + cb;
     }
 
     /* Struts stay reserved for docks such as the menu bar even when the
@@ -1287,28 +1342,6 @@
         config_frame_vals[frame_i++] = anEvent->border_width;
     }
 
-    if (anEvent->value_mask & XCB_CONFIG_WINDOW_SIBLING)
-    {
-        config_win_mask |= XCB_CONFIG_WINDOW_SIBLING;
-        config_win_vals[win_i++] = anEvent->sibling;
-    }
-
-    if (anEvent->value_mask & XCB_CONFIG_WINDOW_STACK_MODE)
-    {
-        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-        BOOL isDesktopWindow = [[self windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]];
-
-        uint32_t stack_mode = anEvent->stack_mode;
-        if (isDesktopWindow && stack_mode == XCB_STACK_MODE_ABOVE) {
-            //NSLog(@"Decorated desktop window %u attempted to stack above - forcing below", window);
-            stack_mode = XCB_STACK_MODE_BELOW;
-        }
-
-        config_win_mask |= XCB_CONFIG_WINDOW_STACK_MODE;
-        config_win_vals[win_i++] = stack_mode;
-        ewmhService = nil;
-    }
-
     XCBTitleBar *titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
     xcb_configure_window([connection connection], window, config_win_mask, config_win_vals);
     xcb_configure_window([connection connection], [frame window], config_frame_mask, config_frame_vals);
@@ -1323,6 +1356,8 @@
     [titleBar updateRectsFromGeometries];
     //[titleBar drawTitleBarComponents]; FIXME: why this draw here?
     [frame setWindowRect:frameRect];
+
+    [self applyStackAction:decision.stackAction ofRequest:anEvent toFrame:frame];
 
     /*** required by ICCCM compliance ***/
 
