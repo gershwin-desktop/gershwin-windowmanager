@@ -10,6 +10,7 @@
 #import "EWMHService.h"
 #import "XCBFrame.h"
 #import "XCBSelection.h"
+#import "URSPreviousWindowManager.h"
 #import "XCBTitleBar.h"
 #import "Transformers.h"
 #import "ICCCMService.h"
@@ -24,7 +25,6 @@
 #import <GNUstepGUI/GSTheme.h>
 #import <AppKit/NSColor.h>
 #import <AppKit/NSGraphics.h>
-#import <dirent.h>
 #import <unistd.h>
 
 #import <objc/message.h> // for dynamic messaging to compositor helper
@@ -102,94 +102,18 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     return 0;
 }
 
-// Resolve a symlink to its actual path
-static NSString *resolveSymlink(NSString *linkPath) {
-    char buffer[PATH_MAX];
-    ssize_t len = readlink([linkPath fileSystemRepresentation], buffer, sizeof(buffer) - 1);
-    if (len != -1) {
-        buffer[len] = '\0';
-        return [NSString stringWithUTF8String:buffer];
-    }
-    return nil;
-}
-
-// Resolve an executable path to its canonical absolute path when possible.
-static NSString *canonicalPathForExecutable(NSString *path)
+// Called after this WM took over WM_Sn: the previous owner on this display
+// should quit on SelectionClear, but a hung copy of ourselves would otherwise
+// keep its frames and grabs, so it is terminated.  Only that owner qualifies:
+// a WindowManager of the same user on another display must survive.
+static void terminatePreviousWindowManager(pid_t previousOwnerPID)
 {
-    char resolved[PATH_MAX];
-
-    if (!path) {
-        return nil;
+    NSString *ownExecutable = URSExecutablePathForProcess(getpid());
+    pid_t victim = URSPreviousWindowManagerToTerminate(previousOwnerPID, getpid(), ownExecutable,
+                                                       ^NSString *(pid_t pid) { return URSExecutablePathForProcess(pid); });
+    if (victim > 0) {
+        URSTerminateProcess(victim);
     }
-
-    if (realpath([path fileSystemRepresentation], resolved) != NULL) {
-        return [NSString stringWithUTF8String:resolved];
-    }
-
-    return path;
-}
-
-// Kill any other instances of this application after we've registered as WM
-static void killOtherInstances(void) {
-    NSString *currentPath = [[NSBundle mainBundle] executablePath];
-    if (!currentPath) {
-        return;
-    }
-
-    pid_t currentPID = getpid();
-    NSString *currentRealPath = canonicalPathForExecutable(currentPath);
-
-    DIR *procDir = opendir("/proc");
-    if (!procDir) {
-        return;
-    }
-
-    struct dirent *entry;
-    while ((entry = readdir(procDir)) != NULL) {
-        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
-            continue;
-        }
-
-        pid_t otherPID = (pid_t)strtol(entry->d_name, NULL, 10);
-        if (otherPID <= 0 || otherPID == currentPID) {
-            continue;
-        }
-
-        NSString *exePath = [NSString stringWithFormat:@"/proc/%d/exe", otherPID];
-        NSString *linkedPath = resolveSymlink(exePath);
-
-        if (!linkedPath) {
-            exePath = [NSString stringWithFormat:@"/proc/%d/file", otherPID];
-            linkedPath = resolveSymlink(exePath);
-        }
-
-        if (!linkedPath) {
-            continue;
-        }
-
-        NSString *otherRealPath = canonicalPathForExecutable(linkedPath);
-
-        if ([otherRealPath isEqualToString:currentRealPath]) {
-            NSLog(@"[WindowManager] Killing stale instance with PID %d", otherPID);
-            kill(otherPID, SIGTERM);
-            usleep(100000);
-
-            BOOL stillAlive = (kill(otherPID, 0) == 0);
-            int waitedMs = 100;
-            while (stillAlive && waitedMs < 2000) {
-                usleep(100000);
-                waitedMs += 100;
-                stillAlive = (kill(otherPID, 0) == 0);
-            }
-
-            if (stillAlive) {
-                NSLog(@"[WindowManager] Force killing stale instance with PID %d", otherPID);
-                kill(otherPID, SIGKILL);
-            }
-        }
-    }
-
-    closedir(procDir);
 }
 
 @interface XCBConnection ()
@@ -201,6 +125,7 @@ static void killOtherInstances(void) {
     NSMutableDictionary<NSNumber *, id> *_windowsToFrameAsOrdinary;
 }
 - (NSSet *)dockOwnerLeaders;
+- (pid_t)windowManagerPIDOwningSelectionOfScreen:(uint32_t)screenId;
 - (BOOL)isDockPopup:(XCBWindow *)aWindow forDockOwnerLeaders:(NSSet *)dockOwnerLeaders;
 @end
 
@@ -4933,6 +4858,9 @@ static XCBConnection *sharedInstance;
     values[0] = XCB_EVENT_MASK_SUBSTRUCTURE_REDIRECT | XCB_EVENT_MASK_SUBSTRUCTURE_NOTIFY;
     XCBWindow *rootWindow = [[XCBWindow alloc] initWithXCBWindow:[[screen rootWindow] window] andConnection:self];
 
+    // Read before any acquire below: afterwards we are the owner ourselves.
+    pid_t previousOwnerPID = [self windowManagerPIDOwningSelectionOfScreen:screenId];
+
     if (replace)
     {
         BOOL attributesChanged = [rootWindow changeAttributes:values withMask:XCB_CW_EVENT_MASK checked:YES];
@@ -4950,7 +4878,7 @@ static XCBConnection *sharedInstance;
             if (!acquired)
             {
                 NSLog(@"[WM] Failed to acquire WM selection; killing stale WM and retrying");
-                killOtherInstances();
+                terminatePreviousWindowManager(previousOwnerPID);
                 [self flush];
                 usleep(500000);
                 acquired = [selector aquireWithWindow:selectionWindow replace:YES];
@@ -4973,7 +4901,7 @@ static XCBConnection *sharedInstance;
             if (!attributesChanged)
             {
                 NSLog(@"[WM] Replacement attempt failed; killing stale WM instance");
-                killOtherInstances();
+                terminatePreviousWindowManager(previousOwnerPID);
                 [self flush];
                 usleep(500000);
                 attributesChanged = [rootWindow changeAttributes:values withMask:XCB_CW_EVENT_MASK checked:YES];
@@ -4996,7 +4924,7 @@ static XCBConnection *sharedInstance;
         rootWindow = nil;
         screen = nil;
         ewmhService = nil;
-        killOtherInstances();
+        terminatePreviousWindowManager(previousOwnerPID);
         return YES;
     }
 
@@ -5037,8 +4965,37 @@ static XCBConnection *sharedInstance;
     atomName = nil;
     ewmhService = nil;
 
-    killOtherInstances();
+    terminatePreviousWindowManager(previousOwnerPID);
     return YES;
+}
+
+// The pid our own and other EWMH window managers put on the window that owns
+// WM_Sn; X scopes the selection to this display and screen.  0 when unowned
+// or the owner does not say.
+- (pid_t)windowManagerPIDOwningSelectionOfScreen:(uint32_t)screenId
+{
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    NSString *atomName = [NSString stringWithFormat:@"WM_S%u", screenId];
+    [[ewmhService atomService] cacheAtom:atomName];
+    xcb_atom_t atom = [[ewmhService atomService] atomFromCachedAtomsWithKey:atomName];
+
+    xcb_get_selection_owner_reply_t *reply =
+        xcb_get_selection_owner_reply(connection, xcb_get_selection_owner(connection, atom), NULL);
+    if (!reply) {
+        return 0;
+    }
+    xcb_window_t owner = reply->owner;
+    free(reply);
+    if (owner == XCB_NONE) {
+        return 0;
+    }
+
+    XCBWindow *ownerWindow = [[XCBWindow alloc] initWithXCBWindow:owner andConnection:self];
+    uint32_t pid = [ewmhService netWMPidForWindow:ownerWindow];
+    if (pid == (uint32_t)-1 || pid > INT_MAX) {
+        return 0;
+    }
+    return (pid_t)pid;
 }
 
 - (XCBWindow *)rootWindowForScreenNumber:(int)number

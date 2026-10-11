@@ -32,6 +32,7 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
 - Alt-Tab deck layout: `gnustep-tests test-deck` (headless).
 - Application source directory lookup (APP_NAME): `gnustep-tests test-sourcedir` (headless).
 - Flip side layout, plan and orphans: `gnustep-tests test-flipside` (headless).
+- Which previous window manager may be terminated: `gnustep-tests test-previouswm` (headless).
 - Show Desktop layout: `gnustep-tests test-showdesktop` (headless).
 - Wobbly window model: `gnustep-tests test-wobbly` (headless).
 - `test/` is a manual app (KillTest.app), not part of the automated suite.
