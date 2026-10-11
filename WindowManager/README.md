@@ -47,8 +47,11 @@ uroswm [options]
 
 Options:
   -dc, --disable-compositing  Disable XRender compositing
+  --replace           Replace the running window manager
   -h, --help          Show help message
 ```
+
+**Replacing a window manager:** without `--replace`, WindowManager started from a terminal exits with an error if another window manager is already running. Started without a terminal (for example by a double click on the application) it asks whether to replace it. With `--replace` it takes over without asking, including from another WindowManager.
 
 **Compositing Mode:**
 - **Default:** Windows use XRender for transparency effects

@@ -111,26 +111,33 @@
 
     // Utility panels (palettes) are never maximized - matches the missing
     // titlebar zoom button, so the menu offers no way to do it either.
-    BOOL isUtility = [[frame childWindowForKey:ClientWindow] isUtilityPanel];
+    XCBWindow *client = [frame childWindowForKey:ClientWindow];
+    BOOL isUtility = [client isUtilityPanel];
+    // Every maximize and snap resizes the window, which a window whose size
+    // is fixed refuses, so the menu does not offer them either.
+    BOOL isFixedSize = ![client canResize];
 
-    struct { NSString *title; SEL action; BOOL skipForUtility; } items[] = {
-        { @"Center",                   @selector(snapMenuCenter:),                NO },
-        { @"Maximize Vertically",      @selector(snapMenuMaximizeVertically:),    YES },
-        { @"Maximize Horizontally",    @selector(snapMenuMaximizeHorizontally:),  YES },
-        { nil, nil, NO },  // separator
-        { @"Snap Left",                @selector(snapMenuSnapLeft:),              NO },
-        { @"Snap Right",               @selector(snapMenuSnapRight:),             NO },
-        { nil, nil, NO },  // separator
-        { @"Snap Top Left",            @selector(snapMenuSnapTopLeft:),           NO },
-        { @"Snap Top Right",           @selector(snapMenuSnapTopRight:),          NO },
-        { @"Snap Bottom Left",         @selector(snapMenuSnapBottomLeft:),        NO },
-        { @"Snap Bottom Right",        @selector(snapMenuSnapBottomRight:),       NO },
-        { nil, nil, NO },  // separator
-        { @"Window Properties",        @selector(snapMenuInformation:),           NO },
-        { @"Close",                    @selector(snapMenuClose:),                 NO },
+    struct { NSString *title; SEL action; BOOL skipForUtility; BOOL resizes; } items[] = {
+        { @"Center",                   @selector(snapMenuCenter:),                NO,  NO },
+        { @"Maximize Vertically",      @selector(snapMenuMaximizeVertically:),    YES, YES },
+        { @"Maximize Horizontally",    @selector(snapMenuMaximizeHorizontally:),  YES, YES },
+        { nil, nil, NO, YES },  // separator
+        { @"Snap Left",                @selector(snapMenuSnapLeft:),              NO,  YES },
+        { @"Snap Right",               @selector(snapMenuSnapRight:),             NO,  YES },
+        { nil, nil, NO, YES },  // separator
+        { @"Snap Top Left",            @selector(snapMenuSnapTopLeft:),           NO,  YES },
+        { @"Snap Top Right",           @selector(snapMenuSnapTopRight:),          NO,  YES },
+        { @"Snap Bottom Left",         @selector(snapMenuSnapBottomLeft:),        NO,  YES },
+        { @"Snap Bottom Right",        @selector(snapMenuSnapBottomRight:),       NO,  YES },
+        { nil, nil, NO, NO },  // separator
+        { @"Window Properties",        @selector(snapMenuInformation:),           NO,  NO },
+        { @"Close",                    @selector(snapMenuClose:),                 NO,  NO },
     };
 
     for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
+        if (isFixedSize && items[i].resizes) {
+            continue;
+        }
         if (!items[i].title) {
             [menu addItem:[NSMenuItem separatorItem]];
             continue;

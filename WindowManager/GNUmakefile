@@ -57,9 +57,11 @@ $(APP_NAME)_OBJC_FILES = \
 		URSDeckLayout.m \
 		URSFrameMove.m \
 		URSSourceDirectory.m \
+		URSCommandLine.m \
 		URSWindowFlowController.m \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \
+		URSWindowOutline.m \
 		URSProfiler.m \
 		URSImageUpload.m \
 		URSBackgroundRender.m \
@@ -88,6 +90,7 @@ $(APP_NAME)_OBJC_FILES = \
 		xcb/XCBSelection.m \
 		xcb/XCBRegion.m \
 		xcb/XCBShape.m \
+		xcb/URSSnapZone.m \
 		xcb/XCBReply.m \
 		xcb/XCBAttributesReply.m \
 		xcb/XCBGeometryReply.m \
@@ -114,6 +117,7 @@ $(APP_NAME)_HEADER_FILES = \
 		URSWindowSwitcher.h \
 		URSWindowSwitcherOverlay.h \
 		URSSnapPreviewOverlay.h \
+		URSSnapPreviewFrame.h \
 		URSThemeIntegration.h \
 		URSProfiler.h \
 		URSImageUpload.h \

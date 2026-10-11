@@ -12,6 +12,7 @@
 #import "XCBCreateWindowTypeRequest.h"
 #import "XCBWindowTypeResponse.h"
 #import "XCBReply.h"
+#import "URSSnapZone.h"
 #include <xcb/xcb.h>
 
 #define FRAMEMASK   XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_BUTTON_PRESS | \
@@ -23,24 +24,6 @@
 
 #define CLIENTLISTSIZE 1000
 #define WINDOWSMAPUPDATED @"windowsMapUpdated"
-
-// Edge snap detection constants
-#define SNAP_EDGE_THRESHOLD 5    // Pixels from screen edge to trigger snap detection
-#define SNAP_CORNER_THRESHOLD 50 // Pixels from corner to trigger quarter snap
-#define SNAP_LINGER_TIME 300     // Milliseconds to linger before snap activates
-#define SNAP_LEAVE_DISTANCE 8    // Pixels a snapped window is dragged before it unsnaps
-
-// Snap zone types for drag-to-edge window snapping
-typedef NS_ENUM(NSInteger, SnapZone) {
-    SnapZoneNone = 0,
-    SnapZoneTop,         // Maximize window
-    SnapZoneLeft,        // Snap to left half
-    SnapZoneRight,       // Snap to right half
-    SnapZoneTopLeft,     // Snap to top-left quarter
-    SnapZoneTopRight,    // Snap to top-right quarter
-    SnapZoneBottomLeft,  // Snap to bottom-left quarter
-    SnapZoneBottomRight  // Snap to bottom-right quarter
-};
 
 @class XCBWindow;
 @class EWMHService;

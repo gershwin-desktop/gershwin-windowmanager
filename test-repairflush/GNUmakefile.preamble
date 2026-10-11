@@ -36,6 +36,7 @@ WM_COLLABORATORS = \
 	../WindowManager/URSWindowSwitcherOverlay.m \
 	../WindowManager/URSSnapPreviewOverlay.m \
 	../WindowManager/URSThemeIntegration.m \
+	../WindowManager/URSWindowOutline.m \
 	../WindowManager/URSProfiler.m \
 	../WindowManager/URSImageUpload.m \
 	../WindowManager/URSShapePath.m \
@@ -67,6 +68,7 @@ WM_COLLABORATORS = \
 	../WindowManager/URSSourceDirectory.m \
 	../WindowManager/URSDeckLayout.m \
 	../WindowManager/URSFrameMove.m \
+	../WindowManager/URSCloseRequestPlan.m \
 	../WindowManager/URSBackgroundRender.m \
 	../WindowManager/GSThemeTitleBar.m \
 	../WindowManager/xcb/XCBConnection.m \
@@ -79,6 +81,7 @@ WM_COLLABORATORS = \
 	../WindowManager/xcb/XCBSelection.m \
 	../WindowManager/xcb/XCBRegion.m \
 	../WindowManager/xcb/XCBShape.m \
+	../WindowManager/xcb/URSSnapZone.m \
 	../WindowManager/xcb/XCBReply.m \
 	../WindowManager/xcb/XCBAttributesReply.m \
 	../WindowManager/xcb/XCBGeometryReply.m \
