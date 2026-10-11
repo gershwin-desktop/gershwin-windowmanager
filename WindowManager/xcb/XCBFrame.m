@@ -15,6 +15,7 @@
 #import "URSThemeIntegration.h"
 #import "XCBAtomService.h"
 #import "URSShapePath.h"
+#import "URSFrameMove.h"
 
 // Loose typing for the compositor, mirroring the NSClassFromString lookup
 // the xcb layer uses everywhere; keeps URSCompositingManager.h out of here.
@@ -1685,9 +1686,12 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     XCBTitleBar *titleBar = (XCBTitleBar*)[self childWindowForKey:TitleBar];
     if (!clientWindow || !titleBar) return;
 
-    // Enforce ICCCM / WM_NORMAL_HINTS: do not resize non-resizable (fixed-size) clients
-    if (![clientWindow canResize]) {
-        //NSLog(@"[XCBFrame] Refusing programmatic resize for non-resizable client %u", [clientWindow window]);
+    // Enforce ICCCM / WM_NORMAL_HINTS: do not resize non-resizable (fixed-size)
+    // clients.  Moving them (Center) keeps the size and is fine.
+    XCBRect currentRect = [self windowRect];
+    if (!URSFrameSizeChangeAllowed(currentRect.size.width, currentRect.size.height,
+                                   targetRect.size.width, targetRect.size.height,
+                                   [clientWindow canResize])) {
         return;
     }
 

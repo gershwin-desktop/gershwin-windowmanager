@@ -55,6 +55,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSWindowSwitcherOverlay.m \
 		URSFlowLayout.m \
 		URSDeckLayout.m \
+		URSFrameMove.m \
 		URSSourceDirectory.m \
 		URSWindowFlowController.m \
 		URSSnapPreviewOverlay.m \
