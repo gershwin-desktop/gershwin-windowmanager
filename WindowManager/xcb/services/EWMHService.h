@@ -151,7 +151,7 @@
 @property (strong, nonatomic)NSString* MANAGER;
 @property (strong, nonatomic)NSString* KdeNetWFrameStrut;
 @property (strong, nonatomic)NSString* MotifWMHints;
-// _GERSHWIN_ACTIVE_APP (root, CARDINAL): the PID of the frontmost
+// _ACTIVE_APPLICATION (root, CARDINAL): the PID of the frontmost
 // application, also when it has no window.  Written by the WM, read by
 // Menu.app, which then shows that application's own menu.
 @property (strong, nonatomic)NSString* GershwinActiveApp;

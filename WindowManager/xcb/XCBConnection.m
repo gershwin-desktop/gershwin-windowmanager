@@ -4106,44 +4106,44 @@ static XCBConnection *sharedInstance;
     // window of it being focused: sent by the Dock for an application that
     // has no window, and by Workspace when its desktop is clicked.  Menu.app
     // then shows that application's menu.
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_ACTIVATE_APP"]) {
+    if ([atomMessageName isEqualToString:@"_ACTIVATE_APPLICATION"]) {
         if (anEvent->format == 32 && anEvent->data.data32[0] > 0)
             [ewmhService activateGershwinAppForPid:(pid_t)anEvent->data.data32[0]];
         return;
     }
 
     // Handle Gershwin-specific window commands
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_CENTER_WINDOW"]) {
+    if ([atomMessageName isEqualToString:@"_CENTER_WINDOW"]) {
         //NSLog(@"[ClientMessage] Center Window requested");
         [self centerActiveWindow];
         return;
     }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_LEFT"]) {
+    if ([atomMessageName isEqualToString:@"_TILE_LEFT"]) {
         //NSLog(@"[ClientMessage] Tile Left requested");
         [self tileActiveWindowLeft];
         return;
     }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_RIGHT"]) {
+    if ([atomMessageName isEqualToString:@"_TILE_RIGHT"]) {
         //NSLog(@"[ClientMessage] Tile Right requested");
         [self tileActiveWindowRight];
         return;
     }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_TOP_LEFT"]) {
+    if ([atomMessageName isEqualToString:@"_TILE_TOP_LEFT"]) {
         //NSLog(@"[ClientMessage] Tile Top Left requested");
         [self tileActiveWindowToZone:SnapZoneTopLeft];
         return;
     }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_TOP_RIGHT"]) {
+    if ([atomMessageName isEqualToString:@"_TILE_TOP_RIGHT"]) {
         //NSLog(@"[ClientMessage] Tile Top Right requested");
         [self tileActiveWindowToZone:SnapZoneTopRight];
         return;
     }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_BOTTOM_LEFT"]) {
+    if ([atomMessageName isEqualToString:@"_TILE_BOTTOM_LEFT"]) {
         //NSLog(@"[ClientMessage] Tile Bottom Left requested");
         [self tileActiveWindowToZone:SnapZoneBottomLeft];
         return;
     }
-    if ([atomMessageName isEqualToString:@"_GERSHWIN_TILE_BOTTOM_RIGHT"]) {
+    if ([atomMessageName isEqualToString:@"_TILE_BOTTOM_RIGHT"]) {
         //NSLog(@"[ClientMessage] Tile Bottom Right requested");
         [self tileActiveWindowToZone:SnapZoneBottomRight];
         return;

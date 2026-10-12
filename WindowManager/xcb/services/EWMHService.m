@@ -266,7 +266,7 @@
     MANAGER = @"MANAGER";
     KdeNetWFrameStrut = @"_KDE_NET_WM_FRAME_STRUT";
     MotifWMHints = @"_MOTIF_WM_HINTS";
-    GershwinActiveApp = @"_GERSHWIN_ACTIVE_APP";
+    GershwinActiveApp = @"_ACTIVE_APPLICATION";
 
     //GNUStep properties
 
@@ -1769,7 +1769,7 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
        (its application's last window closed or was minimized), and when a
        click into the Dock activates Workspace; the frontmost application
        stays then.  A click on the desktop itself is reported by Workspace
-       (_GERSHWIN_ACTIVATE_APP with its own PID). */
+       (_ACTIVATE_APPLICATION with its own PID). */
     if (![[aWindow windowType] isEqualToString:EWMHWMWindowTypeDesktop]) {
         // Windows the WM does not frame have no cached pid
         u_int32_t pid = [aWindow pid];

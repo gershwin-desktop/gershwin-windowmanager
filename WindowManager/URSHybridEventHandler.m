@@ -3165,7 +3165,7 @@ static CGFloat WMLastScaleFactor = 1.0;
 
 #pragma mark - Window Title Updates
 
-// The _GERSHWIN_CONTENT_ACTIVITY property is set by apps (gershwin-terminal)
+// The _CONTENT_ACTIVITY property is set by apps (gershwin-terminal)
 // to report that their window content changed.  Unlike X Damage it fires
 // regardless of visibility - crucial for WindowShaded windows, whose client is
 // clipped by the shrunk frame and therefore emits no Damage.  The activity
@@ -3180,8 +3180,8 @@ static CGFloat WMLastScaleFactor = 1.0;
         if (conn) {
             xcb_intern_atom_cookie_t c =
                 xcb_intern_atom(conn, 0,
-                                strlen("_GERSHWIN_CONTENT_ACTIVITY"),
-                                "_GERSHWIN_CONTENT_ACTIVITY");
+                                strlen("_CONTENT_ACTIVITY"),
+                                "_CONTENT_ACTIVITY");
             xcb_intern_atom_reply_t *r = xcb_intern_atom_reply(conn, c, NULL);
             if (r) { atom = r->atom; free(r); }
         }
