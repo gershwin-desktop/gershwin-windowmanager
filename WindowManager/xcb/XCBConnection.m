@@ -4102,6 +4102,16 @@ static XCBConnection *sharedInstance;
     EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
     NSString *atomMessageName = [atomService atomNameFromAtom:anEvent->type];
 
+    // data32[0]: the PID of an application to make frontmost without a
+    // window of it being focused: sent by the Dock for an application that
+    // has no window, and by Workspace when its desktop is clicked.  Menu.app
+    // then shows that application's menu.
+    if ([atomMessageName isEqualToString:@"_GERSHWIN_ACTIVATE_APP"]) {
+        if (anEvent->format == 32 && anEvent->data.data32[0] > 0)
+            [ewmhService activateGershwinAppForPid:(pid_t)anEvent->data.data32[0]];
+        return;
+    }
+
     // Handle Gershwin-specific window commands
     if ([atomMessageName isEqualToString:@"_GERSHWIN_CENTER_WINDOW"]) {
         //NSLog(@"[ClientMessage] Center Window requested");

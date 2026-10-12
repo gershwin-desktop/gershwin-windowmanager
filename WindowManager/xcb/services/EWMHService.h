@@ -41,6 +41,9 @@
 
 @interface EWMHService : NSObject
 {
+    // The window last published as active, so that an application whose
+    // own window has the focus is not left without an active window
+    xcb_window_t lastActiveWindowId;
 
 }
 
@@ -148,6 +151,10 @@
 @property (strong, nonatomic)NSString* MANAGER;
 @property (strong, nonatomic)NSString* KdeNetWFrameStrut;
 @property (strong, nonatomic)NSString* MotifWMHints;
+// _GERSHWIN_ACTIVE_APP (root, CARDINAL): the PID of the frontmost
+// application, also when it has no window.  Written by the WM, read by
+// Menu.app, which then shows that application's own menu.
+@property (strong, nonatomic)NSString* GershwinActiveApp;
 
 //GNUstep properties
 @property (strong, nonatomic)NSString *GNUStepMiniaturizeWindow;
@@ -225,6 +232,11 @@
 - (xcb_get_property_reply_t *) netWmIconFromWindow:(XCBWindow*)aWindow;
 - (void) updateNetClientList;
 - (void) updateNetActiveWindow:(XCBWindow*)aWindow;
+- (void) updateGershwinActiveAppForPid:(pid_t)pid;
+/* Makes an application the frontmost one without focusing a window of it:
+ * an application without a window (the active window is cleared), or the
+ * one whose desktop was clicked. */
+- (void) activateGershwinAppForPid:(pid_t)pid;
 - (void) updateNetSupported:(NSArray*)atomsArray forRootWindow:(XCBWindow*)aRootWindow;
 - (void) updateGNUStepFrameOffsetsForRootWindow:(XCBWindow*)aRootWindow;
 - (void) updateNetWmState:(XCBWindow*) aWindow;

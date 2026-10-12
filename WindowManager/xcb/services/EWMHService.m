@@ -133,6 +133,7 @@
 @synthesize MANAGER;
 @synthesize KdeNetWFrameStrut;
 @synthesize MotifWMHints;
+@synthesize GershwinActiveApp;
 
 //GNUstep properties
 @synthesize GNUStepMiniaturizeWindow;
@@ -265,6 +266,7 @@
     MANAGER = @"MANAGER";
     KdeNetWFrameStrut = @"_KDE_NET_WM_FRAME_STRUT";
     MotifWMHints = @"_MOTIF_WM_HINTS";
+    GershwinActiveApp = @"_GERSHWIN_ACTIVE_APP";
 
     //GNUStep properties
 
@@ -381,7 +383,8 @@
         UTF8_STRING,
         MANAGER,
         KdeNetWFrameStrut,
-        MotifWMHints
+        MotifWMHints,
+        GershwinActiveApp
     };
 
     atoms = [NSArray arrayWithObjects:atomStrings count:sizeof(atomStrings)/sizeof(NSString*)];
@@ -1761,6 +1764,70 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                      withDataLength:1
                            withData:&win];
 
+    /* The application of the focused window is the frontmost one.  Not
+       for the desktop: it gets the focus when the active window went away
+       (its application's last window closed or was minimized), and when a
+       click into the Dock activates Workspace; the frontmost application
+       stays then.  A click on the desktop itself is reported by Workspace
+       (_GERSHWIN_ACTIVATE_APP with its own PID). */
+    if (![[aWindow windowType] isEqualToString:EWMHWMWindowTypeDesktop]) {
+        // Windows the WM does not frame have no cached pid
+        u_int32_t pid = [aWindow pid];
+        if (pid == 0 || pid == (u_int32_t)-1)
+            pid = [self netWMPidForWindow:aWindow];
+        if (pid != 0 && pid != (u_int32_t)-1)
+            [self updateGershwinActiveAppForPid:(pid_t)pid];
+    }
+    lastActiveWindowId = win;
+
+    rootWindow = nil;
+}
+
+- (void) updateGershwinActiveAppForPid:(pid_t)pid
+{
+    XCBWindow *rootWindow = [connection rootWindowForScreenNumber:0];
+    uint32_t value = (uint32_t)pid;
+
+    [self changePropertiesForWindow:rootWindow
+                           withMode:XCB_PROP_MODE_REPLACE
+                       withProperty:GershwinActiveApp
+                           withType:XCB_ATOM_CARDINAL
+                         withFormat:32
+                     withDataLength:1
+                           withData:&value];
+    [connection flush];
+    rootWindow = nil;
+}
+
+- (void) activateGershwinAppForPid:(pid_t)pid
+{
+    XCBWindow *rootWindow = [connection rootWindowForScreenNumber:0];
+
+    // The application's own window may have the focus already (Workspace
+    // reporting a click on its desktop); it stays the active window
+    XCBWindow *active = lastActiveWindowId != XCB_NONE
+        ? [connection windowForXCBId:lastActiveWindowId] : nil;
+    if (active && [self netWMPidForWindow:active] == (uint32_t)pid) {
+        [self updateGershwinActiveAppForPid:pid];
+        rootWindow = nil;
+        return;
+    }
+
+    // The application first: a client that reacts to the active window
+    // going away reads the frontmost application right then.  None, as EWMH
+    // has it for no active window; clients read an empty property as
+    // garbage.
+    [self updateGershwinActiveAppForPid:pid];
+    xcb_window_t none = XCB_NONE;
+    [self changePropertiesForWindow:rootWindow
+                           withMode:XCB_PROP_MODE_REPLACE
+                       withProperty:EWMHActiveWindow
+                           withType:XCB_ATOM_WINDOW
+                         withFormat:32
+                     withDataLength:1
+                           withData:&none];
+    [connection flush];
+    lastActiveWindowId = XCB_NONE;
     rootWindow = nil;
 }
 
@@ -2486,6 +2553,7 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
     MANAGER = nil;
     KdeNetWFrameStrut = nil;
     MotifWMHints = nil;
+    GershwinActiveApp = nil;
 
     //GNUStep properties
 
