@@ -37,4 +37,15 @@
                                  currentStackingOrder:(NSArray<NSNumber *> *)currentStackingOrder
                                         modalWindowIds:(NSSet<NSNumber *> *)modalWindowIds;
 
+// An application's palettes are re-raised above its document windows, and
+// that must not bury the same application's own tooltips, popup menus and
+// submenus, which libs-gui places above floating panels by level.
+// currentStackingOrder: the application's unframed window ids,
+// bottom-most first.  levels: their _GNUSTEP_WM_ATTR window levels; an id
+// without one is left alone.  Returns the ids leveled above
+// NSFloatingWindowLevel, in their current relative order, to call
+// -stackAbove on after the palettes.
++ (NSArray<NSNumber *> *)idsAbovePalettesInStackingOrder:(NSArray<NSNumber *> *)currentStackingOrder
+                                                  levels:(NSDictionary<NSNumber *, NSNumber *> *)levels;
+
 @end

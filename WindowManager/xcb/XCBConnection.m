@@ -738,6 +738,35 @@ static XCBConnection *sharedInstance;
             [compositor markStackingOrderDirtyForWindow:[aFrame window]];
         }
     }
+
+    // The palettes just went over everything of this application, including
+    // its tooltips and popup menus, which are unframed and asked for a
+    // higher level than the palettes: a tooltip of a palette's own control
+    // showed behind that palette.  Unmapped ones count too: libs-back
+    // raises a tooltip before it maps it, so this runs while it is unmapped.
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
+    NSMutableDictionary<NSNumber *, NSNumber *> *levels = [NSMutableDictionary dictionary];
+    for (XCBWindow *aWindow in [windowsMap allValues]) {
+        if ([aWindow pid] != pid || [aWindow decorated]) continue;
+        if ([aWindow isKindOfClass:[XCBFrame class]] ||
+            [[aWindow parentWindow] isKindOfClass:[XCBFrame class]]) continue;
+        int32_t level = 0;
+        if ([ewmhService clientWindowLevel:&level forWindow:aWindow])
+            [levels setObject:@(level) forKey:@([aWindow window])];
+    }
+    if ([levels count] > 0) {
+        NSArray<NSNumber *> *raiseOrder = [URSUtilityRestackOrder
+            idsAbovePalettesInStackingOrder:[self currentStackingOrderForWindowIds:[levels allKeys]]
+                                     levels:levels];
+        for (NSNumber *windowIdNumber in raiseOrder) {
+            XCBWindow *aWindow = [self windowForXCBId:[windowIdNumber unsignedIntValue]];
+            [aWindow stackAbove];
+            if (compositor && [compositor respondsToSelector:@selector(markStackingOrderDirtyForWindow:)])
+            {
+                [compositor markStackingOrderDirtyForWindow:[aWindow window]];
+            }
+        }
+    }
     [self flush];
 }
 
@@ -2196,6 +2225,10 @@ static XCBConnection *sharedInstance;
                 [window updateAttributes];
                 [self mapWindow:window];
                 [self registerWindow:window];
+                // Borderless GNUstep windows (tooltips, NSPopUpMenuWindowLevel
+                // popups) arrive here; without their pid no same-application
+                // restack can find them, and the app's palettes bury them.
+                [window updatePid];
                 [icccmService wmClassForWindow:window];
                 
                 // Grab button on undecorated window so we can track focus changes
@@ -2206,6 +2239,11 @@ static XCBConnection *sharedInstance;
                 if (!self.adoptingExistingWindows &&
                     [self isDockPopup:window forDockOwnerLeaders:[self dockOwnerLeaders]])
                     [window stackAbove];
+                // libs-back raised this window before mapping it, while it
+                // was still unknown here, and that raise put the app's
+                // palettes back over it; its first tooltip would stay hidden.
+                if (!self.adoptingExistingWindows)
+                    [self reassertAboveFramesForPid:[window pid]];
 
                 window = nil;
                 ewmhService = nil;

@@ -112,6 +112,32 @@ int main(void)
     PASS_EQUAL(order, want, "raising the modal dialog keeps it on top of the utility panels");
   }
 
+  // Re-asserting an application's palettes above its document raised
+  // their frames last, so the same application's tooltip and popup menus
+  // (unframed, NSPopUpMenuWindowLevel) ended up behind the palette they
+  // belong to.  Those windows must be raised again after the palettes,
+  // keeping their own order; a borderless window at normal or floating
+  // level must not jump above the palettes.
+  {
+    NSArray *serverOrder = @[ @(0x900001), @(0x900002), @(0x900003), @(0x900004) ];
+    NSDictionary *levels = @{
+      @(0x900001): @(101),   // tooltip, NSPopUpMenuWindowLevel
+      @(0x900002): @(0),     // borderless window at NSNormalWindowLevel
+      @(0x900003): @(2),     // borderless window at NSFloatingWindowLevel
+      @(0x900004): @(3),     // attached submenu, NSSubmenuWindowLevel
+    };
+    NSArray *order = [URSUtilityRestackOrder idsAbovePalettesInStackingOrder:serverOrder
+                                                                   levels:levels];
+    NSArray *want = @[ @(0x900001), @(0x900004) ];
+    PASS_EQUAL(order, want,
+      "windows leveled above floating panels are raised after the palettes, in their own order");
+
+    order = [URSUtilityRestackOrder idsAbovePalettesInStackingOrder:@[ @(0x900005) ]
+                                                            levels:@{}];
+    PASS_EQUAL(order, @[],
+      "a window that publishes no level is left where it is");
+  }
+
   [arp release];
   return 0;
 }

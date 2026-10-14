@@ -219,6 +219,10 @@
 // NSUtilityWindowMask too.
 - (BOOL) clientDeclaresFloatingOrAboveLevel:(XCBWindow*)aWindow;
 
+// The client's _GNUSTEP_WM_ATTR window_level (NSWindow.h levels); NO when
+// the client published none.
+- (BOOL) clientWindowLevel:(int32_t *)level forWindow:(XCBWindow*)aWindow;
+
 // YES when the window's own _NET_WM_STATE property lists
 // _NET_WM_STATE_MODAL.  A modal dialog must end up above every other
 // window of its application, including its utility/floating panels, no

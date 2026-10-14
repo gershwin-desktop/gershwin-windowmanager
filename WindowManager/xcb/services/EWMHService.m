@@ -802,17 +802,13 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
     return isUtility;
 }
 
-- (BOOL) clientDeclaresFloatingOrAboveLevel:(XCBWindow*)aWindow
+- (BOOL) clientWindowLevel:(int32_t *)level forWindow:(XCBWindow*)aWindow
 {
-    if (!aWindow)
+    if (!aWindow || !level)
         return NO;
 
     // GNUstepWMAttributes: flags, window_style, window_level, ...  Word
     // index 2 is window_level (see clientDeclaresUtilityWindowStyle:).
-    // NSFloatingWindowLevel == 2 (NSWindow.h) - any window the client asked
-    // to float above normal ones (whether or not it also set
-    // NSUtilityWindowMask) must keep-above so a document raise never
-    // buries it, matching what a real floating panel does on screen.
     void *reply = [self getProperty:GNUStepWmAttr
                         propertyType:XCB_GET_PROPERTY_TYPE_ANY
                            forWindow:aWindow
@@ -821,16 +817,26 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
     if (!reply)
         return NO;
 
-    BOOL isFloatingOrAbove = NO;
+    BOOL found = NO;
     int len = xcb_get_property_value_length((xcb_get_property_reply_t *)reply);
     if (len >= (int)(3 * sizeof(uint32_t)))
     {
         uint32_t *words = (uint32_t *)xcb_get_property_value(reply);
-        int32_t level = (int32_t)words[2];
-        isFloatingOrAbove = level >= 2; // NSFloatingWindowLevel
+        *level = (int32_t)words[2];
+        found = YES;
     }
     free(reply);
-    return isFloatingOrAbove;
+    return found;
+}
+
+- (BOOL) clientDeclaresFloatingOrAboveLevel:(XCBWindow*)aWindow
+{
+    // NSFloatingWindowLevel == 2 (NSWindow.h) - any window the client asked
+    // to float above normal ones (whether or not it also set
+    // NSUtilityWindowMask) must keep-above so a document raise never
+    // buries it, matching what a real floating panel does on screen.
+    int32_t level = 0;
+    return [self clientWindowLevel:&level forWindow:aWindow] && level >= 2;
 }
 
 - (BOOL)windowDeclaresModalState:(XCBWindow *)aWindow

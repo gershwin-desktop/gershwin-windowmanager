@@ -78,4 +78,20 @@
     return order;
 }
 
++ (NSArray<NSNumber *> *)idsAbovePalettesInStackingOrder:(NSArray<NSNumber *> *)currentStackingOrder
+                                                  levels:(NSDictionary<NSNumber *, NSNumber *> *)levels
+{
+    // NSFloatingWindowLevel (NSWindow.h): a borderless window at that level
+    // or below has no claim to sit above the palettes.
+    static const int32_t floatingWindowLevel = 2;
+    NSMutableArray<NSNumber *> *order = [NSMutableArray array];
+    for (NSNumber *windowId in currentStackingOrder)
+    {
+        NSNumber *level = [levels objectForKey:windowId];
+        if (level && [level intValue] > floatingWindowLevel)
+            [order addObject:windowId];
+    }
+    return order;
+}
+
 @end
