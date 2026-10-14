@@ -11,6 +11,7 @@
 
 #import "XCBWindow.h"
 #import "XCBConnection.h"
+#import "URSInputFocusPolicy.h"
 #import "XCBTitleBar.h"
 #import <xcb/xcb_aux.h>
 #import "ICCCMService.h"
@@ -1075,6 +1076,18 @@
 {
     xcb_set_input_focus([connection connection], revertTo, window, timestamp);
     [connection flush];
+}
+
+- (BOOL) acceptsInputFocus
+{
+    ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
+
+    // Windows the WM never mapped itself (docks, panels) may not have had
+    // their hints read yet.
+    if ([cachedWMHints count] == 0)
+        [self refreshCachedWMHints];
+    return URSWindowAcceptsInputFocus(hasInputHint,
+        [icccmService hasProtocol:[icccmService WMTakeFocus] forWindow:self]);
 }
 
 - (void) focus

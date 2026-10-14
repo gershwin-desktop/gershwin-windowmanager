@@ -3509,7 +3509,9 @@ static XCBConnection *sharedInstance;
         // Don't focus or raise desktop windows — they must stay at the bottom.
         // Focusing the desktop sends _NET_ACTIVE_WINDOW which prompts the workspace
         // application to reconfigure itself above other windows.
-        if (!isDesktopWindow) {
+        // A window of the No Input model (Menu.app's bar) is clicked
+        // without taking the focus from the frontmost application.
+        if (!isDesktopWindow && [window acceptsInputFocus]) {
             [window focus];
         }
         if (!isDesktopWindow) {

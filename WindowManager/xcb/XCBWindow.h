@@ -75,6 +75,8 @@ typedef NS_ENUM(NSInteger, WindowState)
 @property (nonatomic, assign) int ignoreUnmapCount;
 @property (strong, nonatomic) NSMutableDictionary *cachedWMHints;
 @property (assign, nonatomic) BOOL hasInputHint;
+/* NO for ICCCM's No Input model, which must never be given the focus. */
+- (BOOL) acceptsInputFocus;
 @property (strong, nonatomic) XCBCursor *cursor;
 @property (strong, nonatomic) NSMutableArray *windowClass;
 @property (strong, nonatomic) NSString *windowType;
