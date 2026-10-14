@@ -12,6 +12,7 @@
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
+#import "URSActiveApplicationPolicy.h"
 #import <unistd.h>
 
 @protocol URSCompositingManaging <NSObject>
@@ -1049,7 +1050,8 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
         // Menu.app tracks _NET_ACTIVE_WINDOW to show the frontmost app's menu,
         // and without this an automation request for an already-topmost window
         // would leave the property pointing at a stale window.
-        [self updateNetActiveWindow:aWindow];
+        [self updateNetActiveWindow:aWindow
+                   requestedByPager:someData.data32[0] == URS_ACTIVATION_SOURCE_PAGER];
 
         return;
     }
@@ -1753,6 +1755,11 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
 
 - (void) updateNetActiveWindow:(XCBWindow*)aWindow
 {
+    [self updateNetActiveWindow:aWindow requestedByPager:NO];
+}
+
+- (void) updateNetActiveWindow:(XCBWindow*)aWindow requestedByPager:(BOOL)byPager
+{
     XCBWindow *rootWindow = [[aWindow onScreen] rootWindow];
     xcb_window_t win = [aWindow window];
 
@@ -1764,13 +1771,11 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                      withDataLength:1
                            withData:&win];
 
-    /* The application of the focused window is the frontmost one.  Not
-       for the desktop: it gets the focus when the active window went away
-       (its application's last window closed or was minimized), and when a
-       click into the Dock activates Workspace; the frontmost application
-       stays then.  A click on the desktop itself is reported by Workspace
-       (_ACTIVATE_APPLICATION with its own PID). */
-    if (![[aWindow windowType] isEqualToString:EWMHWMWindowTypeDesktop]) {
+    /* A click on the desktop itself is reported by Workspace
+       (_ACTIVATE_APPLICATION with its own PID), because the window manager
+       does not see it. */
+    BOOL isDesktop = [[aWindow windowType] isEqualToString:EWMHWMWindowTypeDesktop];
+    if (URSActiveWindowMakesItsApplicationFrontmost(isDesktop, byPager)) {
         // Windows the WM does not frame have no cached pid
         u_int32_t pid = [aWindow pid];
         if (pid == 0 || pid == (u_int32_t)-1)

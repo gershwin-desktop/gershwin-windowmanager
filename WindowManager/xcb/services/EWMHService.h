@@ -232,6 +232,7 @@
 - (xcb_get_property_reply_t *) netWmIconFromWindow:(XCBWindow*)aWindow;
 - (void) updateNetClientList;
 - (void) updateNetActiveWindow:(XCBWindow*)aWindow;
+- (void) updateNetActiveWindow:(XCBWindow*)aWindow requestedByPager:(BOOL)byPager;
 - (void) updateGershwinActiveAppForPid:(pid_t)pid;
 /* Makes an application the frontmost one without focusing a window of it:
  * an application without a window (the active window is cleared), or the
