@@ -727,7 +727,12 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
 - (void) updateNetFrameExtentsForWindow:(XCBWindow *)aWindow
 {
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHeight = [settings heightForUtility:[aWindow isUtilityPanel]];
+    /* A client asks with _NET_REQUEST_FRAME_EXTENTS before it is mapped,
+       before the window is marked a utility panel at map time; its own
+       declared style answers then, or a utility panel is told the taller
+       title bar of an ordinary window and comes out sized wrong. */
+    BOOL utility = [aWindow isUtilityPanel] || [self clientDeclaresUtilityWindowStyle:aWindow];
+    uint16_t titleHeight = [settings heightForUtility:utility];
 
     BOOL compositorActive = NO;
     Class compositorClass = NSClassFromString(@"URSCompositingManager");
