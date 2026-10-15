@@ -2398,7 +2398,16 @@ static CGFloat WMLastScaleFactor = 1.0;
                 ((uint32_t)geom_reply->width * 100 > (uint32_t)screenWidth * 90) ||
                 ((uint32_t)geom_reply->height * 100 > (uint32_t)screenHeight * 90);
 
-            if (!isDesktopWindow && !isFullscreenState && exceedsNinetyPercent) {
+            /* A window the application placed itself and sized to fit the
+               work area, title bar included, has the size it asked for on
+               purpose (a document window using the whole usable height);
+               only one that does not fit is too large for the screen. */
+            uint16_t ordinaryTitleHeight = [[TitleBarSettingsService sharedInstance] heightForUtility:NO];
+            BOOL fitsWorkarea = geom_reply->width <= waW &&
+                (uint32_t)geom_reply->height + ordinaryTitleHeight <= waH;
+
+            if (!isDesktopWindow && !isFullscreenState && exceedsNinetyPercent &&
+                !(appSpecifiedPosition && fitsWorkarea)) {
                 uint16_t clampedWidth = (uint16_t)(waW * 0.8);
                 uint16_t clampedHeight = (uint16_t)(waH * 0.8);
 

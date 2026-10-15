@@ -2423,6 +2423,17 @@ static XCBConnection *sharedInstance;
             int32_t frameHeight = (int32_t)reqH + titleHeight + cb;
             int32_t frameBottom = (int32_t)reqY + frameHeight;
             BOOL fullSpan = ((int32_t)reqW >= screenW) || (frameHeight >= screenH);
+            /* A window as tall as the work area (a document window using
+               all the usable height, no Dock below it) reaches the
+               screen's bottom because it was sized to, not by default. */
+            EWMHService *workareaService = [EWMHService sharedInstanceWithConnection:self];
+            int32_t waX, waY;
+            uint32_t waW, waH;
+            if ([workareaService readWorkareaForRootWindow:[self rootWindowForScreenNumber:0]
+                                                         x:&waX y:&waY width:&waW height:&waH] &&
+                frameHeight >= (int32_t)waH) {
+                fullSpan = YES;
+            }
             if (reqX <= 0 && frameBottom >= screenH && !fullSpan) {
                 appPositioned = NO;
             }
