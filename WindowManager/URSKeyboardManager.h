@@ -12,11 +12,19 @@
 
 @class URSFocusManager;
 
+// Handles the X events waiting on the connection.
+@protocol URSXCBEventProcessing <NSObject>
+- (void)processAvailableXCBEvents;
+@end
+
 @interface URSKeyboardManager : NSObject
 
 @property (weak, nonatomic) XCBConnection *connection;
 @property (weak, nonatomic) URSWindowSwitcher *windowSwitcher;
 @property (weak, nonatomic) URSFocusManager *focusManager;
+// Gets the events the Alt release poll's round trips read off the
+// connection while Alt-Tab is held.
+@property (weak, nonatomic) id<URSXCBEventProcessing> eventProcessor;
 @property (assign, nonatomic) BOOL altKeyPressed;
 @property (assign, nonatomic) BOOL shiftKeyPressed;
 

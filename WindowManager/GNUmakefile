@@ -25,13 +25,64 @@ $(APP_NAME)_OBJC_FILES = \
 		URSTitlebarController.m \
 		URSSnappingMenuController.m \
 		URSCompositingManager.m \
+		URSAttentionHopEffect.m \
+		URSOverviewLayout.m \
+		URSOverviewController.m \
+		URSWindowListFilter.m \
+		URSOverviewTitleLabel.m \
+		URSGlobalKey.m \
+		URSHotCorner.m \
+		URSPresentationTransition.m \
+		URSScreenWindow.m \
+		URSShowDesktopLayout.m \
+		URSShowDesktopController.m \
+		URSLiveMiniatureLayout.m \
+		URSLiveMiniatureController.m \
+		URSSheetLayout.m \
+		URSAttachmentSlideEffect.m \
+		URSHoldLastFrameEffect.m \
+		URSSheetSlideEffect.m \
+		URSAttachmentController.m \
+		URSSheetController.m \
+		URSDrawerController.m \
+		URSDrawerLayout.m \
+		URSAttachedDeformation.m \
+		URSAttachmentRegistry.m \
+		URSWindowRole.m \
+		URSWobblyModel.m \
+		URSTriangleSpans.m \
+		URSWobblyWindowsController.m \
 		URSRenderingContext.m \
 		URSWindowSwitcher.m \
 		URSWindowSwitcherOverlay.m \
+		URSFlowLayout.m \
+		URSDeckLayout.m \
+		URSFrameMove.m \
+		URSSourceDirectory.m \
+		URSPreviousWindowManager.m \
+		URSCommandLine.m \
+		URSWindowFlowController.m \
 		URSSnapPreviewOverlay.m \
 		URSThemeIntegration.m \
+		URSWindowOutline.m \
 		URSProfiler.m \
 		URSImageUpload.m \
+		URSBackgroundRender.m \
+		URSShapePath.m \
+		URSShadowOverrides.m \
+		URSUtilityRestackOrder.m \
+		URSConfigureRequestPolicy.m \
+		URSFramePacer.m \
+		URSTitlebarRegistry.m \
+		URSProjection.m \
+		URSFlipGeometry.m \
+		URSWindowFlipEffect.m \
+		URSCompositingManager+WindowFlip.m \
+		URSFlipSideGeometry.m \
+		URSFlipSidePlan.m \
+		URSCloseRequestPlan.m \
+		URSFlipSideOrphans.m \
+		URSFlipSideController.m \
 		GSThemeTitleBar.m \
 		xcb/XCBConnection.m \
 		xcb/XCBWindow.m \
@@ -43,6 +94,7 @@ $(APP_NAME)_OBJC_FILES = \
 		xcb/XCBSelection.m \
 		xcb/XCBRegion.m \
 		xcb/XCBShape.m \
+		xcb/URSSnapZone.m \
 		xcb/XCBReply.m \
 		xcb/XCBAttributesReply.m \
 		xcb/XCBGeometryReply.m \
@@ -69,9 +121,11 @@ $(APP_NAME)_HEADER_FILES = \
 		URSWindowSwitcher.h \
 		URSWindowSwitcherOverlay.h \
 		URSSnapPreviewOverlay.h \
+		URSSnapPreviewFrame.h \
 		URSThemeIntegration.h \
 		URSProfiler.h \
 		URSImageUpload.h \
+		URSBackgroundRender.h \
 		GSThemeTitleBar.h \
 		xcb/XCBConnection.h \
 		xcb/XCBWindow.h \

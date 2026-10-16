@@ -1,0 +1,6 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager/xcb
+# Which snap zone the pointer is in is pure geometry, built with ARC like
+# the window manager
+snapzone_OBJC_FILES += ../WindowManager/xcb/URSSnapZone.m
+../WindowManager/xcb/URSSnapZone.m_FILE_FLAGS += -fobjc-arc

@@ -47,14 +47,109 @@ uroswm [options]
 
 Options:
   -dc, --disable-compositing  Disable XRender compositing
+  --replace           Replace the running window manager
   -h, --help          Show help message
 ```
+
+**Replacing a window manager:** without `--replace`, WindowManager started from a terminal exits with an error if another window manager is already running. Started without a terminal (for example by a double click on the application) it asks whether to replace it. With `--replace` it takes over without asking, including from another WindowManager.
 
 **Compositing Mode:**
 - **Default:** Windows use XRender for transparency effects
 - **With `-dc`:** Windows render directly (traditional mode)
 - Automatically falls back to non-compositing on any errors
 - Requires COMPOSITE, RENDER, DAMAGE, and XFIXES X extensions
+
+### Settings
+
+```
+defaults write WindowManager URSHopOnWindowSwitch YES
+defaults write WindowManager URSOverviewHotCorner top-left
+defaults write WindowManager URSWobblyWindows YES
+defaults write WindowManager URSWindowSwitcherStyle deck
+```
+
+The overview and Show Desktop settings take effect when the window manager
+starts.
+
+- `URSOverviewEnabled` (default `YES`): F9 shows every window on the
+  screen side by side, shrunk, over a darkened desktop; the menu bar, the
+  Dock and any other window of type `_NET_WM_WINDOW_TYPE_DOCK` fade out
+  meanwhile. Click a window,
+  or pick one with the arrow keys and Return, to bring it to the front;
+  Escape, F9 or a click beside the windows goes back. Needs compositing.
+- `URSOverviewKey` (default `F9`): the X key name of the key that opens
+  and closes the window overview.
+- `URSOverviewHotCorner` (default `none`): `top-left`, `top-right`,
+  `bottom-left` or `bottom-right` opens and closes the window overview
+  when the pointer is pushed into that screen corner.
+- `URSShowDesktopEnabled` (default `YES`): F11 slides every window out
+  over the nearest edge of the screen until only a sliver of it is left,
+  so the desktop can be used: icons opened, files dragged. The menu bar
+  and the Dock stay; palettes fade out. F11 again brings the windows back with the one in
+  front focused again; a click on a sliver brings them back with that one
+  in front; a window becoming active (a new window, the Dock, Alt-Tab)
+  brings them back too. F9 opens the overview over it. Needs compositing.
+- `URSShowDesktopKey` (default `F11`): the X key name of the key that
+  shows the desktop and brings the windows back.
+- `URSShowDesktopHotCorner` (default `none`): `top-left`, `top-right`,
+  `bottom-left` or `bottom-right` does the same when the pointer is pushed
+  into that screen corner.
+- `URSWobblyWindows` (default `NO`): a window dragged by its titlebar
+  bends and trails behind the pointer like jelly and wobbles back into
+  shape when let go. Needs compositing. Takes effect on the next drag.
+- `URSHopOnWindowSwitch` (default `NO`): the window Alt-Tab switches to
+  hops in place to lead the eye to it. Needs compositing. Takes effect
+  on the next switch, without restarting the window manager.
+- `URSWindowSwitcherStyle` (default `flow`): how Alt-Tab shows the
+  windows while Alt is held. `flow` flies the windows themselves into a
+  row across the darkened screen, the chosen one big in the middle and
+  the others turned away to both sides; Tab and Shift-Tab slide the row,
+  releasing Alt flies the chosen window back and raises it, Escape flies
+  everything back. Minimized windows are left out of the row. Without
+  compositing, with fewer than two windows on the screen, or with `list`,
+  a strip of application icons and names is shown instead. Takes effect
+  on the next switch.
+  `deck` flies the windows into a deck instead, as an endless carousel:
+  the chosen window stands in front with its middle at the golden section
+  of the screen height, low on the screen, and the others stand behind it,
+  each smaller and higher so that only their top strips show. Each Tab
+  sends the front window down out of the screen, growing as it comes nearer
+  to the viewer, and brings it back in from behind at the top while every
+  other window moves one place forward; Shift-Tab goes the other way.
+  Windows are shown at most at their own size at rest and always leave some
+  room above the bottom edge. Off unless set, since `flow` is the default:
+  `defaults write WindowManager URSWindowSwitcherStyle deck`.
+- `URSWindowFlipEnabled` (default `YES`): "Flip Window" in the titlebar's
+  context menu turns the window over, in perspective, to its plain back;
+  choosing it again turns it back. Only the picture turns: the window
+  stays where it is and keeps working. Needs compositing. Takes effect
+  the next time the menu is opened.
+- `URSWindowFlipSideTerminal` (default `YES`): the back of a window turned
+  over with "Flip Window" shows a terminal in the source directory of the
+  window's application, under the window's own titlebar, which stays
+  usable. The directory is the one whose GNUmakefile declares the
+  application's name as `APP_NAME` under `/Developer/Library/Sources`,
+  subdirectories included; no plist is needed. The first turn starts Terminal and waits
+  for its window (at most 10 seconds); the shell is then there on every
+  turn, and typing `exit` turns the window back to its front. With the back
+  shown, keys and clicks over the client area go to the terminal. The
+  terminal outlives its window: when the window goes (its application
+  quits, is killed or closes it), the terminal stays where it was as a
+  window of its own, with a titlebar, in front and focused. Its close
+  button asks the terminal to close: while a program other than the shell
+  runs in it, Terminal asks first in a sheet (Cancel keeps it, Close ends
+  it); an idle shell closes at once. While the back of a window is shown,
+  its close button (and Close in the titlebar menu) closes the terminal the
+  same way, not the application's window, which then turns back to its
+  front; with the front shown it closes the application's window as
+  always. A window that shows a sheet is not offered "Force Quit" when it
+  does not close. A Terminal from before WM_DELETE_WINDOW on its flip side
+  is simply ended. When the application is started again, its next window
+  takes the terminal back onto its back (the one left longest, if there
+  are several), with the shell as it was. Applications without such a directory turn to
+  the plain back. Read at every flip; set to `NO` to always get the plain
+  back (a terminal already running for a window then quits):
+  `defaults write WindowManager URSWindowFlipSideTerminal NO`.
 
 **Note:** The display number `:1` is what you set for Xephyr. It cannot run on the same display where X11 is already running.
 

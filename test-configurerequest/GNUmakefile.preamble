@@ -1,0 +1,3 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+# The decision is plain C over xcb constants, so it is compiled into the test directly.
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager

@@ -8,6 +8,12 @@
 
 #define HEIGHT 22
 
+// Utility panel titlebars are a fixed height, not proportional to the
+// normal titlebar (which varies by theme/metrics) - scaled by
+// GSScaleFactor like every other metric here so it stays consistent at
+// HiDPI.
+#define UTILITY_HEIGHT 16
+
 @implementation TitleBarSettingsService
 
 @synthesize heightDefined;
@@ -65,6 +71,15 @@
 - (uint16_t) defaultHeight
 {
     return defaultHeight;
+}
+
+- (uint16_t) heightForUtility:(BOOL)isUtility
+{
+    if (!isUtility)
+        return heightDefined ? height : defaultHeight;
+
+    uint16_t fixed = (uint16_t)(UTILITY_HEIGHT * self.scaleFactor);
+    return fixed < 1 ? 1 : fixed;
 }
 
 @end

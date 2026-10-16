@@ -41,6 +41,9 @@
 
 @interface EWMHService : NSObject
 {
+    // The window last published as active, so that an application whose
+    // own window has the focus is not left without an active window
+    xcb_window_t lastActiveWindowId;
 
 }
 
@@ -148,6 +151,10 @@
 @property (strong, nonatomic)NSString* MANAGER;
 @property (strong, nonatomic)NSString* KdeNetWFrameStrut;
 @property (strong, nonatomic)NSString* MotifWMHints;
+// _ACTIVE_APPLICATION (root, CARDINAL): the PID of the frontmost
+// application, also when it has no window.  Written by the WM, read by
+// Menu.app, which then shows that application's own menu.
+@property (strong, nonatomic)NSString* GershwinActiveApp;
 
 //GNUstep properties
 @property (strong, nonatomic)NSString *GNUStepMiniaturizeWindow;
@@ -196,12 +203,45 @@
 
 - (void) updateNetFrameExtentsForWindow:(XCBWindow*)aWindow;
 - (void) updateNetFrameExtentsForWindow:(XCBWindow*)aWindow andExtents:(uint32_t[])extents;
+
+// YES when the client's own _GNUSTEP_WM_ATTR window_style carries
+// NSUtilityWindowMask (16).  Read this instead of _NET_WM_WINDOW_TYPE: the
+// active Eau theme republishes every NSPanel's _NET_WM_WINDOW_TYPE as
+// _NET_WM_WINDOW_TYPE_DIALOG (GSDisplayServer+Eau.m's popup-menu-type fix),
+// so that EWMH property no longer distinguishes a utility panel from an
+// ordinary dialog once Eau has touched it.
+- (BOOL) clientDeclaresUtilityWindowStyle:(XCBWindow*)aWindow;
+
+// YES when the client's _GNUSTEP_WM_ATTR window_level is
+// NSFloatingWindowLevel (2) or higher - a broader check than
+// clientDeclaresUtilityWindowStyle: (which looks at the style mask, not
+// the level): catches a floating panel that never set
+// NSUtilityWindowMask too.
+- (BOOL) clientDeclaresFloatingOrAboveLevel:(XCBWindow*)aWindow;
+
+// The client's _GNUSTEP_WM_ATTR window_level (NSWindow.h levels); NO when
+// the client published none.
+- (BOOL) clientWindowLevel:(int32_t *)level forWindow:(XCBWindow*)aWindow;
+
+// YES when the window's own _NET_WM_STATE property lists
+// _NET_WM_STATE_MODAL.  A modal dialog must end up above every other
+// window of its application, including its utility/floating panels, no
+// matter which of them last asked to be raised - reading the live
+// property (rather than caching the flag from a ClientMessage) keeps this
+// correct whether MODAL was set before the first map or added afterwards.
+- (BOOL) windowDeclaresModalState:(XCBWindow*)aWindow;
 - (void) updateNetWmWindowTypeDockForWindow:(XCBWindow*)aWindow;
 - (BOOL) ewmhClientMessage:(NSString*)anAtomMessageName;
 - (void) handleClientMessage:(NSString*)anAtomMessageName forWindow:(XCBWindow*)aWindow data:(xcb_client_message_data_t)someData;
 - (xcb_get_property_reply_t *) netWmIconFromWindow:(XCBWindow*)aWindow;
 - (void) updateNetClientList;
 - (void) updateNetActiveWindow:(XCBWindow*)aWindow;
+- (void) updateNetActiveWindow:(XCBWindow*)aWindow requestedByPager:(BOOL)byPager;
+- (void) updateGershwinActiveAppForPid:(pid_t)pid;
+/* Makes an application the frontmost one without focusing a window of it:
+ * an application without a window (the active window is cleared), or the
+ * one whose desktop was clicked. */
+- (void) activateGershwinAppForPid:(pid_t)pid;
 - (void) updateNetSupported:(NSArray*)atomsArray forRootWindow:(XCBWindow*)aRootWindow;
 - (void) updateGNUStepFrameOffsetsForRootWindow:(XCBWindow*)aRootWindow;
 - (void) updateNetWmState:(XCBWindow*) aWindow;

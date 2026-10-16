@@ -1,0 +1,3 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+# The overrides are plain Foundation, so they are compiled into the test directly.
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager

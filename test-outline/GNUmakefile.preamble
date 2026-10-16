@@ -1,0 +1,6 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+# The outline is pure geometry, built with ARC like the window manager
+outline_OBJC_FILES += ../WindowManager/URSWindowOutline.m
+../WindowManager/URSWindowOutline.m_FILE_FLAGS += -fobjc-arc
+ADDITIONAL_TOOL_LIBS += -lgnustep-gui

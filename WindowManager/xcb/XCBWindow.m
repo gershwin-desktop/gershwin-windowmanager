@@ -11,6 +11,7 @@
 
 #import "XCBWindow.h"
 #import "XCBConnection.h"
+#import "URSInputFocusPolicy.h"
 #import "XCBTitleBar.h"
 #import <xcb/xcb_aux.h>
 #import "ICCCMService.h"
@@ -19,6 +20,8 @@
 #import "TitleBarSettingsService.h"
 #import "XCBFrame.h"
 #import <AppKit/NSAlert.h>
+#import "URSCloseRequestPlan.h"
+#import "URSConfigureRequestPolicy.h"
 
 #define BUTTONMASK  (XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE)
 
@@ -57,7 +60,9 @@
 @synthesize cursor;
 @synthesize windowClass;
 @synthesize windowType;
+@synthesize isUtilityPanel;
 @synthesize leaderWindow;
+
 @synthesize maximizedHorizontally;
 @synthesize maximizedVertically;
 @synthesize shape;
@@ -436,8 +441,8 @@
 {
     NSUInteger size = [[connection screens] count];
     XCBQueryTreeReply *queryTreeReply = [self queryTree];
-    
-    if ([queryTreeReply message] == BadWindow)
+
+    if (queryTreeReply == nil || [queryTreeReply message] == BadWindow)
         return nil;
     
     XCBWindow *rootWindow = [queryTreeReply rootWindow];
@@ -602,6 +607,10 @@
         [queryReply description];
         return queryReply;
     }
+    /* Neither a reply nor an error: nothing can be said about this window. */
+    if (reply == NULL)
+        return nil;
+
     queryReply = [[XCBQueryTreeReply alloc] initWithReply:reply andConnection:connection];
 
 
@@ -808,22 +817,44 @@
     [connection setNeedFlush:YES];
 }
 
-- (void) close
+- (BOOL) close
 {
-    // If close was already requested (timer is running), the app ignored
-    // the first request — show the force-quit dialog immediately.
-    if (closeTimer != nil)
+    id<XCBCloseRequestRouting> router = [connection closeRequestRouter];
+    if ([router closeRequestTakenOverForClient:self])
     {
-        [self cancelCloseTimer];
-        [self closeTimerFired:nil];
-        return;
+        return NO;
     }
 
     xcb_client_message_event_t event;
     XCBAtomService *atomService = [XCBAtomService sharedInstanceWithConnection:connection];
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
 
-    if ([icccmService hasProtocol:[icccmService WMDeleteWindow] forWindow:self])
+    URSCloseRequestAction action =
+        [URSCloseRequestPlan actionWithRequestPending:closeTimer != nil
+                                           showsSheet:[router clientShowsSheet:self]
+                                  acceptsCloseRequest:[icccmService hasProtocol:[icccmService WMDeleteWindow]
+                                                                      forWindow:self]
+                                      hasCloseHandler:self.closeHandler != nil];
+    if (action == URSCloseRequestActionWaitForUser)
+    {
+        // The client is asking the user whether to close; a pending watch
+        // would offer force quit while the user is still reading the sheet.
+        [self cancelCloseTimer];
+        return NO;
+    }
+    if (action == URSCloseRequestActionOfferForceQuit)
+    {
+        // The first request was ignored.
+        [self cancelCloseTimer];
+        [self closeTimerFired:nil];
+        return YES;
+    }
+
+    if (action == URSCloseRequestActionRunHandler)
+    {
+        self.closeHandler();
+    }
+    else if (action == URSCloseRequestActionAskClient)
     {
         event.type = [atomService atomFromCachedAtomsWithKey:[icccmService WMProtocols]];
         event.format = 32;
@@ -849,6 +880,17 @@
                                                 selector:@selector(closeTimerFired:)
                                                 userInfo:nil
                                                  repeats:NO];
+    return YES;
+}
+
+- (BOOL)supportsCloseRequest
+{
+    if (self.closeHandler != nil)
+    {
+        return YES;
+    }
+    ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
+    return [icccmService hasProtocol:[icccmService WMDeleteWindow] forWindow:self];
 }
 
 - (void)cancelCloseTimer
@@ -903,7 +945,8 @@
             }
             free(focReply);
         }
-        if (!frontmost)
+        BOOL showsSheet = [[connection closeRequestRouter] clientShowsSheet:self];
+        if (![URSCloseRequestPlan offersForceQuitWithSheet:showsSheet frontmost:frontmost])
         {
             closeTimer = nil;
             return;
@@ -1035,6 +1078,18 @@
     [connection flush];
 }
 
+- (BOOL) acceptsInputFocus
+{
+    ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
+
+    // Windows the WM never mapped itself (docks, panels) may not have had
+    // their hints read yet.
+    if ([cachedWMHints count] == 0)
+        [self refreshCachedWMHints];
+    return URSWindowAcceptsInputFocus(hasInputHint,
+        [icccmService hasProtocol:[icccmService WMTakeFocus] forWindow:self]);
+}
+
 - (void) focus
 {
     xcb_client_message_event_t event;
@@ -1146,6 +1201,58 @@
     return rect;
 }
 
+// The client lives inside the frame, so its stacking requests are carried
+// out on the frame; on the client they would only reorder it under its own
+// titlebar.  Focus is left alone: a raise request is not an activation.
+- (void) applyStackAction:(URSFrameStackAction)action
+                ofRequest:(xcb_configure_request_event_t *)anEvent
+                  toFrame:(XCBFrame *)frame
+{
+    switch (action)
+    {
+        case URSFrameStackNone:
+            break;
+
+        case URSFrameStackRaise:
+            // The same raise _NET_ACTIVE_WINDOW does, so the Dock, menus and
+            // the application's floating panels stay above the window.
+            [frame stackAbove];
+            [connection restackDockWindowsAbove];
+            break;
+
+        case URSFrameStackLowerAmongPeers:
+            [connection lowerNormalWindowBeneathAllPeers:frame];
+            break;
+
+        case URSFrameStackToBottom:
+            [frame stackBelow];
+            break;
+
+        case URSFrameStackRelative:
+        {
+            uint16_t mask = XCB_CONFIG_WINDOW_STACK_MODE;
+            uint32_t vals[2];
+            unsigned short i = 0;
+
+            if (anEvent->value_mask & XCB_CONFIG_WINDOW_SIBLING)
+            {
+                // A decorated sibling is a child of its own frame; only that
+                // frame is a sibling of ours at the root.
+                XCBWindow *sibling = [connection windowForXCBId:anEvent->sibling];
+                xcb_window_t siblingId = anEvent->sibling;
+                if ([sibling decorated] && [[sibling parentWindow] isKindOfClass:[XCBFrame class]])
+                    siblingId = [[sibling parentWindow] window];
+                mask |= XCB_CONFIG_WINDOW_SIBLING;
+                vals[i++] = siblingId;
+            }
+            vals[i++] = anEvent->stack_mode;
+            xcb_configure_window([connection connection], [frame window], mask, vals);
+            [connection restackDockWindowsAbove];
+            break;
+        }
+    }
+}
+
 - (void) configureForEvent:(xcb_configure_request_event_t *)anEvent
 {
     uint16_t config_frame_mask = 0;
@@ -1161,13 +1268,23 @@
     XCBFrame *frame = (XCBFrame*)parentWindow;
     XCBRect frameRect = [frame windowRect];//[[frame geometries] rect];
     TitleBarSettingsService *settingsService = [TitleBarSettingsService sharedInstance];
-    int titleHeight = [settingsService heightDefined] ? [settingsService height] : [settingsService defaultHeight];
+    int titleHeight = [settingsService heightForUtility:[self isUtilityPanel]];
     int cb = [frame clientBorder];
 
     /*** Handle windows we manage ***/
 
     if (anEvent->parent == [[connection rootWindowForScreenNumber:0] window])
         return;
+
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
+    URSConfigureRequestInput input;
+    input.valueMask = anEvent->value_mask;
+    input.stackMode = anEvent->stack_mode;
+    input.isDesktop = [[self windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]];
+    input.keepBelow = [self isBelow];
+    input.fixedSize = ![self canResize];
+    URSConfigureRequestDecision decision = URSDecideConfigureRequest(input);
+    ewmhService = nil;
 
     if (anEvent->value_mask & XCB_CONFIG_WINDOW_X)
     {
@@ -1181,37 +1298,34 @@
     if (anEvent->value_mask & XCB_CONFIG_WINDOW_Y)
     {
         // Same rationale as X: anEvent->y is the frame Y directly.
+        // Never honor a client-requested move that would put the titlebar
+        // inside a strut (menu bar) - clamp before it reaches the frame.
+        int32_t requestedY = anEvent->y;
+        XCBPoint clamped = [connection clampFramePosition:XCBMakePoint(frameRect.position.x, requestedY)
+                                                      size:frameRect.size];
         config_frame_mask |= XCB_CONFIG_WINDOW_Y;
-        config_frame_vals[frame_i++] = anEvent->y;
-        frameRect.position.y = anEvent->y;
+        config_frame_vals[frame_i++] = (uint32_t)(int32_t)clamped.y;
+        frameRect.position.y = clamped.y;
     }
 
-    if (anEvent->value_mask & XCB_CONFIG_WINDOW_WIDTH)
+    if (decision.clientValueMask & XCB_CONFIG_WINDOW_WIDTH)
     {
-        if ([self canResize]) {
-            config_frame_mask |= XCB_CONFIG_WINDOW_WIDTH;
-            config_win_mask |= XCB_CONFIG_WINDOW_WIDTH;
-            config_title_mask |= XCB_CONFIG_WINDOW_WIDTH;
-            config_frame_vals[frame_i++] = anEvent->width + 2 * cb;
-            config_win_vals[win_i++] = anEvent->width;
-            config_title_vals[title_i++] = anEvent->width + 2 * cb;
-            frameRect.size.width = anEvent->width + 2 * cb;
-        } else {
-            //NSDebugLog(@"Ignoring width change request in ConfigureRequest for non-resizable window %u", window);
-        }
+        config_frame_mask |= XCB_CONFIG_WINDOW_WIDTH;
+        config_win_mask |= XCB_CONFIG_WINDOW_WIDTH;
+        config_title_mask |= XCB_CONFIG_WINDOW_WIDTH;
+        config_frame_vals[frame_i++] = anEvent->width + 2 * cb;
+        config_win_vals[win_i++] = anEvent->width;
+        config_title_vals[title_i++] = anEvent->width + 2 * cb;
+        frameRect.size.width = anEvent->width + 2 * cb;
     }
 
-    if (anEvent->value_mask & XCB_CONFIG_WINDOW_HEIGHT)
+    if (decision.clientValueMask & XCB_CONFIG_WINDOW_HEIGHT)
     {
-        if ([self canResize]) {
-            config_frame_mask |= XCB_CONFIG_WINDOW_HEIGHT;
-            config_win_mask |= XCB_CONFIG_WINDOW_HEIGHT;
-            config_frame_vals[frame_i++] = anEvent->height + titleHeight + cb;
-            config_win_vals[win_i++] = anEvent->height;
-            frameRect.size.height = anEvent->height + titleHeight + cb;
-        } else {
-            //NSDebugLog(@"Ignoring height change request in ConfigureRequest for non-resizable window %u", window);
-        }
+        config_frame_mask |= XCB_CONFIG_WINDOW_HEIGHT;
+        config_win_mask |= XCB_CONFIG_WINDOW_HEIGHT;
+        config_frame_vals[frame_i++] = anEvent->height + titleHeight + cb;
+        config_win_vals[win_i++] = anEvent->height;
+        frameRect.size.height = anEvent->height + titleHeight + cb;
     }
 
     /* Struts stay reserved for docks such as the menu bar even when the
@@ -1241,28 +1355,6 @@
         config_frame_vals[frame_i++] = anEvent->border_width;
     }
 
-    if (anEvent->value_mask & XCB_CONFIG_WINDOW_SIBLING)
-    {
-        config_win_mask |= XCB_CONFIG_WINDOW_SIBLING;
-        config_win_vals[win_i++] = anEvent->sibling;
-    }
-
-    if (anEvent->value_mask & XCB_CONFIG_WINDOW_STACK_MODE)
-    {
-        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:connection];
-        BOOL isDesktopWindow = [[self windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]];
-
-        uint32_t stack_mode = anEvent->stack_mode;
-        if (isDesktopWindow && stack_mode == XCB_STACK_MODE_ABOVE) {
-            //NSLog(@"Decorated desktop window %u attempted to stack above - forcing below", window);
-            stack_mode = XCB_STACK_MODE_BELOW;
-        }
-
-        config_win_mask |= XCB_CONFIG_WINDOW_STACK_MODE;
-        config_win_vals[win_i++] = stack_mode;
-        ewmhService = nil;
-    }
-
     XCBTitleBar *titleBar = (XCBTitleBar*)[frame childWindowForKey:TitleBar];
     xcb_configure_window([connection connection], window, config_win_mask, config_win_vals);
     xcb_configure_window([connection connection], [frame window], config_frame_mask, config_frame_vals);
@@ -1277,6 +1369,8 @@
     [titleBar updateRectsFromGeometries];
     //[titleBar drawTitleBarComponents]; FIXME: why this draw here?
     [frame setWindowRect:frameRect];
+
+    [self applyStackAction:decision.stackAction ofRequest:anEvent toFrame:frame];
 
     /*** required by ICCCM compliance ***/
 
@@ -1294,9 +1388,10 @@
     originalRect = rect;
 }
 
-/* Re-apply the frame geometry after a GSScaleFactor change: resize the frame
- * and titlebar to the new titlebar height and re-position the client. */
-- (void)reframeForScaleChange
+/* Re-apply the frame geometry after anything that changes how a window is
+ * decorated - a GSScaleFactor change or a theme change: resize the frame and
+ * titlebar to the titlebar height in force now and re-position the client. */
+- (void)reframeForDecorationChange
 {
     /* Only decorated client windows live in a frame; titlebars and frames
      * (also in the windows map) must be skipped. */
@@ -1308,8 +1403,13 @@
     XCBFrame *frame = (XCBFrame *)parentWindow;
     XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    int titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
-    int cb = [frame clientBorder];
+    int titleHeight = [settings heightForUtility:[self isUtilityPanel]];
+    int cb;
+
+    /* A theme that draws a window frame of its own decides the inset, so it
+     * has to be read again and not taken from what the last theme left. */
+    [frame updateClientBorder];
+    cb = [frame clientBorder];
 
     /* Keep the frame's cached titlebar height in sync with the service so
      * later interactive resizes (which read frame.titleHeight) place the
@@ -1368,19 +1468,25 @@
     return visual;
 }
 
+// _NET_WM_STATE_HIDDEN goes along with WM_STATE, as EWMH asks, and before
+// it: GNUstep takes a window for miniaturized only when both say so as it
+// sees WM_STATE change, and only then tells it that it came back, which
+// views drawn outside the window's backing store (OpenGL) need to redraw.
 - (void) setIconicState
 {
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_ICONIC];
     isMinimized = YES;
+    [[EWMHService sharedInstanceWithConnection:connection] updateNetWmState:self];
+    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_ICONIC];
     icccmService = nil;
 }
 
 - (void) setNormalState
 {
     ICCCMService *icccmService = [ICCCMService sharedInstanceWithConnection:connection];
-    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_NORMAL];
     isMinimized = NO;
+    [[EWMHService sharedInstanceWithConnection:connection] updateNetWmState:self];
+    [icccmService setWMStateForWindow:self state:ICCCM_WM_STATE_NORMAL];
     icccmService = nil;
 }
 
