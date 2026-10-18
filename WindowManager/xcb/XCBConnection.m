@@ -2029,8 +2029,10 @@ static XCBConnection *sharedInstance;
                                                         length:256];
                     if (nameReply)
                     {
-                        char *name = (char *)xcb_get_property_value(nameReply);
-                        if (name && strcmp(name, "Dock") == 0)
+                        // Property values are not NUL-terminated
+                        const char *name = (const char *)xcb_get_property_value(nameReply);
+                        int nameLength = xcb_get_property_value_length(nameReply);
+                        if (name && nameLength == 4 && memcmp(name, "Dock", 4) == 0)
                         {
                             Class compositorClass = NSClassFromString(@"URSCompositingManager");
                             id<URSCompositingManaging> compositor = nil;
@@ -4001,8 +4003,10 @@ static XCBConnection *sharedInstance;
                                                         length:256];
                     if (nameReply)
                     {
-                        char *name = (char *)xcb_get_property_value(nameReply);
-                        if (name && strcmp(name, "Dock") == 0)
+                        // Property values are not NUL-terminated
+                        const char *name = (const char *)xcb_get_property_value(nameReply);
+                        int nameLength = xcb_get_property_value_length(nameReply);
+                        if (name && nameLength == 4 && memcmp(name, "Dock", 4) == 0)
                         {
                             Class compositorClass = NSClassFromString(@"URSCompositingManager");
                             id<URSCompositingManaging> compositor = nil;
