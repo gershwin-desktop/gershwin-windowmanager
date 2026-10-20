@@ -12,6 +12,7 @@ ADDITIONAL_INCLUDE_DIRS += -I../WindowManager -I../WindowManager/xcb \
 WM_COLLABORATORS = \
 	../WindowManager/UROSWMApplication.m \
 	../WindowManager/URSHybridEventHandler.m \
+	../WindowManager/URSSequenceWatch.m \
 	../WindowManager/URSFocusManager.m \
 	../WindowManager/URSKeyboardManager.m \
 	../WindowManager/URSWorkareaManager.m \

@@ -17,6 +17,7 @@
 #import <errno.h>
 #import <string.h>
 #import "URSProfiler.h"
+#import "URSSequenceWatch.h"
 #import "xcb/services/TitleBarSettingsService.h"
 #import <GNUstepGUI/GSTheme.h>
 
@@ -972,37 +973,8 @@ static CGFloat WMLastScaleFactor = 1.0;
     [self.titlebarController handleHoverDuringMotion:motionEvent];
 }
 
-/* libxcb widens the 16-bit sequence number of every packet against the one
- * read before it.  A packet that lands beyond the last request this
- * connection sent moves libxcb past requests that have not been answered
- * yet: from then on every reply comes back NULL without an error, nothing is
- * reparented and nothing is logged (seen on FreeBSD CI only).  Naming the
- * packet that did it is the only way to find out where it comes from. */
-static void URSReportSequenceOverrun(xcb_connection_t *c, xcb_generic_event_t *e)
-{
-    static uint32_t lastFullSequence;
-    static unsigned reports;
-
-    if ((e->response_type & 0x7f) == XCB_KEYMAP_NOTIFY) {
-        return;
-    }
-    uint32_t previous = lastFullSequence;
-    lastFullSequence = e->full_sequence;
-    // A jump this far is rare enough that a request to learn the
-    // connection's own count costs nothing in the normal case.
-    if (previous == 0 || e->full_sequence - previous < 0x8000 || reports >= 20) {
-        return;
-    }
-    uint32_t sent = xcb_no_operation(c).sequence;
-    if ((int32_t)(e->full_sequence - sent) > 0) {
-        reports++;
-        NSLog(@"[WindowManager] XCB sequence overrun: event type %u (raw %u, "
-              @"16-bit sequence %u) widened to %u, previous event %u, last request "
-              @"sent %u; replies to the requests in between come back empty",
-              e->response_type & 0x7f, e->response_type, e->sequence,
-              e->full_sequence, previous, sent);
-    }
-}
+// One per connection: the process has a single window manager connection.
+static URSSequenceWatch URSWindowManagerSequenceWatch;
 
 - (void)processAvailableXCBEvents
 {
@@ -1033,7 +1005,7 @@ static void URSReportSequenceOverrun(xcb_connection_t *c, xcb_generic_event_t *e
     while (eventsProcessed < maxEventsPerCall &&
            (e = xcb_poll_for_event([connection connection]))) {
         eventsProcessed++;
-        URSReportSequenceOverrun([connection connection], e);
+        URSSequenceWatchPacket(&URSWindowManagerSequenceWatch, [connection connection], e);
 
         // Motion event compression: accumulate the latest motion event
         // but don't process it until we see a non-motion event or the queue empties.

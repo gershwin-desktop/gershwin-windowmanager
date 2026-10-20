@@ -1,0 +1,4 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+# The watch is compiled into the test directly; it talks to a real X server.
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+ADDITIONAL_LDFLAGS += -lxcb
