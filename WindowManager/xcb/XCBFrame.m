@@ -711,72 +711,41 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     XCBRect frameRect = [self windowRect];
-    CGFloat w = frameRect.size.width;
-    CGFloat h = frameRect.size.height;
+    URSResizeZoneLayout l = URSResizeZoneLayoutForFrame(frameRect.size.width, frameRect.size.height,
+                                                        cornerSize, edgeThickness,
+                                                        [self themeGrowBoxSize]);
 
-    // Create resize zones for all 8 directions
-    // Corners (square zones)
-    [self createResizeZoneAtX:0 y:0
-                        width:cornerSize height:cornerSize
-                     position:TopLeftCorner
-                          key:ResizeZoneNW];
+    [self createResizeZoneWithRect:l.nw position:TopLeftCorner key:ResizeZoneNW];
+    [self createResizeZoneWithRect:l.ne position:TopRightCorner key:ResizeZoneNE];
+    [self createResizeZoneWithRect:l.sw position:BottomLeftCorner key:ResizeZoneSW];
+    // The grow box takes the place of the SE corner zone.
+    if (l.growBox.width == 0)
+        [self createResizeZoneWithRect:l.se position:BottomRightCorner key:ResizeZoneSE];
 
-    [self createResizeZoneAtX:w - cornerSize y:0
-                        width:cornerSize height:cornerSize
-                     position:TopRightCorner
-                          key:ResizeZoneNE];
-
-    [self createResizeZoneAtX:0 y:h - cornerSize
-                        width:cornerSize height:cornerSize
-                     position:BottomLeftCorner
-                          key:ResizeZoneSW];
-
-    // Only create SE corner zone if grow box is NOT enabled
-    // (grow box replaces SE corner with a larger zone)
-    BOOL hasGrowBox = [theme respondsToSelector:@selector(resizeZoneHasGrowBox)] &&
-                      [theme resizeZoneHasGrowBox];
-    if (!hasGrowBox) {
-        [self createResizeZoneAtX:w - cornerSize y:h - cornerSize
-                            width:cornerSize height:cornerSize
-                         position:BottomRightCorner
-                              key:ResizeZoneSE];
-    }
-
-    // Edges (thin zones between corners)
-    [self createResizeZoneAtX:cornerSize y:0
-                        width:w - 2*cornerSize height:edgeThickness
-                     position:TopBorder
-                          key:ResizeZoneN];
-
-    [self createResizeZoneAtX:cornerSize y:h - edgeThickness
-                        width:w - 2*cornerSize height:edgeThickness
-                     position:BottomBorder
-                          key:ResizeZoneS];
-
-    [self createResizeZoneAtX:0 y:cornerSize
-                        width:edgeThickness height:h - 2*cornerSize
-                     position:LeftBorder
-                          key:ResizeZoneW];
-
-    [self createResizeZoneAtX:w - edgeThickness y:cornerSize
-                        width:edgeThickness height:h - 2*cornerSize
-                     position:RightBorder
-                          key:ResizeZoneE];
-
-    // Optionally create grow box zone (overlays SE corner with larger size)
-    if ([theme respondsToSelector:@selector(resizeZoneHasGrowBox)] &&
-        [theme resizeZoneHasGrowBox]) {
-        CGFloat growBoxSize = cornerSize; // Default to corner size
-        if ([theme respondsToSelector:@selector(resizeZoneGrowBoxSize)]) {
-            growBoxSize = [theme resizeZoneGrowBoxSize];
-        }
-        [self createResizeZoneAtX:w - growBoxSize y:h - growBoxSize
-                            width:growBoxSize height:growBoxSize
-                         position:BottomRightCorner
-                              key:ResizeZoneGrowBox];
-    }
+    [self createResizeZoneWithRect:l.n position:TopBorder key:ResizeZoneN];
+    [self createResizeZoneWithRect:l.s position:BottomBorder key:ResizeZoneS];
+    [self createResizeZoneWithRect:l.w position:LeftBorder key:ResizeZoneW];
+    [self createResizeZoneWithRect:l.e position:RightBorder key:ResizeZoneE];
+    // Created last so it stacks above the edge zones it may overlap.
+    if (l.growBox.width > 0)
+        [self createResizeZoneWithRect:l.growBox position:BottomRightCorner key:ResizeZoneGrowBox];
 
     [connection flush];
+}
+
+- (int32_t)themeGrowBoxSize
+{
+    GSTheme *theme = [GSTheme theme];
+    if (![theme respondsToSelector:@selector(resizeZoneHasGrowBox)] || ![theme resizeZoneHasGrowBox])
+        return 0;
+    if ([theme respondsToSelector:@selector(resizeZoneGrowBoxSize)])
+        return (int32_t)[theme resizeZoneGrowBoxSize];
+    return (int32_t)[theme resizeZoneCornerSize];
+}
+
+- (void)createResizeZoneWithRect:(URSZoneRect)r position:(MousePosition)position key:(childrenMask)key
+{
+    [self createResizeZoneAtX:r.x y:r.y width:r.width height:r.height position:position key:key];
 }
 
 - (void)createResizeZoneAtX:(CGFloat)x y:(CGFloat)y
@@ -846,30 +815,24 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     }
 
     XCBRect frameRect = [self windowRect];
-    CGFloat w = frameRect.size.width;
-    CGFloat h = frameRect.size.height;
+    URSResizeZoneLayout l = URSResizeZoneLayoutForFrame(frameRect.size.width, frameRect.size.height,
+                                                        cornerSize, edgeThickness,
+                                                        [self themeGrowBoxSize]);
 
-    // Update corner positions
-    [self updateResizeZone:ResizeZoneNW toX:0 y:0 width:cornerSize height:cornerSize];
-    [self updateResizeZone:ResizeZoneNE toX:w - cornerSize y:0 width:cornerSize height:cornerSize];
-    [self updateResizeZone:ResizeZoneSW toX:0 y:h - cornerSize width:cornerSize height:cornerSize];
-    [self updateResizeZone:ResizeZoneSE toX:w - cornerSize y:h - cornerSize width:cornerSize height:cornerSize];
+    [self updateResizeZone:ResizeZoneNW toRect:l.nw];
+    [self updateResizeZone:ResizeZoneNE toRect:l.ne];
+    [self updateResizeZone:ResizeZoneSW toRect:l.sw];
+    [self updateResizeZone:ResizeZoneSE toRect:l.se];
+    [self updateResizeZone:ResizeZoneN toRect:l.n];
+    [self updateResizeZone:ResizeZoneS toRect:l.s];
+    [self updateResizeZone:ResizeZoneW toRect:l.w];
+    [self updateResizeZone:ResizeZoneE toRect:l.e];
+    [self updateResizeZone:ResizeZoneGrowBox toRect:l.growBox];
+}
 
-    // Update edge positions
-    [self updateResizeZone:ResizeZoneN toX:cornerSize y:0 width:w - 2*cornerSize height:edgeThickness];
-    [self updateResizeZone:ResizeZoneS toX:cornerSize y:h - edgeThickness width:w - 2*cornerSize height:edgeThickness];
-    [self updateResizeZone:ResizeZoneW toX:0 y:cornerSize width:edgeThickness height:h - 2*cornerSize];
-    [self updateResizeZone:ResizeZoneE toX:w - edgeThickness y:cornerSize width:edgeThickness height:h - 2*cornerSize];
-
-    // Update grow box zone if present
-    if ([theme respondsToSelector:@selector(resizeZoneHasGrowBox)] &&
-        [theme resizeZoneHasGrowBox]) {
-        CGFloat growBoxSize = cornerSize;
-        if ([theme respondsToSelector:@selector(resizeZoneGrowBoxSize)]) {
-            growBoxSize = [theme resizeZoneGrowBoxSize];
-        }
-        [self updateResizeZone:ResizeZoneGrowBox toX:w - growBoxSize y:h - growBoxSize width:growBoxSize height:growBoxSize];
-    }
+- (void)updateResizeZone:(childrenMask)key toRect:(URSZoneRect)r
+{
+    [self updateResizeZone:key toX:r.x y:r.y width:r.width height:r.height];
 }
 
 - (void)updateResizeZone:(childrenMask)key toX:(CGFloat)x y:(CGFloat)y width:(CGFloat)width height:(CGFloat)height
@@ -1183,7 +1146,7 @@ void resizeFromRightForEvent(xcb_motion_notify_event_t *anEvent,
     // Apply minimum visibility constraint when shrinking
     const int32_t MIN_VISIBLE_PIXELS = 16;
     XCBConnection *xcbConn = [frame connection];
-    int32_t newWidth = anEvent->event_x;
+    int32_t newWidth = URSResizeGrabWidth([frame resizeGrab], anEvent->event_x);
 
     if ([xcbConn workareaValid]) {
         int32_t workareaX = [xcbConn cachedWorkareaX];
@@ -1262,7 +1225,7 @@ void resizeFromLeftForEvent(xcb_motion_notify_event_t *anEvent,
     // Apply minimum visibility constraint
     const int32_t MIN_VISIBLE_PIXELS = 16;
     XCBConnection *xcbConn = [frame connection];
-    int16_t newX = anEvent->root_x;
+    int16_t newX = URSResizeGrabLeftEdge([frame resizeGrab], anEvent->root_x);
 
     if ([xcbConn workareaValid]) {
         int32_t workareaX = [xcbConn cachedWorkareaX];
@@ -1377,7 +1340,7 @@ void resizeFromBottomForEvent(xcb_motion_notify_event_t *anEvent,
     }
 
     // Use signed arithmetic to prevent underflow when event_y is smaller than titlebar
-    int32_t newFrameHeight = (int32_t)anEvent->event_y;
+    int32_t newFrameHeight = URSResizeGrabHeight([frame resizeGrab], anEvent->event_y);
     int32_t minFrameHeight = minH + titleBarHeight + cb;
 
     // Clamp to minimum
@@ -1437,7 +1400,7 @@ void resizeFromTopForEvent(xcb_motion_notify_event_t *anEvent,
     // Apply minimum visibility constraint
     const int32_t MIN_VISIBLE_PIXELS = 16;
     XCBConnection *xcbConn = [frame connection];
-    int16_t newY = anEvent->root_y;
+    int16_t newY = URSResizeGrabTopEdge([frame resizeGrab], anEvent->root_y);
 
     if ([xcbConn workareaValid]) {
         int32_t workareaY = [xcbConn cachedWorkareaY];
@@ -1535,8 +1498,8 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     XCBRect clientRect = [clientWindow windowRect];
 
     // Use signed arithmetic to prevent underflow
-    int32_t newFrameWidth = (int32_t)anEvent->event_x;
-    int32_t newFrameHeight = (int32_t)anEvent->event_y;
+    int32_t newFrameWidth = URSResizeGrabWidth([frame resizeGrab], anEvent->event_x);
+    int32_t newFrameHeight = URSResizeGrabHeight([frame resizeGrab], anEvent->event_y);
 
     // Clamp to minimum dimensions
     int32_t minimumClientWidth = (minW < 1) ? 1 : minW;

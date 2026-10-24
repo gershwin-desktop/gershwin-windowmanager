@@ -11,6 +11,7 @@
 #import "XCBConnection.h"
 #import "EMousePosition.h"
 #import "EResizeDirection.h"
+#import "URSResizeGeometry.h"
 
 
 #define WM_MIN_WINDOW_HEIGHT 431
@@ -68,6 +69,9 @@ extern NSString *URSWindowTitleContentChangedNotification;
 @property (nonatomic, assign) XCBRect closeAnimationTargetRect;
 @property (nonatomic, assign) BOOL closeAnimationPrepared;
 @property (nonatomic, assign) XCBPoint offset;
+/* Taken when an interactive resize starts, so the dragged edges keep their
+ * distance to the pointer instead of snapping to it. */
+@property (nonatomic, assign) URSResizeGrab resizeGrab;
 
 - (id) initWithClientWindow:(XCBWindow*) aClientWindow withConnection:(XCBConnection*) aConnection;
 - (id) initWithClientWindow:(XCBWindow*) aClientWindow

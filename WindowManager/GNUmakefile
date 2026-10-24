@@ -73,6 +73,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSShadowOverrides.m \
 		URSUtilityRestackOrder.m \
 		URSConfigureRequestPolicy.m \
+		URSResizeGeometry.m \
 		URSFramePacer.m \
 		URSTitlebarRegistry.m \
 		URSProjection.m \

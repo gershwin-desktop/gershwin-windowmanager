@@ -3630,6 +3630,8 @@ static XCBConnection *sharedInstance;
     XCBRect frameRect = [frame windowRect];
     XCBPoint relativeOffset = XCBMakePoint(anEvent->root_x - frameRect.position.x, anEvent->root_y - frameRect.position.y);
     [frame setOffset:relativeOffset];
+    [frame setResizeGrab:URSResizeGrabMake(relativeOffset.x, relativeOffset.y,
+                                           frameRect.size.width, frameRect.size.height)];
 
     if ([frame window] != anEvent->root && [[frame childWindowForKey:ClientWindow] canMove])
     {

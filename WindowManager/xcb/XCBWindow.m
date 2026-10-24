@@ -1363,12 +1363,14 @@
     // Flush immediately and update frame state (critical for proper resizing)
     xcb_flush([connection connection]);
     [frame setOriginalRect:frameRect];
+    // The zones and the shape are laid out from windowRect, so it has to
+    // hold the new size first or they stay where the old size put them.
+    [frame setWindowRect:frameRect];
     [frame updateAllResizeZonePositions];
     [frame applyRoundedCornersShapeMask];
 
     [titleBar updateRectsFromGeometries];
     //[titleBar drawTitleBarComponents]; FIXME: why this draw here?
-    [frame setWindowRect:frameRect];
 
     [self applyStackAction:decision.stackAction ofRequest:anEvent toFrame:frame];
 
