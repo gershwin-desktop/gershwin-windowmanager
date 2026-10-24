@@ -59,6 +59,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSFlowLayout.m \
 		URSDeckLayout.m \
 		URSFrameMove.m \
+		URSShadowSize.m \
 		URSSourceDirectory.m \
 		URSPreviousWindowManager.m \
 		URSCommandLine.m \

@@ -35,6 +35,7 @@ GNUstep-based Gershwin desktop. Objective-C + XCB (no GNUstep display server).
 - Which previous window manager may be terminated: `gnustep-tests test-previouswm` (headless).
 - Show Desktop layout: `gnustep-tests test-showdesktop` (headless).
 - Live miniature geometry: `gnustep-tests test-liveminiature` (headless).
+- Which window sizes may get a shadow: `gnustep-tests test-shadowsize` (headless).
 - Wobbly window model: `gnustep-tests test-wobbly` (headless).
 - `test/` is a manual app (KillTest.app), not part of the automated suite.
 

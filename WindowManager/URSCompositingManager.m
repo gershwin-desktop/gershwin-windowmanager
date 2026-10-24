@@ -12,6 +12,7 @@
 #define _DEFAULT_SOURCE  // For usleep
 #import "URSCompositingManager.h"
 #import "URSTriangleSpans.h"
+#import "URSShadowSize.h"
 #import "URSImageUpload.h"
 #import "URSShapePath.h"
 #import "URSShadowOverrides.h"
@@ -2383,6 +2384,13 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         return;
     }
     
+    // Callers also pass the frame's cached rect, not only what X reported;
+    // a size that is not a real one (0, or 0xffff - XCBInvalidRect, -1 as
+    // 16 bits) must not replace the geometry X last reported.
+    if (!URSShadowSizeIsKnown(width, height)) {
+        return;
+    }
+
     xcb_connection_t *conn = [self.connection connection];
 
     // Translate to root coordinates for child windows
@@ -5473,10 +5481,13 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     
     *swidth = width + self.gaussianSize;
     *sheight = height + self.gaussianSize;
-    
-    if (*swidth < 1 || *sheight < 1) return NULL;
-    
-    uint8_t *data = calloc(*swidth * *sheight, sizeof(uint8_t));
+
+    // A size that is not a real one made the int below overflow: a 65535 x
+    // 65535 window got a small buffer that was then written far past its end.
+    size_t bytes = URSShadowImageBytes(width, height, self.gaussianSize);
+    if (bytes == 0) return NULL;
+
+    uint8_t *data = calloc(bytes, sizeof(uint8_t));
     if (!data) return NULL;
     
     // Fill with base shadow value
@@ -5484,7 +5495,7 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
         self.shadowTop[opacity_int * (self.gaussianSize + 1) + self.gaussianSize] : 
         sum_gaussian(self.gaussianMap, self.gaussianSize, SHADOW_OPACITY, center, center, width, height);
     
-    memset(data, base_val, *swidth * *sheight);
+    memset(data, base_val, bytes);
     
     // Compute corners
     int ylimit = (self.gaussianSize < *sheight / 2) ? self.gaussianSize : (*sheight + 1) / 2;
@@ -5551,7 +5562,8 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     *swidth = width + size;
     *sheight = height + size;
 
-    if (*swidth < 1 || *sheight < 1 || !self.gaussianMap) return NULL;
+    // See -makeShadowImage:...: never allocate from a size that is not real.
+    if (URSShadowImageBytes(width, height, size) == 0 || !self.gaussianMap) return NULL;
 
     int sw = *swidth;
     int sh = *sheight;
@@ -5633,6 +5645,13 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     
     // Skip shadow for explicitly excluded windows (e.g. snap preview overlay)
     if ([self.shadowOverrides skipsShadowForWindow:cw.windowId]) {
+        return;
+    }
+
+    // Until the window's real size is known there is nothing to cast a
+    // shadow from; a later paint makes it.
+    if (!URSShadowSizeIsKnown(cw.width + 2 * cw.borderWidth,
+                              cw.height + 2 * cw.borderWidth)) {
         return;
     }
 
@@ -6151,10 +6170,17 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
             // Sync the composite window's tracked geometry to the final
             // animation position so subsequent non-animated paints use the
             // correct coordinates instead of stale values from addWindow:.
-            cw.x = finalRect.position.x;
-            cw.y = finalRect.position.y;
-            cw.width = finalRect.size.width;
-            cw.height = finalRect.size.height;
+            // An end rect without a real size (XCBInvalidRect's 0xffff, or
+            // a size cast from a negative value) must not become the
+            // window's size: shadows are allocated from it.  Ask X instead.
+            if (URSShadowSizeIsKnown(finalRect.size.width, finalRect.size.height)) {
+                cw.x = finalRect.position.x;
+                cw.y = finalRect.position.y;
+                cw.width = finalRect.size.width;
+                cw.height = finalRect.size.height;
+            } else {
+                [self refreshGeometryForWindow:cw];
+            }
         }
     }
     
