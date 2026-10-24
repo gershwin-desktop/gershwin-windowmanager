@@ -106,11 +106,6 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // OPTIMIZATION: Lazy picture creation - defer until first paint
 @property (assign, nonatomic) BOOL pictureValid;
 @property (assign, nonatomic) BOOL needsPictureCreation;
-// Track the window dimensions at the time the current picture was created.
-// Used during live resize to apply a scale transform so old content fills
-// the new (larger or smaller) frame instead of leaving a grey gap.
-@property (assign, nonatomic) uint16_t pictureWidth;
-@property (assign, nonatomic) uint16_t pictureHeight;
 // Frozen copy of the window's content taken at close-animation start.  The
 // live drawable picture (IncludeInferiors on the frame) loses the client
 // content the moment the app unmaps its window, so a close animation must
@@ -212,8 +207,6 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         // OPTIMIZATION: Lazy picture creation
         _pictureValid = NO;
         _needsPictureCreation = YES;
-        _pictureWidth = 0;
-        _pictureHeight = 0;
         _shadowPicture = XCB_NONE;
         _shadowPixmap = XCB_NONE;
         _shadowOffsetX = 0;
@@ -2424,17 +2417,16 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
     // If size changed, we need to recreate the pixmap and picture
     if (cw.width != width || cw.height != height) {
         if ([self.connection resizeState]) {
-            // During live resize: retain the existing picture so the compositor can
-            // scale old content to the new frame dimensions. This eliminates the grey
-            // area that appeared when the picture was freed and a new one was captured
-            // before the client had repainted its content.
-            // The stale picture/pixmap dimensions are tracked in pictureWidth/pictureHeight
-            // so paintWindow can apply the correct scale transform.
+            // During live resize: keep the picture.  It is a view of the window
+            // drawable (getWindowPicture:), so it already shows the window at its
+            // new size, the content the client has drawn so far at its place.
+            // Freeing it here left the window grey until a new one was made.
+            // It must be painted as it is: stretching it to the frame moved
+            // everything in the window by a pixel or two on every step and made
+            // the content jitter during the whole resize.
             // Keep the existing shadow during resize so it remains visible.
             // A correctly sized shadow is recreated lazily on the first paint
             // after resizeState becomes NO.
-            // Keep using the existing picture (marked valid) — paintWindow will
-            // detect the size mismatch via pictureWidth/pictureHeight and scale.
         } else {
             // Outside resize (e.g., programmatic resize): free and recreate normally.
             if (cw.picture != XCB_NONE) {
@@ -2948,19 +2940,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 
     // The window picture is a live view of the window drawable (see
     // getWindowPicture:), so it always reads current content at composite
-    // time and must NOT be recreated per damage event.  The only
-    // bookkeeping needed: client damage during a live resize means the
-    // client has redrawn at the new size, so the capture size that drives
-    // the scale transform in paintWindow: is committed here — this mirrors
-    // the picture recreation the old per-damage invalidation performed.
-    if ([self.connection resizeState]) {
-        uint16_t currentW = cw.width + 2 * cw.borderWidth;
-        uint16_t currentH = cw.height + 2 * cw.borderWidth;
-        if (cw.pictureWidth != currentW || cw.pictureHeight != currentH) {
-            cw.pictureWidth = currentW;
-            cw.pictureHeight = currentH;
-        }
-    }
+    // time and must NOT be recreated per damage event.
 
     if (parts != XCB_NONE) {
         [self addDamage:parts];
@@ -6283,23 +6263,6 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
 
         xcb_render_picture_t alphaMask = XCB_NONE;
 
-        // During live resize the picture may have been captured at a different size
-        // than the current frame geometry.  Apply a scale transform so the old content
-        // stretches to fill the new dimensions, eliminating grey gaps.
-        BOOL appliedResizeScale = NO;
-        if ([self.connection resizeState] && !animating &&
-            cw.pictureWidth > 0 && cw.pictureHeight > 0 &&
-            (cw.pictureWidth != destWInt || cw.pictureHeight != destHInt))
-        {
-            double sx = (double)cw.pictureWidth  / (double)destWInt;
-            double sy = (double)cw.pictureHeight / (double)destHInt;
-            xcb_render_transform_t scaleTransform = URSIdentityTransform();
-            scaleTransform.matrix11 = (xcb_render_fixed_t)(sx * 65536.0);
-            scaleTransform.matrix22 = (xcb_render_fixed_t)(sy * 65536.0);
-            xcb_render_set_picture_transform(conn, cw.picture, scaleTransform);
-            appliedResizeScale = YES;
-        }
-
         if (animating || presented) {
             double t = URSClampDouble((now - cw.animationStart) / cw.animationDuration, 0.0, 1.0);
             double srcW = fmax(1.0, (double)cw.width + (2.0 * (double)cw.borderWidth));
@@ -6426,11 +6389,6 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
         if (animating || presented) {
             xcb_render_transform_t reset = URSIdentityTransform();
             xcb_render_set_picture_transform(conn, cw.picture, reset);
-        } else if (appliedResizeScale) {
-            // Reset the scale transform applied for live resize so it doesn't
-            // persist to the next paint cycle.
-            xcb_render_transform_t reset = URSIdentityTransform();
-            xcb_render_set_picture_transform(conn, cw.picture, reset);
         }
 
         if (alphaMask != XCB_NONE) {
@@ -6485,10 +6443,6 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
         if (cw.picture != XCB_NONE) {
             cw.pictureValid = YES;
             cw.needsPictureCreation = NO;
-            // Record the window dimensions at capture time so we can detect
-            // a size mismatch and apply a scale transform during live resize.
-            cw.pictureWidth  = cw.width  + 2 * cw.borderWidth;
-            cw.pictureHeight = cw.height + 2 * cw.borderWidth;
         }
     }
 }
@@ -6564,8 +6518,6 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
     xcb_render_set_picture_filter(conn, cw.picture, strlen(filter), filter, 0, NULL);
     cw.pictureValid = YES;
     cw.needsPictureCreation = NO;
-    cw.pictureWidth = snapW;
-    cw.pictureHeight = snapH;
 }
 
 - (xcb_render_picture_t)getWindowPicture:(URSCompositeWindow *)cw {
