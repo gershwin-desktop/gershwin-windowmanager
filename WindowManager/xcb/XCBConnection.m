@@ -18,6 +18,7 @@
 #import <xcb/xcb_aux.h>
 #import <enums/EIcccm.h>
 #import "URSOutputScales.h"
+#import "URSPointerCursor.h"
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
@@ -2619,7 +2620,8 @@ static XCBConnection *sharedInstance;
     [self registerWindow:window];*/
 
     //NSLog(@"Client window decorated with id %u at %d,%d", [window window], xPos, yPos);
-    [frame initCursor];  // Must init cursor BEFORE decorateClientWindow - resize zones need it
+    // Must init cursor BEFORE decorateClientWindow - resize zones need it
+    [frame initCursorWithPixelSize:[[URSOutputScales sharedScales] cursorSizeForFrame:frame]];
     // Map the frame BEFORE decorating so that a pre-existing mapped client is reparented into
     // an already-mapped parent. Reparenting a mapped window into an *unmapped* frame causes the
     // X server to enqueue an XCB_UNMAP_NOTIFY for the client (frame has SubstructureNotify);
@@ -4407,6 +4409,9 @@ static XCBConnection *sharedInstance;
 - (void)handleEnterNotify:(xcb_enter_notify_event_t *)anEvent
 {
     XCBWindow *window = [self windowForXCBId:anEvent->event];
+
+    if (anEvent->event == anEvent->root)
+        [[URSPointerCursor sharedPointerCursor] pointerAtRootX:anEvent->root_x y:anEvent->root_y];
 
     if ([window isKindOfClass:[XCBWindow class]] &&
         [[window parentWindow] isKindOfClass:[XCBFrame class]])

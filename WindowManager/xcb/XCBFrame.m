@@ -13,6 +13,7 @@
 #import "EWMHService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
+#import "URSOutputScales.h"
 #import "URSOutputScale.h"
 #import "XCBAtomService.h"
 #import "URSShapePath.h"
@@ -312,7 +313,35 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     [self updateAllResizeZonePositions];
     [self applyRoundedCornersShapeMask];
     [URSThemeIntegration redrawTitlebarOfFrame:self];
+    [self updateCursorScale];
     [connection flush];
+}
+
+- (void) updateCursorScale
+{
+    XCBCursor *frameCursor = [self cursor];
+    uint32_t size = [[URSOutputScales sharedScales] cursorSizeForFrame:self];
+
+    if (frameCursor == nil || [frameCursor pixelSize] == size)
+        return;
+    [frameCursor changePixelSize:size];
+
+    /* The frame shows the arrow or the resize cursor it last selected. */
+    MousePosition shown = None;
+    if ([frameCursor resizeBottomSelected])            shown = BottomBorder;
+    else if ([frameCursor resizeRightSelected])        shown = RightBorder;
+    else if ([frameCursor resizeLeftSelected])         shown = LeftBorder;
+    else if ([frameCursor resizeTopSelected])          shown = TopBorder;
+    else if ([frameCursor resizeBottomRightCornerSelected]) shown = BottomRightCorner;
+    else if ([frameCursor resizeTopLeftCornerSelected])     shown = TopLeftCorner;
+    else if ([frameCursor resizeTopRightCornerSelected])    shown = TopRightCorner;
+    else if ([frameCursor resizeBottomLeftCornerSelected])  shown = BottomLeftCorner;
+    if (shown == None)
+        [self showLeftPointerCursor];
+    else
+        [self showResizeCursorForPosition:shown];
+
+    [self updateResizeCursorForShadedState];
 }
 
 - (CGFloat) effectiveScaleFactor
@@ -565,11 +594,14 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
  - (void)updateResizeCursorForShadedState
  {
      BOOL shaded = [self shaded];
+     XCBCursor *frameCursor = [self cursor];
 
+     /* The zones and the grow box have no XCBCursor of their own; their
+      * cursors are the frame's, as given to them when they were created. */
      XCBWindow *handle = [self childWindowForKey:ResizeHandle];
      if (handle) {
-         if (shaded) [handle showLeftPointerCursor];
-         else        [handle showResizeCursorForPosition:BottomRightCorner];
+         xcb_cursor_t c = [frameCursor cursorIdForPosition:shaded ? None : BottomRightCorner];
+         [handle changeAttributes:&c withMask:XCB_CW_CURSOR checked:NO];
      }
 
      struct { childrenMask key; MousePosition pos; } map[] = {
@@ -587,8 +619,8 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
          XCBWindow *zone = [self childWindowForKey:map[i].key];
          if (!zone)
              continue;
-         if (shaded) [zone showLeftPointerCursor];
-         else        [zone showResizeCursorForPosition:map[i].pos];
+         xcb_cursor_t c = [frameCursor cursorIdForPosition:shaded ? None : map[i].pos];
+         [zone changeAttributes:&c withMask:XCB_CW_CURSOR checked:NO];
      }
  }
 

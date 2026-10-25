@@ -6,6 +6,7 @@
 
 #import "XCBCursor.h"
 #import "XCBConnection.h"
+#import "URSCursorTheme.h"
 #import <xcb/xcb.h>
 
 // X11 cursor font glyph indices (from X11/cursorfont.h)
@@ -45,8 +46,15 @@
 @synthesize resizeBottomLeftCornerSelected;
 @synthesize resizeTopCursorName;
 @synthesize resizeTopSelected;
+@synthesize pixelSize;
 
 - (instancetype)initWithConnection:(XCBConnection *)aConnection screen:(XCBScreen*)aScreen
+{
+    return [self initWithConnection:aConnection screen:aScreen pixelSize:0];
+}
+
+- (instancetype)initWithConnection:(XCBConnection *)aConnection screen:(XCBScreen*)aScreen
+                         pixelSize:(uint32_t)aPixelSize
 {
     self = [super init];
 
@@ -58,6 +66,7 @@
 
     connection = aConnection;
     screen = aScreen;
+    pixelSize = aPixelSize;
 
     BOOL success = [self createContext];
 
@@ -80,7 +89,21 @@
     resizeBottomLeftCornerCursorName = @"bottom_left_corner";
     resizeTopCursorName = @"top_side";
 
+    [self loadCursors];
 
+    return self;
+}
+
+- (void) changePixelSize:(uint32_t)aPixelSize
+{
+    if (aPixelSize == pixelSize)
+        return;
+    pixelSize = aPixelSize;
+    [self loadCursors];
+}
+
+- (void) loadCursors
+{
     // Open the legacy X cursor font for fallback
     xcb_font_t cursorFont = xcb_generate_id([connection connection]);
     xcb_void_cookie_t fontCookie = xcb_open_font_checked([connection connection], cursorFont, 6, "cursor");
@@ -105,8 +128,6 @@
 
     if (cursorFont != 0)
         xcb_close_font([connection connection], cursorFont);
-
-    return self;
 }
 
 - (xcb_cursor_t) selectLeftPointerCursor
@@ -234,7 +255,12 @@
 
 - (void) loadCursor:(NSString *)name glyphIndex:(uint16_t)glyph font:(xcb_font_t)cursorFont
 {
-    cursor = xcb_cursor_load_cursor(context, [name UTF8String]);
+    if (pixelSize > 0)
+        cursor = [[URSCursorTheme sharedThemeWithConnection:[connection connection]
+                                                       root:[screen screen]->root]
+                  cursorNamed:name size:pixelSize];
+    else
+        cursor = xcb_cursor_load_cursor(context, [name UTF8String]);
 
     if (cursor == 0)
     {
@@ -299,6 +325,9 @@
 
 - (void) destroyCursor
 {
+    /* Sized cursors belong to the shared URSCursorTheme cache. */
+    if (pixelSize > 0)
+        return;
     xcb_free_cursor([connection connection], cursor);
 }
 

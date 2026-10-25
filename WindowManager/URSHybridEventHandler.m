@@ -45,6 +45,7 @@
 #import <xcb/damage.h>
 #import <xcb/present.h>
 #import "URSOutputScales.h"
+#import "URSPointerCursor.h"
 #import <xcb/randr.h>
 #import <xcb/xproto.h>
 #import <X11/keysym.h>
@@ -975,6 +976,13 @@ static CGFloat WMLastScaleFactor = 1.0;
     if ([self.overviewController handleMotion:motionEvent]) {
         return;
     }
+    /* Motion on the root itself is selected only for the pointer's size
+     * (URSPointerCursor); nothing else ever saw it. */
+    if (motionEvent->event == motionEvent->root) {
+        [[URSPointerCursor sharedPointerCursor] pointerAtRootX:motionEvent->root_x
+                                                             y:motionEvent->root_y];
+        return;
+    }
     [connection handleMotionNotify:motionEvent];
     [self.titlebarController handleResizeDuringMotion:motionEvent];
     [self attachedWindowsFollowMotion:motionEvent];
@@ -1719,6 +1727,13 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
             [connection flush];
         }
         [[URSOutputScales sharedScales] reloadWithConnection:connection];
+        [[URSPointerCursor sharedPointerCursor] startWithConnection:connection];
+        /* Windows adopted at startup were framed before the monitors were
+         * known, at the global factor's cursor size. */
+        for (XCBWindow *window in [[connection windowsMap] allValues]) {
+            if ([window isKindOfClass:[XCBFrame class]])
+                [(XCBFrame *)window updateCursorScale];
+        }
     }
 
     self.displayController =
@@ -1737,6 +1752,7 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
 
     [scales reloadWithConnection:connection];
     [self updateFramesForOutputScales];
+    [[URSPointerCursor sharedPointerCursor] outputScalesChanged];
 }
 
 - (void)updateFramesForOutputScales
@@ -1754,6 +1770,8 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
                                                          r.size.width, r.size.height)
                             force:YES])
             [frame decorationScaleChanged];
+        else
+            [frame updateCursorScale];
     }
 }
 

@@ -89,9 +89,9 @@ unit_tests() {
   say "unit tests (headless)"
   # gnustep-tests builds each suite and runs it; it exits 1 on a failed
   # test, file or build.
-  if ( cd "$root" && gnustep-tests --sequential test-displayrescue test-outputscale ) \
+  if ( cd "$root" && gnustep-tests --sequential test-displayrescue test-outputscale test-cursorsize ) \
        > "$logs/unit.log" 2>&1; then
-    ok "test-displayrescue and test-outputscale ($(grep -c '^Passed test:' "$root/tests.log" 2>/dev/null) tests)"
+    ok "test-displayrescue, test-outputscale and test-cursorsize ($(grep -c '^Passed test:' "$root/tests.log" 2>/dev/null) tests)"
   else
     bad "unit suites (log $logs/unit.log)"
     tail -n 30 "$logs/unit.log"

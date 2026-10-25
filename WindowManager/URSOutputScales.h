@@ -48,4 +48,13 @@
 // after a move.
 - (BOOL)updateFrame:(XCBFrame *)frame forRect:(NSRect)rect force:(BOOL)force;
 
+// The pixel size of the pointer (URSCursorSize.h; 0 = the theme's default
+// size, while every monitor runs at 1.0): over `frame`, at the factor its
+// title bar is drawn at, or at the monitor its center is on; at a point of
+// the root window; and on the primary monitor, which is what applications
+// that cannot follow the monitors are told (Xcursor.size).
+- (uint32_t)cursorSizeForFrame:(XCBFrame *)frame;
+- (uint32_t)cursorSizeAtPoint:(NSPoint)point;
+- (uint32_t)primaryCursorSize;
+
 @end

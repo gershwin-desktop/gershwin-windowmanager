@@ -25,6 +25,9 @@ $(APP_NAME)_OBJC_FILES = \
 		URSMonitorGeometry.m \
 		URSOutputScale.m \
 		URSOutputScales.m \
+		URSCursorSize.m \
+		URSCursorTheme.m \
+		URSPointerCursor.m \
 		URSDisplayController.m \
 		URSTitlebarController.m \
 		URSSnappingMenuController.m \
@@ -166,6 +169,7 @@ $(APP_NAME)_HEADER_FILES = \
 
 $(APP_NAME)_GUI_LIBS = \
 		$(shell pkg-config --libs xcb xcb-icccm xcb-xfixes xcb-aux xcb-cursor xcb-shape xcb-randr) \
+		$(shell pkg-config --libs xcursor) \
 		-lxcb-util -lX11 -lXext \
 		-lxcb-composite -lxcb-render -lxcb-damage -lxcb-shm -lxcb-present
 

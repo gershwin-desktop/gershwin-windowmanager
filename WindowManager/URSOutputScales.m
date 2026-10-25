@@ -6,6 +6,7 @@
 
 #import "URSOutputScales.h"
 #import "URSOutputScale.h"
+#import "URSCursorSize.h"
 #import "XCBConnection.h"
 #import "XCBScreen.h"
 #import "XCBFrame.h"
@@ -19,6 +20,7 @@
     NSArray *_rects;       // NSValue rect, X screen coordinates
     NSArray *_factors;     // NSNumber
     xcb_atom_t _scaleAtom;
+    NSUInteger _primaryIndex;
 }
 
 + (instancetype)sharedScales
@@ -81,6 +83,12 @@ static long ReadDPI(xcb_connection_t *conn, xcb_randr_output_t output, xcb_atom_
     if (res == NULL)
         return;
 
+    xcb_randr_get_output_primary_reply_t *primary = xcb_randr_get_output_primary_reply(
+        conn, xcb_randr_get_output_primary(conn, [screen screen]->root), NULL);
+    xcb_randr_output_t primaryOutput = primary ? primary->output : XCB_NONE;
+    free(primary);
+    NSUInteger primaryIndex = 0;
+
     xcb_randr_output_t *outputs = xcb_randr_get_screen_resources_current_outputs(res);
     int n = xcb_randr_get_screen_resources_current_outputs_length(res);
     for (int i = 0; i < n; i++) {
@@ -104,6 +112,8 @@ static long ReadDPI(xcb_connection_t *conn, xcb_randr_output_t output, xcb_atom_
              * it (72 dpi) to the applications, so both agree on "mixed". */
             CGFloat factor = _scaleAtom != XCB_NONE
                 ? URSScaleFactorForDPI(ReadDPI(conn, outputs[i], _scaleAtom)) : 0;
+            if (outputs[i] == primaryOutput)
+                primaryIndex = [ids count];
             [ids addObject:[NSNumber numberWithUnsignedInt:outputs[i]]];
             [rects addObject:[NSValue valueWithRect:NSMakeRect(crtc->x, crtc->y,
                                                                crtc->width, crtc->height)]];
@@ -116,6 +126,7 @@ static long ReadDPI(xcb_connection_t *conn, xcb_randr_output_t output, xcb_atom_
     _outputIds = ids;
     _rects = rects;
     _factors = factors;
+    _primaryIndex = primaryIndex;
     /* Logged only when it matters: with one factor nothing changes. */
     if ([self mixed])
         NSLog(@"[OutputScales] per-monitor factors %@ on outputs %@", _factors, _rects);
@@ -215,6 +226,41 @@ static long ReadDPI(xcb_connection_t *conn, xcb_randr_output_t output, xcb_atom_
     else
         [frame setDecorationContentFactor:factor];
     return YES;
+}
+
+/* The cursor follows the monitors' factors even when the theme cannot draw
+ * title bars per monitor (-mixed): libs-back sizes the pointer inside
+ * GNUstep windows by the factors alone, and both must agree. */
+- (uint32_t)cursorSizeAtPoint:(NSPoint)point
+{
+    CGFloat global = [[TitleBarSettingsService sharedInstance] scaleFactor];
+
+    return URSCursorPixelSize(URSCursorFactorAtPoint(point, _rects, _factors, global),
+                              URSCursorFactorsAllOne(_factors, global));
+}
+
+- (uint32_t)cursorSizeForFrame:(XCBFrame *)frame
+{
+    CGFloat global = [[TitleBarSettingsService sharedInstance] scaleFactor];
+
+    if ([frame decorationScaleFactor] > 0)
+        return URSCursorPixelSize([frame decorationScaleFactor],
+                                  URSCursorFactorsAllOne(_factors, global));
+    XCBRect r = [frame windowRect];
+    return [self cursorSizeAtPoint:NSMakePoint(r.position.x + r.size.width / 2,
+                                               r.position.y + r.size.height / 2)];
+}
+
+- (uint32_t)primaryCursorSize
+{
+    CGFloat global = [[TitleBarSettingsService sharedInstance] scaleFactor];
+    BOOL allOne = URSCursorFactorsAllOne(_factors, global);
+
+    if ([_rects count] == 0)
+        return URSCursorPixelSize(global, allOne);
+    NSRect primary = [[_rects objectAtIndex:_primaryIndex] rectValue];
+    return URSCursorPixelSize(URSCursorFactorAtPoint(primary.origin, _rects, _factors, global),
+                              allOne);
 }
 
 @end

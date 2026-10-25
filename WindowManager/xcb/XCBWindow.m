@@ -169,7 +169,13 @@
 
 - (void) initCursor
 {
-    cursor = [[XCBCursor alloc] initWithConnection:connection screen:[self onScreen]];
+    [self initCursorWithPixelSize:0];
+}
+
+- (void) initCursorWithPixelSize:(uint32_t)pixelSize
+{
+    cursor = [[XCBCursor alloc] initWithConnection:connection screen:[self onScreen]
+                                         pixelSize:pixelSize];
 }
 
 - (void) showLeftPointerCursor
