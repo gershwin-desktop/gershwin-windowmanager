@@ -44,6 +44,7 @@
 #import <xcb/xcb_aux.h>
 #import <xcb/damage.h>
 #import <xcb/present.h>
+#import "URSOutputScales.h"
 #import <xcb/randr.h>
 #import <xcb/xproto.h>
 #import <X11/keysym.h>
@@ -174,6 +175,10 @@ static CGFloat WMLastScaleFactor = 1.0;
     {
       [win reframeForDecorationChange];
     }
+
+  /* A theme that cannot draw per monitor turns the per-monitor factors off,
+   * one that can turns them on. */
+  [self updateFramesForOutputScales];
 
   /* Re-render all titlebars with the new metrics. */
   xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
@@ -1709,9 +1714,11 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
             xcb_randr_select_input(conn, rootWindow,
                 XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE |
                 XCB_RANDR_NOTIFY_MASK_CRTC_CHANGE |
-                XCB_RANDR_NOTIFY_MASK_OUTPUT_CHANGE);
+                XCB_RANDR_NOTIFY_MASK_OUTPUT_CHANGE |
+                XCB_RANDR_NOTIFY_MASK_OUTPUT_PROPERTY);
             [connection flush];
         }
+        [[URSOutputScales sharedScales] reloadWithConnection:connection];
     }
 
     self.displayController =
@@ -1720,6 +1727,33 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
                                       titlebarController:self.titlebarController];
     // Login: the monitors connected now get their saved layout.
     [self.displayController screenChanged];
+}
+
+/* A monitor's DPI property or the monitor layout changed: read the factors
+ * again and move every frame to the factor of the monitor it is on. */
+- (void)outputScalesChanged
+{
+    URSOutputScales *scales = [URSOutputScales sharedScales];
+
+    [scales reloadWithConnection:connection];
+    [self updateFramesForOutputScales];
+}
+
+- (void)updateFramesForOutputScales
+{
+    URSOutputScales *scales = [URSOutputScales sharedScales];
+
+    for (XCBWindow *window in [[connection windowsMap] allValues]) {
+        if (![window isKindOfClass:[XCBFrame class]])
+            continue;
+        XCBFrame *frame = (XCBFrame *)window;
+        if ([frame childWindowForKey:ClientWindow] == nil)
+            continue;
+        XCBRect r = [frame windowRect];
+        if ([scales updateFrame:frame forRect:NSMakeRect(r.position.x, r.position.y,
+                                                         r.size.width, r.size.height)])
+            [frame decorationScaleChanged];
+    }
 }
 
 - (void)handleRandrGeometryChange:(uint16_t)newW height:(uint16_t)newH
@@ -1777,10 +1811,20 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
                 (xcb_randr_screen_change_notify_event_t *)event;
             [self handleRandrGeometryChange:rEvent->width height:rEvent->height];
             [self.displayController screenChanged];
+            [self outputScalesChanged];
             return;
         }
         if (responseType == _randrEventBase + XCB_RANDR_NOTIFY) {
             xcb_randr_notify_event_t *notify = (xcb_randr_notify_event_t *)event;
+            /* Output properties are watched only for a monitor's scale; any
+               other property (EDID, backlight, ...) is no layout change. */
+            if (notify->subCode == XCB_RANDR_NOTIFY_OUTPUT_PROPERTY) {
+                if (notify->u.op.atom == [[URSOutputScales sharedScales] scaleAtom] ||
+                    [[URSOutputScales sharedScales] scaleAtom] == XCB_NONE)
+                    [self outputScalesChanged];
+                return;
+            }
+            [self outputScalesChanged];
             if (notify->subCode == XCB_RANDR_NOTIFY_OUTPUT_CHANGE) {
                 [self.displayController output:notify->u.oc.output
                                      connected:notify->u.oc.connection ==

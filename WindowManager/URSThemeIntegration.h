@@ -54,6 +54,21 @@
 // next render picks up a live scale-factor change.
 + (void)invalidateScaleFactorCache;
 
+// While the monitors' factors are mixed, every frame is drawn and measured
+// at the factor of its own monitor: begin sets `factor` (0 = the global one)
+// for the window manager's drawing constants and the theme and returns the
+// one it replaces, which end puts back.  Equal factors touch nothing.
++ (CGFloat)beginDecorationScale:(CGFloat)factor;
++ (void)endDecorationScale:(CGFloat)previous;
++ (CGFloat)decorationScaleFactor;
+
+// The theme's normal title bar height at `factor`.
++ (uint16_t)themeTitlebarHeightAtScaleFactor:(CGFloat)factor;
+
+// Draw a frame's titlebar and border again in the state they were last
+// drawn in, after its factor changed.
++ (void)redrawTitlebarOfFrame:(XCBFrame *)frame;
+
 // Event handlers
 - (void)handleWindowCreated:(XCBTitleBar*)titlebar;
 - (void)handleWindowFocusChanged:(XCBTitleBar*)titlebar isActive:(BOOL)active;

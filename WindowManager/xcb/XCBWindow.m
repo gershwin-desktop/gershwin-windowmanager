@@ -1267,8 +1267,7 @@
 
     XCBFrame *frame = (XCBFrame*)parentWindow;
     XCBRect frameRect = [frame windowRect];//[[frame geometries] rect];
-    TitleBarSettingsService *settingsService = [TitleBarSettingsService sharedInstance];
-    int titleHeight = [settingsService heightForUtility:[self isUtilityPanel]];
+    int titleHeight = [self decorationTitleHeight];
     int cb = [frame clientBorder];
 
     /*** Handle windows we manage ***/
@@ -1391,6 +1390,13 @@
 /* Re-apply the frame geometry after anything that changes how a window is
  * decorated - a GSScaleFactor change or a theme change: resize the frame and
  * titlebar to the titlebar height in force now and re-position the client. */
+- (uint16_t)decorationTitleHeight
+{
+    if ([parentWindow isKindOfClass:[XCBFrame class]])
+        return [(XCBFrame *)parentWindow decorationTitleHeight];
+    return [[TitleBarSettingsService sharedInstance] heightForUtility:[self isUtilityPanel]];
+}
+
 - (void)reframeForDecorationChange
 {
     /* Only decorated client windows live in a frame; titlebars and frames
@@ -1402,8 +1408,7 @@
 
     XCBFrame *frame = (XCBFrame *)parentWindow;
     XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
-    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    int titleHeight = [settings heightForUtility:[self isUtilityPanel]];
+    int titleHeight = [self decorationTitleHeight];
     int cb;
 
     /* A theme that draws a window frame of its own decides the inset, so it

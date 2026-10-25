@@ -9,6 +9,8 @@
 #import "EWMHService.h"
 #import "Transformers.h"
 #import "EEwmh.h"
+#import "URSOutputScale.h"
+#import "XCBFrame.h"
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
@@ -732,7 +734,12 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
        declared style answers then, or a utility panel is told the taller
        title bar of an ordinary window and comes out sized wrong. */
     BOOL utility = [aWindow isUtilityPanel] || [self clientDeclaresUtilityWindowStyle:aWindow];
-    uint16_t titleHeight = [settings heightForUtility:utility];
+    /* Once framed, the frame's monitor decides the scale of its title bar
+       and border; before, the global factor answers. */
+    XCBWindow *parent = [aWindow parentWindow];
+    CGFloat frameFactor = [parent isKindOfClass:[XCBFrame class]]
+        ? [(XCBFrame *)parent decorationScaleFactor] : 0;
+    uint16_t titleHeight = [settings heightForUtility:utility scaleFactor:frameFactor];
 
     BOOL compositorActive = NO;
     Class compositorClass = NSClassFromString(@"URSCompositingManager");
@@ -746,18 +753,12 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
         }
     }
 
-    CGFloat sf = [settings scaleFactor];
-    uint32_t cb = compositorActive ? 0 : (uint32_t)sf;
-    uint32_t extents[4];
-
+    CGFloat sf = frameFactor > 0 ? frameFactor : [settings scaleFactor];
     // A theme with its own window frame (Aaron's Platinum border) sets the
     // inset, and the client must know about it.
-    if ([URSThemeIntegration frameBorderWidth] > 0)
-        cb = (uint32_t)[URSThemeIntegration frameBorderWidth];
-    extents[0] = cb;              // left border
-    extents[1] = cb;              // right border
-    extents[2] = titleHeight;     // top (titlebar)
-    extents[3] = cb;              // bottom border
+    URSFrameExtents e = URSFrameExtentsFor(titleHeight, sf, compositorActive,
+                                           [URSThemeIntegration frameBorderWidth]);
+    uint32_t extents[4] = { e.left, e.right, e.top, e.bottom };
 
     [self changePropertiesForWindow:aWindow
                            withMode:XCB_PROP_MODE_REPLACE
@@ -1430,8 +1431,7 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                     // Resize titlebar back to full width (was set to 0x0 on
                     // fullscreen enter — it was never unmapped).
                     XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
-                    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-                    uint16_t titleHgt = [settings heightForUtility:[clientWin isUtilityPanel]];
+                    uint16_t titleHgt = [clientWin decorationTitleHeight];
                     {
                         uint32_t tvals[2] = {frameRect.size.width, titleHgt};
                         xcb_configure_window([connection connection], [titleBar window],

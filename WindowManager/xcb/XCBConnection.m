@@ -17,6 +17,7 @@
 #import "XCBRegion.h"
 #import <xcb/xcb_aux.h>
 #import <enums/EIcccm.h>
+#import "URSOutputScales.h"
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
@@ -2373,12 +2374,22 @@ static XCBConnection *sharedInstance;
     }
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHeight = [settings heightForUtility:[window isUtilityPanel]];
 
     int16_t reqX = [window windowRect].position.x;
     int16_t reqY = [window windowRect].position.y;
     uint16_t reqW = [window windowRect].size.width;
     uint16_t reqH = [window windowRect].size.height;
+
+    /* With mixed monitor factors the frame is decorated for the monitor it
+       is requested on; 0 (the global factor) otherwise.  Placement below may
+       still move it to another one, which is checked once it is framed. */
+    uint32_t decorationOutput = XCB_NONE;
+    CGFloat decorationFactor =
+        [[URSOutputScales sharedScales] factorForNewFrameRect:NSMakeRect(reqX, reqY, reqW, reqH)
+                                                      utility:[window isUtilityPanel]
+                                                       output:&decorationOutput];
+    uint16_t titleHeight = [settings heightForUtility:[window isUtilityPanel]
+                                          scaleFactor:decorationFactor];
 
     /* The server never reports a zero size, so a zero rect means the geometry
      * query failed: the client destroyed its window while its MapRequest was
@@ -2391,7 +2402,8 @@ static XCBConnection *sharedInstance;
     // In compositor mode (drop shadows), the client sits flush inside the frame
     // with no pixel-wide border strips, so cb=0.  Non-compositor uses cb=1.
     // Scale cb by GSScaleFactor for HiDPI displays.
-    CGFloat cbScaleFactor = [[TitleBarSettingsService sharedInstance] scaleFactor];
+    CGFloat cbScaleFactor = decorationFactor > 0 ? decorationFactor
+                                                 : [[TitleBarSettingsService sharedInstance] scaleFactor];
     int cb = compositorActive ? 0 : (int)cbScaleFactor;
 
     // Determine if we should reposition the window.
@@ -2563,6 +2575,13 @@ static XCBConnection *sharedInstance;
 
     XCBFrame *frame = [response frame];
 
+    if (decorationFactor > 0) {
+        [frame setDecorationOutput:decorationOutput];
+        [frame setDecorationScaleFactor:decorationFactor];
+        [frame setTitleHeight:titleHeight];
+        [frame updateClientBorder];
+    }
+
     // Prevent X server from clearing the frame to background_pixel (white) on
     // every resize.  Default ForgetGravity discards all pixels; NorthWestGravity
     // preserves existing content and only exposes truly new areas.
@@ -2614,6 +2633,14 @@ static XCBConnection *sharedInstance;
     [frame setScreen:[window screen]];
     [window setNormalState];
     [frame setNormalState];
+
+    {
+        XCBRect placed = [frame windowRect];
+        NSRect placedRect = NSMakeRect(placed.position.x, placed.position.y,
+                                       placed.size.width, placed.size.height);
+        if ([[URSOutputScales sharedScales] updateFrame:frame forRect:placedRect])
+            [frame decorationScaleChanged];
+    }
 
     if ([[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]]) {
         [window setSkipTaskBar:YES];
@@ -2997,8 +3024,17 @@ static XCBConnection *sharedInstance;
 
 - (void)handleConfigureNotify:(xcb_configure_notify_event_t *)anEvent
 {
-    // NSLog(@"In configure notify for window %u: %d, %d", anEvent->window, anEvent->x, anEvent->y);
-
+    /* Every move or resize of a frame - a drag, a client request, a snap, a
+     * rescue - may take it onto a monitor with another scale factor. */
+    XCBWindow *window = [self windowForXCBId:anEvent->window];
+    if (![window isKindOfClass:[XCBFrame class]])
+        return;
+    XCBFrame *frame = (XCBFrame *)window;
+    if ([frame childWindowForKey:ClientWindow] == nil)
+        return;
+    NSRect rect = NSMakeRect(anEvent->x, anEvent->y, anEvent->width, anEvent->height);
+    if ([[URSOutputScales sharedScales] updateFrame:frame forRect:rect])
+        [frame decorationScaleChanged];
 }
 
 - (void)handleMotionNotify:(xcb_motion_notify_event_t *)anEvent

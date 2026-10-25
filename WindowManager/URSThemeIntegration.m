@@ -30,6 +30,10 @@
                 andTitle:(NSString*)title;
 @end
 
+@interface GSTheme (URSDecorationScale)
+- (void)setDecorationScaleFactor:(CGFloat)factor;
+@end
+
 @interface GSTheme (URSThemeCornerRadius)
 - (CGFloat)titlebarCornerRadius;
 @end
@@ -87,7 +91,12 @@ static inline int URSTitleBarInputState(BOOL isActive)
 // Declared early so they can be used in hover state methods
 // Multiplied by GSScaleFactor for HiDPI support (lazily computed).
 static CGFloat _wmScaleFactor = 0;
+// The factor of the frame being drawn or measured while the monitors'
+// factors are mixed (see +beginDecorationScale:), 0 otherwise.
+static CGFloat _frameScaleFactor = 0;
 static CGFloat WMScaleFactor(void) {
+    if (_frameScaleFactor > 0)
+        return _frameScaleFactor;
     if (_wmScaleFactor == 0) {
         _wmScaleFactor = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
         if (_wmScaleFactor == 0)
@@ -99,6 +108,47 @@ static CGFloat WMScaleFactor(void) {
 + (void)invalidateScaleFactorCache {
     _wmScaleFactor = 0;
 }
+
++ (CGFloat)beginDecorationScale:(CGFloat)factor {
+    CGFloat previous = _frameScaleFactor;
+
+    /* With one factor everywhere every frame is at 0 and nothing is touched,
+     * so the theme draws exactly as it always did. */
+    if (factor == previous) {
+        return previous;
+    }
+    _frameScaleFactor = factor;
+    GSTheme *theme = [self currentTheme];
+    if ([theme respondsToSelector:@selector(setDecorationScaleFactor:)]) {
+        [theme setDecorationScaleFactor:factor];
+    }
+    return previous;
+}
+
++ (void)endDecorationScale:(CGFloat)previous {
+    [self beginDecorationScale:previous];
+}
+
++ (CGFloat)decorationScaleFactor {
+    return _frameScaleFactor;
+}
+
+static CGFloat FactorOfDecoration(XCBWindow *window) {
+    if ([window isKindOfClass:[XCBTitleBar class]]) {
+        window = [window parentWindow];
+    }
+    return [window isKindOfClass:[XCBFrame class]] ? [(XCBFrame *)window decorationScaleFactor] : 0;
+}
+
++ (uint16_t)themeTitlebarHeightAtScaleFactor:(CGFloat)factor {
+    GSTheme *theme = [self currentTheme];
+    CGFloat previous = [self beginDecorationScale:factor];
+    uint16_t height = [theme respondsToSelector:@selector(titlebarHeight)]
+        ? (uint16_t)[theme titlebarHeight] : (uint16_t)(22 * factor);
+    [self endDecorationScale:previous];
+    return height;
+}
+
 #define ICON_STROKE (1.5 * WMScaleFactor())     // Subtle icon strokes
 #define ICON_INSET (8.0 * WMScaleFactor())      // Icon inset from button edges (matches Eau theme)
 
@@ -284,6 +334,23 @@ static xcb_window_t primaryActiveFrameId = XCB_NONE;
                           forKey:[NSNumber numberWithUnsignedInt:[frame window]]];
 }
 
++ (void)redrawTitlebarOfFrame:(XCBFrame *)frame {
+    XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
+    if (![titlebarWindow isKindOfClass:[XCBTitleBar class]]) {
+        return;
+    }
+    XCBTitleBar *titlebar = (XCBTitleBar *)titlebarWindow;
+    NSNumber *drawn = [drawnActiveStates objectForKey:[NSNumber numberWithUnsignedInt:[frame window]]];
+
+    [self renderGSThemeToWindow:frame
+                          frame:frame
+                          title:[titlebar windowTitle]
+                         active:[drawn boolValue]];
+    [titlebar putWindowBackgroundWithPixmap:[titlebar pixmap]];
+    [titlebar drawArea:[titlebar windowRect]];
+    [self repaintFrameBorder:frame];
+}
+
 + (URSFrameBorder *)borderRecordForWindow:(xcb_window_t)window create:(BOOL)create
 {
     NSNumber *key = [NSNumber numberWithUnsignedInt:window];
@@ -323,6 +390,12 @@ static xcb_window_t primaryActiveFrameId = XCB_NONE;
 }
 
 + (void)paintFrameBorder:(XCBFrame *)frame active:(BOOL)active {
+    CGFloat previous = [self beginDecorationScale:FactorOfDecoration(frame)];
+    [self paintFrameBorderAtFrameScale:frame active:active];
+    [self endDecorationScale:previous];
+}
+
++ (void)paintFrameBorderAtFrameScale:(XCBFrame *)frame active:(BOOL)active {
     CGFloat border = [self frameBorderWidth];
     GSTheme *theme = [self currentTheme];
     XCBWindow *titlebar;
@@ -524,13 +597,24 @@ static xcb_window_t primaryActiveFrameId = XCB_NONE;
 + (NSInteger)buttonIndexAtPoint:(NSPoint)point
                    titlebarSize:(NSSize)size
                           frame:(XCBFrame *)frame {
-    return [self buttonIndexAtPoint:point titlebarSize:size
-                          styleMask:[self buttonLayoutStyleMaskForFrame:frame]];
+    CGFloat previous = [self beginDecorationScale:FactorOfDecoration(frame)];
+    NSInteger index = [self buttonIndexAtPoint:point titlebarSize:size
+                                     styleMask:[self buttonLayoutStyleMaskForFrame:frame]];
+    [self endDecorationScale:previous];
+    return index;
 }
 
 + (void)publishButtonRectsForTitlebar:(XCBTitleBar *)titlebar
                                  size:(NSSize)size
                                 frame:(XCBFrame *)frame {
+    CGFloat previous = [self beginDecorationScale:FactorOfDecoration(frame)];
+    [self publishButtonRectsAtFrameScaleForTitlebar:titlebar size:size frame:frame];
+    [self endDecorationScale:previous];
+}
+
++ (void)publishButtonRectsAtFrameScaleForTitlebar:(XCBTitleBar *)titlebar
+                                             size:(NSSize)size
+                                            frame:(XCBFrame *)frame {
     NSUInteger styleMask = [self buttonLayoutStyleMaskForFrame:frame];
     NSMutableData *values = [NSMutableData data];
     NSInteger i;
@@ -878,6 +962,17 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                              clientWindow:(XCBWindow *)clientWindow
                                     title:(NSString *)title
                                    active:(BOOL)isActive {
+    CGFloat previous = [self beginDecorationScale:FactorOfDecoration(titlebar)];
+    BOOL done = [self renderUtilityTitlebarAtFrameScale:titlebar clientWindow:clientWindow
+                                                  title:title active:isActive];
+    [self endDecorationScale:previous];
+    return done;
+}
+
++ (BOOL)renderUtilityTitlebarAtFrameScale:(XCBTitleBar *)titlebar
+                             clientWindow:(XCBWindow *)clientWindow
+                                    title:(NSString *)title
+                                   active:(BOOL)isActive {
     @try {
         XCBRect xcbRect = [titlebar windowRect];
         NSSize titlebarSize = NSMakeSize(xcbRect.size.width, xcbRect.size.height);
@@ -1027,6 +1122,15 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
 + (BOOL)renderGSThemeTitlebar:(XCBTitleBar*)titlebar
                         title:(NSString*)title
                        active:(BOOL)isActive {
+    CGFloat previous = [self beginDecorationScale:FactorOfDecoration(titlebar)];
+    BOOL done = [self renderGSThemeTitlebarAtFrameScale:titlebar title:title active:isActive];
+    [self endDecorationScale:previous];
+    return done;
+}
+
++ (BOOL)renderGSThemeTitlebarAtFrameScale:(XCBTitleBar*)titlebar
+                                    title:(NSString*)title
+                                   active:(BOOL)isActive {
 
     XCBWindow *earlyParentFrame = [titlebar parentWindow];
     if ([earlyParentFrame isKindOfClass:[XCBFrame class]]) {
@@ -1548,6 +1652,16 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
                          frame:(XCBFrame*)frame
                          title:(NSString*)title
                         active:(BOOL)isActive {
+    CGFloat previous = [self beginDecorationScale:FactorOfDecoration(frame)];
+    BOOL done = [self renderGSThemeToWindowAtFrameScale:window frame:frame title:title active:isActive];
+    [self endDecorationScale:previous];
+    return done;
+}
+
++ (BOOL)renderGSThemeToWindowAtFrameScale:(XCBWindow*)window
+                                    frame:(XCBFrame*)frame
+                                    title:(NSString*)title
+                                   active:(BOOL)isActive {
     URS_PROFILE_BEGIN(themeRender);
 
     if (![[URSThemeIntegration sharedInstance] enabled] || !window || !frame) {

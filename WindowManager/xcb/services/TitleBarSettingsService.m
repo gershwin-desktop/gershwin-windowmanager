@@ -5,6 +5,8 @@
 // Created by slex on 05/02/21.
 
 #import "TitleBarSettingsService.h"
+#import "URSOutputScale.h"
+#import "URSThemeIntegration.h"
 
 #define HEIGHT 22
 
@@ -51,6 +53,9 @@
 {
     height = aHeight;
     heightDefined = YES;
+    // Set again whenever the theme or the global factor changed, which is
+    // when the heights at the other factors have to be asked again too.
+    [heightsByFactor removeAllObjects];
 }
 
 - (uint16_t)height
@@ -80,6 +85,25 @@
 
     uint16_t fixed = (uint16_t)(UTILITY_HEIGHT * self.scaleFactor);
     return fixed < 1 ? 1 : fixed;
+}
+
+- (uint16_t) heightForUtility:(BOOL)isUtility scaleFactor:(CGFloat)factor
+{
+    if (factor <= 0)
+        return [self heightForUtility:isUtility];
+    if (isUtility)
+        return URSUtilityTitleHeightFor(factor);
+
+    if (heightsByFactor == nil)
+        heightsByFactor = [[NSMutableDictionary alloc] init];
+    NSNumber *key = [NSNumber numberWithDouble:factor];
+    NSNumber *known = [heightsByFactor objectForKey:key];
+    if (known == nil) {
+        known = [NSNumber numberWithUnsignedShort:
+                 [URSThemeIntegration themeTitlebarHeightAtScaleFactor:factor]];
+        [heightsByFactor setObject:known forKey:key];
+    }
+    return [known unsignedShortValue];
 }
 
 @end

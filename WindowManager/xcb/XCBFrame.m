@@ -13,6 +13,7 @@
 #import "EWMHService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
+#import "URSOutputScale.h"
 #import "XCBAtomService.h"
 #import "URSShapePath.h"
 #import "URSFrameMove.h"
@@ -284,18 +285,48 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 - (void) updateClientBorder
 {
     Class compositorClass = NSClassFromString(@"URSCompositingManager");
-    CGFloat sf = [[TitleBarSettingsService sharedInstance] scaleFactor];
-    int cb = (int)sf;
+    BOOL compositing = NO;
 
     if (compositorClass && [compositorClass respondsToSelector:@selector(sharedManager)]) {
         id manager = [compositorClass sharedManager];
         if ([manager respondsToSelector:@selector(compositingActive)])
-            cb = [manager compositingActive] ? 0 : (int)sf;
+            compositing = [manager compositingActive];
     }
-    if ([URSThemeIntegration frameBorderWidth] > 0)
-        cb = (int)[URSThemeIntegration frameBorderWidth];
+    self.clientBorder = (int)URSClientBorderFor([self effectiveScaleFactor], compositing,
+                                                [URSThemeIntegration frameBorderWidth]);
+}
 
-    self.clientBorder = cb;
+- (void) decorationScaleChanged
+{
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    if (client == nil)
+        return;
+
+    /* Title bar height and client border follow the new factor; the top-left
+     * corner stays, so the client moves by the change in title bar height
+     * and has to be told where it is now, and libs-back re-reads the frame
+     * extents of the window to place its content. */
+    [client reframeForDecorationChange];
+    [[EWMHService sharedInstanceWithConnection:connection] updateNetFrameExtentsForWindow:client];
+    [self configureClient];
+    [self updateAllResizeZonePositions];
+    [self applyRoundedCornersShapeMask];
+    [URSThemeIntegration redrawTitlebarOfFrame:self];
+    [connection flush];
+}
+
+- (CGFloat) effectiveScaleFactor
+{
+    if (self.decorationScaleFactor > 0)
+        return self.decorationScaleFactor;
+    return [[TitleBarSettingsService sharedInstance] scaleFactor];
+}
+
+- (uint16_t) decorationTitleHeight
+{
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    return [[TitleBarSettingsService sharedInstance] heightForUtility:[client isUtilityPanel]
+                                                          scaleFactor:self.decorationScaleFactor];
 }
 
 - (void) decorateClientWindow
@@ -362,9 +393,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
         }
     }
 
-    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-
-    uint16_t height = [settings heightForUtility:[clientWindow isUtilityPanel]];
+    uint16_t height = [self decorationTitleHeight];
 
     XCBCreateWindowTypeRequest* request = [[XCBCreateWindowTypeRequest alloc] initForWindowType:XCBTitleBarRequest];
     [request setDepth:depth];
@@ -473,7 +502,6 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     windowTitle = nil;
     scr = nil;
     rootVisual = nil;
-    settings = nil;
 }
 
 - (void)createResizeHandle
@@ -571,8 +599,7 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
     /* Always use the current service titlebar height so interactive resizes
      * match the rendered titlebar even after a GSScaleFactor change (which
      * re-frames windows but must not leave the cached titleHeight stale). */
-    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    titleHeight = [settings heightForUtility:[[self childWindowForKey:ClientWindow] isUtilityPanel]];
+    titleHeight = [self decorationTitleHeight];
 
     /*** width ***/
 
@@ -690,6 +717,14 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 #pragma mark - Theme-driven Resize Zones
 
 - (void)createResizeZonesFromTheme
+{
+    // Theme metrics at the factor of this frame's monitor.
+    CGFloat previous = [URSThemeIntegration beginDecorationScale:self.decorationScaleFactor];
+    [self createResizeZonesFromThemeAtFrameScale];
+    [URSThemeIntegration endDecorationScale:previous];
+}
+
+- (void)createResizeZonesFromThemeAtFrameScale
 {
     // Query theme for resize zone support using respondsToSelector:
     // This allows themes to implement resize zones without requiring libs-gui changes
@@ -828,6 +863,14 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 }
 
 - (void)updateAllResizeZonePositions
+{
+    // Theme metrics at the factor of this frame's monitor.
+    CGFloat previous = [URSThemeIntegration beginDecorationScale:self.decorationScaleFactor];
+    [self updateAllResizeZonePositionsAtFrameScale];
+    [URSThemeIntegration endDecorationScale:previous];
+}
+
+- (void)updateAllResizeZonePositionsAtFrameScale
 {
     GSTheme *theme = [GSTheme theme];
 
@@ -1091,6 +1134,15 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
 
 // Returns YES when it gave the frame window a bounding shape.
 - (BOOL)applyCornerShapes
+{
+    // The theme's corner radius at the factor of this frame's monitor.
+    CGFloat previous = [URSThemeIntegration beginDecorationScale:self.decorationScaleFactor];
+    BOOL shaped = [self applyCornerShapesAtFrameScale];
+    [URSThemeIntegration endDecorationScale:previous];
+    return shaped;
+}
+
+- (BOOL)applyCornerShapesAtFrameScale
 {
     // Query theme for corner radii - default to 0 (square corners) if not provided
     GSTheme *theme = [GSTheme theme];
@@ -1621,8 +1673,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     // size.  The client (GNUstep) processes that as the final geometry and its
     // tracked frame ends up desynced from the real window.
     XCBRect rect = [self windowRect];
-    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t height = [settings heightForUtility:[clientWindow isUtilityPanel]];
+    uint16_t height = [self decorationTitleHeight];
 
     // While shaded the frame is clipped to the titlebar, so its cached rect
     // height is tiny.  Reporting that clipped height to the client would make
@@ -1658,7 +1709,6 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     [clientWindow setWindowRect:clientRect];
 
     clientWindow = nil;
-    settings = nil;
 }
 
 - (void)configureClientWithFramePosition:(XCBPoint)framePos
@@ -1667,8 +1717,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
     XCBWindow *clientWindow = [self childWindowForKey:ClientWindow];
     if (!clientWindow) return;
 
-    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHgt = [settings heightForUtility:[clientWindow isUtilityPanel]];
+    uint16_t titleHgt = [self decorationTitleHeight];
 
     // Use the static helper with explicit dimensions (same as manual resize)
     sendSyntheticConfigureNotify([connection connection], clientWindow,
@@ -1678,7 +1727,6 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
                                   clientSize.height);
 
     clientWindow = nil;
-    settings = nil;
 }
 
 - (void)programmaticResizeToRect:(XCBRect)targetRect
@@ -1698,8 +1746,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 
     xcb_connection_t *conn = [connection connection];
 
-    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHgt = [settings heightForUtility:[clientWindow isUtilityPanel]];
+    uint16_t titleHgt = [self decorationTitleHeight];
 
     // Calculate child window dimensions (same as manual resize functions)
     XCBRect titleBarRect = XCBMakeRect(XCBMakePoint(0, 0),
@@ -1759,7 +1806,6 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
                                   clientRect.size.width,
                                   clientRect.size.height);
 
-    settings = nil;
 }
 
 #pragma mark - WindowShade
@@ -1768,9 +1814,7 @@ void resizeFromAngleForEvent(xcb_motion_notify_event_t *anEvent,
 // rounded bottom edge stays visible.
 - (uint16_t)shadedFrameHeight
 {
-    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHgt = [settings heightForUtility:[[self childWindowForKey:ClientWindow] isUtilityPanel]];
-    settings = nil;
+    uint16_t titleHgt = [self decorationTitleHeight];
     return titleHgt + (uint16_t)self.clientBorder;
 }
 

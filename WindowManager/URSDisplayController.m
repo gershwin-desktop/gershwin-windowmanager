@@ -258,7 +258,6 @@ static NSString * const URSDisplayConfigToolDefault = @"/System/Library/Tools/di
 {
     NSArray *usable = [_workareaManager usableMonitorRects];
     NSUInteger primary = _workareaManager.primaryMonitorIndex;
-    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
     NSUInteger moved = 0;
     for (XCBWindow *window in [[_connection windowsMap] allValues]) {
         if (![_workareaManager isRelocatableFrame:window]) continue;
@@ -267,7 +266,7 @@ static NSString * const URSDisplayConfigToolDefault = @"/System/Library/Tools/di
         if (!client) continue;
         XCBRect r = [frame windowRect];
         NSRect old = NSMakeRect(r.position.x, r.position.y, r.size.width, r.size.height);
-        NSRect now = URSRescueFrame(old, [settings heightForUtility:[client isUtilityPanel]],
+        NSRect now = URSRescueFrame(old, [client decorationTitleHeight],
                                     usable, primary, [client canResize]);
         if (NSEqualRects(old, now)) continue;
         XCBRect target = XCBMakeRect(XCBMakePoint((int32_t)NSMinX(now), (int32_t)NSMinY(now)),

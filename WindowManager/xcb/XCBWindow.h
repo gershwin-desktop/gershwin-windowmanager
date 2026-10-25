@@ -233,6 +233,10 @@ typedef NS_ENUM(NSInteger, WindowState)
 - (void) putWindowBackgroundWithPixmap:(xcb_pixmap_t)aPixmap;
 - (void) refreshBorder;
 - (void) reframeForDecorationChange;
+// Title bar height of this window as decorated now: at the scale factor of
+// its frame's monitor when the monitors' factors are mixed, else the global
+// height.  Also right for a window that is not framed (yet).
+- (uint16_t) decorationTitleHeight;
 - (BOOL) updatePid;
 - (BOOL) updateLeaderWindow;
 

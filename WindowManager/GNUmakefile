@@ -23,6 +23,8 @@ $(APP_NAME)_OBJC_FILES = \
 		URSKeyboardManager.m \
 		URSWorkareaManager.m \
 		URSMonitorGeometry.m \
+		URSOutputScale.m \
+		URSOutputScales.m \
 		URSDisplayController.m \
 		URSTitlebarController.m \
 		URSSnappingMenuController.m \
