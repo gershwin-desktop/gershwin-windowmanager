@@ -20,6 +20,23 @@
 - (BOOL)removeStrutForWindow:(xcb_window_t)windowId;
 - (void)recalculateWorkarea;
 - (void)pushExistingWindowsBelowWorkarea;
+// The _NET_WORKAREA rectangle: the screen minus the struts on its edges.
 - (NSRect)currentWorkarea;
+
+// The lit monitors (NSValue rects, screen coordinates) and which of them is
+// the RandR primary; set after every display change.  Without them the
+// whole screen counts as one monitor.
+@property (copy, nonatomic) NSArray *monitors;
+@property (assign, nonatomic) NSUInteger primaryMonitorIndex;
+// The monitors, or the whole screen when none are known.
+- (NSArray *)effectiveMonitors;
+// Each monitor minus the struts that belong to it, in -effectiveMonitors order.
+- (NSArray *)usableMonitorRects;
+// The usable rect of the monitor `rect` overlaps most, else of the primary.
+- (NSRect)usableRectForRect:(NSRect)rect;
+- (NSRect)usableRectOfPrimaryMonitor;
+// A normal framed window the WM may move: not fullscreen, not a dock, menu,
+// desktop or other special type.
+- (BOOL)isRelocatableFrame:(XCBWindow *)window;
 
 @end

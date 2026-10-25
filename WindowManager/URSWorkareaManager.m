@@ -12,6 +12,7 @@
 #import "XCBFrame.h"
 #import "EWMHService.h"
 #import "XCBAtomService.h"
+#import "URSMonitorGeometry.h"
 
 @interface URSWorkareaManager ()
 @property (strong, nonatomic) NSMutableDictionary *windowStruts;
@@ -75,47 +76,46 @@
 
 #pragma mark - Re-layout of existing windows
 
-/* Move already-mapped normal windows that overlap the new workarea top (i.e.
-   their frame top edge is above the workarea, e.g. under the menu bar) down
-   so they respect the strut that was just applied.  Only framed top-level
-   windows are moved; special window types and fullscreen windows are left
-   alone. */
+/* Only framed top-level windows are moved on their own; special window
+   types place themselves, and fullscreen windows cover their monitor on
+   purpose. */
+- (BOOL)isRelocatableFrame:(XCBWindow *)win
+{
+    if (!win || ![win isKindOfClass:[XCBFrame class]] || [win fullScreen]) {
+        return NO;
+    }
+    /* Normal windows have no windowType set - the WM only assigns a type to
+     * special windows (Dock, Menu, Tooltip, ...) - so skip only the
+     * explicitly special types; nil means a normal window. */
+    NSString *type = [win windowType];
+    if (type == nil) return YES;
+    EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self.connection];
+    NSArray *special = @[ [ewmhService EWMHWMWindowTypeDesktop],
+                          [ewmhService EWMHWMWindowTypeDock],
+                          [ewmhService EWMHWMWindowTypeToolbar],
+                          [ewmhService EWMHWMWindowTypeMenu],
+                          [ewmhService EWMHWMWindowTypeDropdownMenu],
+                          [ewmhService EWMHWMWindowTypePopupMenu],
+                          [ewmhService EWMHWMWindowTypeTooltip],
+                          [ewmhService EWMHWMWindowTypeNotification],
+                          [ewmhService EWMHWMWindowTypeSplash],
+                          [ewmhService EWMHWMWindowTypeCombo],
+                          [ewmhService EWMHWMWindowTypeDnd] ];
+    return ![special containsObject:type];
+}
+
+/* Move already-mapped normal windows whose frame top edge is above the
+   usable area of their monitor (e.g. under the menu bar) down so they
+   respect the strut that was just applied. */
 - (void)pushExistingWindowsBelowWorkarea
 {
     @try {
-        EWMHService *ewmhService =
-            [EWMHService sharedInstanceWithConnection:self.connection];
-        NSRect workarea = [self currentWorkarea];
-        int32_t waY = (int32_t)workarea.origin.y;
         NSDictionary *windows = [self.connection windowsMap];
 
         for (NSString *key in windows) {
             XCBWindow *win = [windows objectForKey:key];
-            if (!win || ![win isKindOfClass:[XCBFrame class]]) {
+            if (![self isRelocatableFrame:win]) {
                 continue;
-            }
-            if ([win fullScreen]) {
-                continue;
-            }
-
-            /* Normal windows have no windowType set - the WM only assigns a
-             * type to special windows (Dock, Menu, Tooltip, ...) - so skip
-             * only the explicitly special types; nil means a normal window. */
-            NSString *type = [win windowType];
-            if (type != nil) {
-                if ([type isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypeDock]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypeToolbar]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypeMenu]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypeDropdownMenu]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypePopupMenu]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypeTooltip]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypeNotification]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypeSplash]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypeCombo]] ||
-                    [type isEqualToString:[ewmhService EWMHWMWindowTypeDnd]]) {
-                    continue;
-                }
             }
 
             xcb_get_geometry_cookie_t geomCookie =
@@ -126,6 +126,9 @@
                 continue;
             }
 
+            NSRect usable = [self usableRectForRect:
+                NSMakeRect(geom->x, geom->y, geom->width, geom->height)];
+            int32_t waY = (int32_t)NSMinY(usable);
             if ((int32_t)geom->y < waY) {
                 uint32_t values[] = {(uint32_t)((int32_t)geom->x < 0 ? 0 : geom->x),
                                      (uint32_t)waY};
@@ -230,31 +233,11 @@
         XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
         XCBWindow *rootWindow = [screen rootWindow];
 
-        uint32_t screenWidth  = [screen width];
-        uint32_t screenHeight = [screen height];
-
-        uint32_t maxLeft = 0, maxRight = 0, maxTop = 0, maxBottom = 0;
-
-        for (NSNumber *windowKey in self.windowStruts) {
-            NSDictionary *strutData = [self.windowStruts objectForKey:windowKey];
-
-            uint32_t left   = [[strutData objectForKey:@"left"]   unsignedIntValue];
-            uint32_t right  = [[strutData objectForKey:@"right"]  unsignedIntValue];
-            uint32_t top    = [[strutData objectForKey:@"top"]    unsignedIntValue];
-            uint32_t bottom = [[strutData objectForKey:@"bottom"] unsignedIntValue];
-
-            if (left   > maxLeft)   maxLeft = left;
-            if (right  > maxRight)  maxRight = right;
-            if (top    > maxTop)    maxTop = top;
-            if (bottom > maxBottom) maxBottom = bottom;
-        }
-
-        int32_t  workareaX      = (int32_t)maxLeft;
-        int32_t  workareaY      = (int32_t)maxTop;
-        uint32_t workareaWidth  = (maxLeft + maxRight  < screenWidth)
-                                  ? screenWidth  - maxLeft - maxRight : 0;
-        uint32_t workareaHeight = (maxTop  + maxBottom < screenHeight)
-                                  ? screenHeight - maxTop  - maxBottom : 0;
+        NSRect workarea = [self currentWorkarea];
+        int32_t  workareaX      = (int32_t)NSMinX(workarea);
+        int32_t  workareaY      = (int32_t)NSMinY(workarea);
+        uint32_t workareaWidth  = (uint32_t)NSWidth(workarea);
+        uint32_t workareaHeight = (uint32_t)NSHeight(workarea);
 
         if (workareaX     == self.cachedWorkareaX &&
             workareaY     == self.cachedWorkareaY &&
@@ -267,11 +250,6 @@
         self.cachedWorkareaY      = workareaY;
         self.cachedWorkareaWidth  = workareaWidth;
         self.cachedWorkareaHeight = workareaHeight;
-
-        //NSLog(@"[ICCCM] Recalculated workarea: x=%d, y=%d, width=%u, height=%u "
-        //      @"(struts: left=%u, right=%u, top=%u, bottom=%u)",
-        //      workareaX, workareaY, workareaWidth, workareaHeight,
-        //      maxLeft, maxRight, maxTop, maxBottom);
 
         EWMHService *ewmhService =
             [EWMHService sharedInstanceWithConnection:self.connection];
@@ -288,32 +266,59 @@
     }
 }
 
-- (NSRect)currentWorkarea
+- (NSSize)screenSize
 {
     XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
-    uint32_t screenWidth  = [screen width];
-    uint32_t screenHeight = [screen height];
+    return NSMakeSize([screen width], [screen height]);
+}
 
-    uint32_t maxLeft = 0, maxRight = 0, maxTop = 0, maxBottom = 0;
+- (NSRect)currentWorkarea
+{
+    return URSWorkareaForScreen([self screenSize], [self effectiveMonitors],
+                                [self.windowStruts allValues]);
+}
 
-    for (NSNumber *windowKey in self.windowStruts) {
-        NSDictionary *strutData = [self.windowStruts objectForKey:windowKey];
+- (NSArray *)effectiveMonitors
+{
+    if ([self.monitors count] > 0) return self.monitors;
+    NSSize size = [self screenSize];
+    return @[ [NSValue valueWithRect:NSMakeRect(0, 0, size.width, size.height)] ];
+}
 
-        uint32_t left   = [[strutData objectForKey:@"left"]   unsignedIntValue];
-        uint32_t right  = [[strutData objectForKey:@"right"]  unsignedIntValue];
-        uint32_t top    = [[strutData objectForKey:@"top"]    unsignedIntValue];
-        uint32_t bottom = [[strutData objectForKey:@"bottom"] unsignedIntValue];
-
-        if (left   > maxLeft)   maxLeft = left;
-        if (right  > maxRight)  maxRight = right;
-        if (top    > maxTop)    maxTop = top;
-        if (bottom > maxBottom) maxBottom = bottom;
+- (NSArray *)usableMonitorRects
+{
+    NSSize size = [self screenSize];
+    NSArray *struts = [self.windowStruts allValues];
+    NSMutableArray *result = [NSMutableArray array];
+    for (NSValue *m in [self effectiveMonitors]) {
+        [result addObject:[NSValue valueWithRect:
+            URSUsableRectForMonitor([m rectValue], size, struts)]];
     }
+    return result;
+}
 
-    return NSMakeRect((CGFloat)maxLeft,
-                      (CGFloat)maxTop,
-                      (CGFloat)(screenWidth  - maxLeft - maxRight),
-                      (CGFloat)(screenHeight - maxTop  - maxBottom));
+- (NSRect)usableRectOfPrimaryMonitor
+{
+    NSArray *usable = [self usableMonitorRects];
+    NSUInteger i = self.primaryMonitorIndex < [usable count] ? self.primaryMonitorIndex : 0;
+    return [[usable objectAtIndex:i] rectValue];
+}
+
+- (NSRect)usableRectForRect:(NSRect)rect
+{
+    NSArray *monitors = [self effectiveMonitors];
+    NSArray *usable = [self usableMonitorRects];
+    CGFloat bestArea = 0;
+    NSInteger best = -1;
+    for (NSUInteger i = 0; i < [monitors count]; i++) {
+        NSRect overlap = NSIntersectionRect(rect, [[monitors objectAtIndex:i] rectValue]);
+        CGFloat area = NSWidth(overlap) * NSHeight(overlap);
+        if (area > bestArea) {
+            bestArea = area;
+            best = (NSInteger)i;
+        }
+    }
+    return best >= 0 ? [[usable objectAtIndex:best] rectValue] : [self usableRectOfPrimaryMonitor];
 }
 
 @end

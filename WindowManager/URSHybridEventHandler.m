@@ -12,6 +12,7 @@
 #import "URSHybridEventHandler.h"
 #import "URSCommandLine.h"
 #import "URSDrawerController.h"
+#import "URSDisplayController.h"
 #import <unistd.h>
 #import <fcntl.h>
 #import <errno.h>
@@ -1709,6 +1710,13 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
             [connection flush];
         }
     }
+
+    self.displayController =
+        [[URSDisplayController alloc] initWithConnection:connection
+                                         workareaManager:self.workareaManager
+                                      titlebarController:self.titlebarController];
+    // Login: the monitors connected now get their saved layout.
+    [self.displayController screenChanged];
 }
 
 - (void)handleRandrGeometryChange:(uint16_t)newW height:(uint16_t)newH
@@ -1725,35 +1733,9 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
     [screen setWidth:newW];
     [screen setHeight:newH];
 
-    xcb_connection_t *conn = [connection connection];
-
-    // Reposition windows that extend beyond the new screen bounds
-    for (NSNumber *key in [connection windowsMap]) {
-        XCBWindow *w = [connection windowForXCBId:[key unsignedIntValue]];
-        if (!w) continue;
-        if ([w isKindOfClass:[XCBFrame class]] || ![w decorated]) {
-            XCBRect r = [w windowRect];
-            BOOL moved = NO;
-            if (r.position.x + (int16_t)r.size.width > (int16_t)newW) {
-                r.position.x = (int16_t)newW - (int16_t)r.size.width - 10;
-                moved = YES;
-            }
-            if (r.position.y + (int16_t)r.size.height > (int16_t)newH) {
-                r.position.y = (int16_t)newH - (int16_t)r.size.height - 10;
-                moved = YES;
-            }
-            if (r.position.x < 0) { r.position.x = 0; moved = YES; }
-            if (r.position.y < 0) { r.position.y = 0; moved = YES; }
-            if (moved) {
-                uint32_t vals[2] = {(uint32_t)r.position.x, (uint32_t)r.position.y};
-                xcb_configure_window(conn, [w window],
-                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
-                [w setWindowRect:r];
-            }
-        }
-    }
-
-    [connection flush];
+    // Windows left where no monitor is any more are brought back by the
+    // display controller once the layout has settled, onto a monitor that
+    // is lit rather than just inside the new screen size.
 
     // Invalidate workarea cache so it is recalculated on next query
     connection.workareaValid = NO;
@@ -1791,9 +1773,18 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
             xcb_randr_screen_change_notify_event_t *rEvent =
                 (xcb_randr_screen_change_notify_event_t *)event;
             [self handleRandrGeometryChange:rEvent->width height:rEvent->height];
+            [self.displayController screenChanged];
             return;
         }
         if (responseType == _randrEventBase + XCB_RANDR_NOTIFY) {
+            xcb_randr_notify_event_t *notify = (xcb_randr_notify_event_t *)event;
+            if (notify->subCode == XCB_RANDR_NOTIFY_OUTPUT_CHANGE) {
+                [self.displayController output:notify->u.oc.output
+                                     connected:notify->u.oc.connection ==
+                                               XCB_RANDR_CONNECTION_CONNECTED];
+            } else {
+                [self.displayController screenChanged];
+            }
             xcb_connection_t *conn = [connection connection];
             XCBScreen *screen = [[connection screens] firstObject];
             if (screen && conn) {
@@ -2301,8 +2292,9 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
         uint16_t screenWidth = [screen width];
         uint16_t screenHeight = [screen height];
         
-        // Get the current workarea (respects struts from dock windows like menu bar)
-        NSRect workarea = [self.workareaManager currentWorkarea];
+        // New windows open on the primary monitor, where the menu bar is,
+        // within its usable area (struts of the menu bar and dock).
+        NSRect workarea = [self.workareaManager usableRectOfPrimaryMonitor];
         
         // Golden ratio positioning (0.618) within the workarea
         // Position window at (1 - φ) ≈ 0.382 to lean left and top

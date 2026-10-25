@@ -22,6 +22,7 @@
 #import "URSKeyboardManager.h"
 #import "URSWorkareaManager.h"
 #import "URSTitlebarController.h"
+#import "URSDisplayController.h"
 #import "URSSnappingMenuController.h"
 #import "URSOverviewController.h"
 #import "URSShowDesktopController.h"
@@ -62,6 +63,7 @@
 @property (strong, nonatomic) URSKeyboardManager *keyboardManager;
 @property (strong, nonatomic) URSWorkareaManager *workareaManager;
 @property (strong, nonatomic) URSTitlebarController *titlebarController;
+@property (strong, nonatomic) URSDisplayController *displayController;
 @property (strong, nonatomic) URSSnappingMenuController *snappingMenuController;
 @property (strong, nonatomic) URSOverviewController *overviewController;
 @property (strong, nonatomic) URSShowDesktopController *showDesktopController;

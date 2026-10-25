@@ -22,6 +22,8 @@ $(APP_NAME)_OBJC_FILES = \
 		URSFocusManager.m \
 		URSKeyboardManager.m \
 		URSWorkareaManager.m \
+		URSMonitorGeometry.m \
+		URSDisplayController.m \
 		URSTitlebarController.m \
 		URSSnappingMenuController.m \
 		URSCompositingManager.m \

@@ -1,0 +1,5 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+# Monitor geometry is plain Foundation, built with ARC like the window manager
+displayrescue_OBJC_FILES += ../WindowManager/URSMonitorGeometry.m
+../WindowManager/URSMonitorGeometry.m_FILE_FLAGS += -fobjc-arc
