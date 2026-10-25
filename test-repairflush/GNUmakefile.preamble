@@ -13,6 +13,7 @@ WM_COLLABORATORS = \
 	../WindowManager/UROSWMApplication.m \
 	../WindowManager/URSHybridEventHandler.m \
 	../WindowManager/URSSequenceWatch.m \
+	../WindowManager/URSTransparencyProbe.m \
 	../WindowManager/URSFocusManager.m \
 	../WindowManager/URSKeyboardManager.m \
 	../WindowManager/URSWorkareaManager.m \

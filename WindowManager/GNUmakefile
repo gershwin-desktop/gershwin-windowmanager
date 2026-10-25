@@ -42,6 +42,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSShowDesktopController.m \
 		URSLiveMiniatureLayout.m \
 		URSSequenceWatch.m \
+		URSTransparencyProbe.m \
 		URSLiveMiniatureController.m \
 		URSSheetLayout.m \
 		URSAttachmentSlideEffect.m \
