@@ -141,6 +141,28 @@ int main(void)
          "a menu bar on an inner edge does not shrink the workarea of the whole screen");
   END_SET("_NET_WORKAREA")
 
+  START_SET("maximize and fullscreen on stacked monitors")
+    // 1280x1024 above, the 1280x480 primary below with a 22 pixel menu bar:
+    // the phase 3 setup where maximize spanned both (1280x1504 at 0,0).
+    NSArray *mons = @[ R(0, 0, 1280, 1024), R(0, 1024, 1280, 480) ];
+    NSArray *use = @[ R(0, 0, 1280, 1024), R(0, 1046, 1280, 458) ];
+    NSRect lower = NSMakeRect(100, 1100, 400, 300);
+    NSRect upper = NSMakeRect(100, 100, 400, 300);
+    PASS(URSMonitorIndexForRect(lower, mons, 1) == 1, "a window on the lower monitor belongs to it");
+    PASS(URSMonitorIndexForRect(NSMakeRect(100, 800, 400, 300), mons, 1) == 0,
+         "a window straddling both belongs to the one it overlaps most");
+    PASS(URSMonitorIndexForRect(NSMakeRect(5000, 5000, 10, 10), mons, 1) == 1,
+         "a window on no monitor belongs to the primary");
+    PASS(same(URSMaximizedRect(lower, mons, use, 1), 0, 1046, 1280, 458),
+         "maximize fills the lower monitor below its menu bar, not both monitors");
+    PASS(same(URSMaximizedRect(upper, mons, use, 1), 0, 0, 1280, 1024),
+         "maximize on the upper monitor fills only that one");
+    PASS(same(URSFullscreenRect(lower, mons, 1), 0, 1024, 1280, 480),
+         "fullscreen covers the whole lower monitor, menu bar included");
+    PASS(same(URSFullscreenRect(upper, mons, 1), 0, 0, 1280, 1024),
+         "fullscreen on the upper monitor covers only that one");
+  END_SET("maximize and fullscreen on stacked monitors")
+
   [arp release];
   return 0;
 }

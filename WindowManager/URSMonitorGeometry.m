@@ -193,3 +193,30 @@ NSRect URSRescueFrame(NSRect frame, CGFloat titlebarHeight, NSArray *usable,
   result.origin.y = clampOrigin(NSMinY(result), NSHeight(result), NSMinY(target), NSMaxY(target));
   return result;
 }
+
+NSUInteger URSMonitorIndexForRect(NSRect frame, NSArray *monitors, NSUInteger primary)
+{
+  CGFloat bestArea = 0;
+  NSUInteger best = primary < [monitors count] ? primary : 0;
+  for (NSUInteger i = 0; i < [monitors count]; i++) {
+    NSRect overlap = NSIntersectionRect(frame, [[monitors objectAtIndex:i] rectValue]);
+    CGFloat area = NSWidth(overlap) * NSHeight(overlap);
+    if (area > bestArea) {
+      bestArea = area;
+      best = i;
+    }
+  }
+  return best;
+}
+
+NSRect URSMaximizedRect(NSRect frame, NSArray *monitors, NSArray *usable, NSUInteger primary)
+{
+  if ([usable count] == 0) return NSZeroRect;
+  return [[usable objectAtIndex:URSMonitorIndexForRect(frame, monitors, primary)] rectValue];
+}
+
+NSRect URSFullscreenRect(NSRect frame, NSArray *monitors, NSUInteger primary)
+{
+  if ([monitors count] == 0) return NSZeroRect;
+  return [[monitors objectAtIndex:URSMonitorIndexForRect(frame, monitors, primary)] rectValue];
+}

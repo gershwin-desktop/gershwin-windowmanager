@@ -30,6 +30,17 @@ NSRect URSUsableRectForMonitor(NSRect monitor, NSSize screen, NSArray *struts);
 // as the area of every monitor.
 NSRect URSWorkareaForScreen(NSSize screen, NSArray *monitors, NSArray *struts);
 
+// The monitor a window belongs to: the one its frame overlaps most, else
+// the primary.  Indexes `monitors` (NSValue rects).
+NSUInteger URSMonitorIndexForRect(NSRect frame, NSArray *monitors, NSUInteger primary);
+
+// What maximize fills: the usable rect (`usable`, same order as `monitors`)
+// of the window's monitor, never the whole screen across monitors.
+NSRect URSMaximizedRect(NSRect frame, NSArray *monitors, NSArray *usable, NSUInteger primary);
+
+// What fullscreen fills: the window's whole monitor, struts included.
+NSRect URSFullscreenRect(NSRect frame, NSArray *monitors, NSUInteger primary);
+
 // Whether `point` lies on one of `rects` (NSValue rects).
 BOOL URSPointIsOnRects(NSPoint point, NSArray *rects);
 

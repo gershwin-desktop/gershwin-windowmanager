@@ -306,19 +306,13 @@
 
 - (NSRect)usableRectForRect:(NSRect)rect
 {
-    NSArray *monitors = [self effectiveMonitors];
-    NSArray *usable = [self usableMonitorRects];
-    CGFloat bestArea = 0;
-    NSInteger best = -1;
-    for (NSUInteger i = 0; i < [monitors count]; i++) {
-        NSRect overlap = NSIntersectionRect(rect, [[monitors objectAtIndex:i] rectValue]);
-        CGFloat area = NSWidth(overlap) * NSHeight(overlap);
-        if (area > bestArea) {
-            bestArea = area;
-            best = (NSInteger)i;
-        }
-    }
-    return best >= 0 ? [[usable objectAtIndex:best] rectValue] : [self usableRectOfPrimaryMonitor];
+    return URSMaximizedRect(rect, [self effectiveMonitors], [self usableMonitorRects],
+                            self.primaryMonitorIndex);
+}
+
+- (NSRect)monitorRectForRect:(NSRect)rect
+{
+    return URSFullscreenRect(rect, [self effectiveMonitors], self.primaryMonitorIndex);
 }
 
 @end

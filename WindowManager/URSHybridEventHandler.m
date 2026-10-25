@@ -235,6 +235,9 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
     self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
     self.titlebarController.workareaManager = self.workareaManager;
+    // Maximize, fullscreen and snapping in the xcb layer fill the window's
+    // own monitor.
+    connection.monitorAreas = self.workareaManager;
     self.titlebarController.focusManager = self.focusManager;
     self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
     self.overviewController = [[URSOverviewController alloc] initWithConnection:connection

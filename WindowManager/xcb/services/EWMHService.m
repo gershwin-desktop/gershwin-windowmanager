@@ -1176,17 +1176,17 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateMaximizedHorz])
         {
             BOOL maxHorz = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow maximizedHorizontally]);
-            XCBScreen *screen = [aWindow screen];
             XCBSize size;
             XCBPoint position;
             XCBFrame *frame;
             XCBTitleBar *titleBar;
 
-            // Read workarea to respect struts
-            int32_t workareaX = 0, workareaY = 0;
-            uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
-            XCBWindow *rootWindow = [screen rootWindow];
-            [self readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
+            // The usable area of the monitor the window is on, so a maximized
+            // window neither spans several monitors nor covers their panels.
+            XCBRect windowArea = [connection maximizedAreaForRect:
+                [aWindow decorated] ? [[aWindow parentWindow] windowRect] : [aWindow windowRect]];
+            int32_t workareaX = windowArea.position.x;
+            uint32_t workareaWidth = windowArea.size.width;
 
             // Utility panels (palettes) are never maximized - matches the
             // titlebar's missing zoom button and the snapping menu's guard.
@@ -1238,7 +1238,6 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                 }
 
                 [aWindow setMaximizedHorizontally:maxHorz];
-                screen = nil;
             }
 
             [self updateNetWmState:aWindow];
@@ -1248,17 +1247,17 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateMaximizedVert])
         {
             BOOL maxVert = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow maximizedVertically]);
-            XCBScreen *screen = [aWindow screen];
             XCBSize size;
             XCBPoint position;
             XCBFrame *frame;
             XCBTitleBar *titleBar;
 
-            // Read workarea to respect struts
-            int32_t workareaX = 0, workareaY = 0;
-            uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
-            XCBWindow *rootWindow = [screen rootWindow];
-            [self readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
+            // The usable area of the monitor the window is on, so a maximized
+            // window neither spans several monitors nor covers their panels.
+            XCBRect windowArea = [connection maximizedAreaForRect:
+                [aWindow decorated] ? [[aWindow parentWindow] windowRect] : [aWindow windowRect]];
+            int32_t workareaY = windowArea.position.y;
+            uint32_t workareaHeight = windowArea.size.height;
 
             // Utility panels (palettes) are never maximized - matches the
             // titlebar's missing zoom button and the snapping menu's guard.
@@ -1310,7 +1309,6 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                 }
 
                 [aWindow setMaximizedVertically:maxVert];
-                screen = nil;
             }
 
             [self updateNetWmState:aWindow];
@@ -1322,8 +1320,12 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
             BOOL fullscr = (action == _NET_WM_STATE_ADD)
                         || (action == _NET_WM_STATE_TOGGLE && ![aWindow fullScreen]);
 
-            XCBScreen *screen = [aWindow screen];
-            uint32_t scrW = [screen width], scrH = [screen height];
+            // Fullscreen covers the window's whole monitor, panels included,
+            // not the screen across every monitor.
+            XCBRect monitor = [connection fullscreenAreaForRect:
+                [aWindow decorated] ? [[aWindow parentWindow] windowRect] : [aWindow windowRect]];
+            int32_t scrX = monitor.position.x, scrY = monitor.position.y;
+            uint32_t scrW = monitor.size.width, scrH = monitor.size.height;
 
             if (fullscr)
             {
@@ -1359,10 +1361,10 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                     }
                     [frame destroyResizeZones];
 
-                    // Resize frame to fill the whole screen
-                    XCBRect targetRect = XCBMakeRect(XCBMakePoint(0, 0),
+                    // Resize frame to fill the monitor
+                    XCBRect targetRect = XCBMakeRect(XCBMakePoint(scrX, scrY),
                                                       XCBMakeSize(scrW, scrH));
-                    uint32_t fvals[4] = {0, 0, scrW, scrH};
+                    uint32_t fvals[4] = {(uint32_t)scrX, (uint32_t)scrY, scrW, scrH};
                     xcb_configure_window([connection connection], [frame window],
                                          XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
                                          | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
@@ -1391,13 +1393,13 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
                 }
                 else
                 {
-                    // Undecorated window: resize to fill the whole screen
-                    uint32_t vals[4] = {0, 0, scrW, scrH};
+                    // Undecorated window: resize to fill its whole monitor
+                    uint32_t vals[4] = {(uint32_t)scrX, (uint32_t)scrY, scrW, scrH};
                     xcb_configure_window([connection connection], [aWindow window],
                                          XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
                                          | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
                                          vals);
-                    [aWindow setWindowRect:XCBMakeRect(XCBMakePoint(0, 0),
+                    [aWindow setWindowRect:XCBMakeRect(XCBMakePoint(scrX, scrY),
                                                         XCBMakeSize(scrW, scrH))];
                     [aWindow setFullScreen:YES];
                     [connection flush];
@@ -1484,7 +1486,6 @@ static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
             }
 
             [self updateNetWmState:aWindow];
-            screen = nil;
         }
 
         /*** WindowShade (titlebar double-click uses the same XCBFrame methods) ***/

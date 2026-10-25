@@ -9,7 +9,7 @@
 #import <Foundation/Foundation.h>
 #import "XCBConnection.h"
 
-@interface URSWorkareaManager : NSObject
+@interface URSWorkareaManager : NSObject <XCBMonitorAreas>
 
 @property (weak, nonatomic) XCBConnection *connection;
 
@@ -35,6 +35,8 @@
 // The usable rect of the monitor `rect` overlaps most, else of the primary.
 - (NSRect)usableRectForRect:(NSRect)rect;
 - (NSRect)usableRectOfPrimaryMonitor;
+// The whole monitor `rect` overlaps most, else the primary.
+- (NSRect)monitorRectForRect:(NSRect)rect;
 // A normal framed window the WM may move: not fullscreen, not a dock, menu,
 // desktop or other special type.
 - (BOOL)isRelocatableFrame:(XCBWindow *)window;
