@@ -41,6 +41,15 @@
 - (BOOL)clientShowsSheet:(XCBWindow *)client;
 @end
 
+// Per-monitor areas, provided by the window manager layer above, which
+// knows the lit monitors and the panels' struts.
+@protocol XCBMonitorAreas <NSObject>
+// The usable rect (struts removed) of the monitor `rect` belongs to.
+- (NSRect)usableRectForRect:(NSRect)rect;
+// The whole monitor `rect` belongs to.
+- (NSRect)monitorRectForRect:(NSRect)rect;
+@end
+
 @interface XCBConnection : NSObject
 {
     xcb_connection_t *connection;
@@ -62,6 +71,13 @@
 
 // Cached workarea for drag performance
 @property (nonatomic, assign) BOOL workareaValid;
+@property (nonatomic, weak) id<XCBMonitorAreas> monitorAreas;
+// What maximize fills for a frame at `rect`: its monitor's usable area, or
+// _NET_WORKAREA (else the screen) while no monitor areas are known.
+- (XCBRect)maximizedAreaForRect:(XCBRect)rect;
+// What fullscreen fills for a frame at `rect`: its whole monitor, or the
+// screen while no monitor areas are known.
+- (XCBRect)fullscreenAreaForRect:(XCBRect)rect;
 @property (nonatomic, assign) int32_t cachedWorkareaX;
 @property (nonatomic, assign) int32_t cachedWorkareaY;
 @property (nonatomic, assign) uint32_t cachedWorkareaWidth;

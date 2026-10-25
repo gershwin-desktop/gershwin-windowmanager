@@ -17,6 +17,8 @@ WM_COLLABORATORS = \
 	../WindowManager/URSFocusManager.m \
 	../WindowManager/URSKeyboardManager.m \
 	../WindowManager/URSWorkareaManager.m \
+	../WindowManager/URSOutputScale.m \
+	../WindowManager/URSOutputScales.m \
 	../WindowManager/URSTitlebarController.m \
 	../WindowManager/URSSnappingMenuController.m \
 	../WindowManager/URSAttentionHopEffect.m \

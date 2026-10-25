@@ -12,6 +12,7 @@
 #import "URSHybridEventHandler.h"
 #import "URSCommandLine.h"
 #import "URSDrawerController.h"
+#import "URSDisplayController.h"
 #import <unistd.h>
 #import <fcntl.h>
 #import <errno.h>
@@ -43,6 +44,8 @@
 #import <xcb/xcb_aux.h>
 #import <xcb/damage.h>
 #import <xcb/present.h>
+#import "URSOutputScales.h"
+#import "URSPointerCursor.h"
 #import <xcb/randr.h>
 #import <xcb/xproto.h>
 #import <X11/keysym.h>
@@ -174,6 +177,10 @@ static CGFloat WMLastScaleFactor = 1.0;
       [win reframeForDecorationChange];
     }
 
+  /* A theme that cannot draw per monitor turns the per-monitor factors off,
+   * one that can turns them on. */
+  [self updateFramesForOutputScales];
+
   /* Re-render all titlebars with the new metrics. */
   xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
   [URSThemeIntegration refreshAllTitlebarsWithFocusedWindow:focusedId];
@@ -234,6 +241,9 @@ static CGFloat WMLastScaleFactor = 1.0;
     self.workareaManager = [[URSWorkareaManager alloc] initWithConnection:connection];
     self.titlebarController = [[URSTitlebarController alloc] initWithConnection:connection];
     self.titlebarController.workareaManager = self.workareaManager;
+    // Maximize, fullscreen and snapping in the xcb layer fill the window's
+    // own monitor.
+    connection.monitorAreas = self.workareaManager;
     self.titlebarController.focusManager = self.focusManager;
     self.snappingMenuController = [[URSSnappingMenuController alloc] initWithConnection:connection];
     self.overviewController = [[URSOverviewController alloc] initWithConnection:connection
@@ -328,6 +338,11 @@ static CGFloat WMLastScaleFactor = 1.0;
                                              selector: @selector(themeDidActivate:)
                                                  name: GSThemeDidActivateNotification
                                                object: nil];
+
+    /* Windows already on screen are framed for the monitor they are on, so
+     * the monitors' factors must be known before; setupRANDR below reads
+     * them again once it watches for changes. */
+    [[URSOutputScales sharedScales] reloadWithConnection:connection];
 
     // Decorate any existing windows already on screen
     [self decorateExistingWindowsOnStartup];
@@ -964,6 +979,13 @@ static CGFloat WMLastScaleFactor = 1.0;
 - (void)processMotionEvent:(xcb_motion_notify_event_t *)motionEvent
 {
     if ([self.overviewController handleMotion:motionEvent]) {
+        return;
+    }
+    /* Motion on the root itself is selected only for the pointer's size
+     * (URSPointerCursor); nothing else ever saw it. */
+    if (motionEvent->event == motionEvent->root) {
+        [[URSPointerCursor sharedPointerCursor] pointerAtRootX:motionEvent->root_x
+                                                             y:motionEvent->root_y];
         return;
     }
     [connection handleMotionNotify:motionEvent];
@@ -1705,9 +1727,50 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
             xcb_randr_select_input(conn, rootWindow,
                 XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE |
                 XCB_RANDR_NOTIFY_MASK_CRTC_CHANGE |
-                XCB_RANDR_NOTIFY_MASK_OUTPUT_CHANGE);
+                XCB_RANDR_NOTIFY_MASK_OUTPUT_CHANGE |
+                XCB_RANDR_NOTIFY_MASK_OUTPUT_PROPERTY);
             [connection flush];
         }
+        [[URSOutputScales sharedScales] reloadWithConnection:connection];
+        [[URSPointerCursor sharedPointerCursor] startWithConnection:connection];
+    }
+
+    self.displayController =
+        [[URSDisplayController alloc] initWithConnection:connection
+                                         workareaManager:self.workareaManager
+                                      titlebarController:self.titlebarController];
+    // Login: the monitors connected now get their saved layout.
+    [self.displayController screenChanged];
+}
+
+/* A monitor's DPI property or the monitor layout changed: read the factors
+ * again and move every frame to the factor of the monitor it is on. */
+- (void)outputScalesChanged
+{
+    URSOutputScales *scales = [URSOutputScales sharedScales];
+
+    [scales reloadWithConnection:connection];
+    [self updateFramesForOutputScales];
+    [[URSPointerCursor sharedPointerCursor] outputScalesChanged];
+}
+
+- (void)updateFramesForOutputScales
+{
+    URSOutputScales *scales = [URSOutputScales sharedScales];
+
+    for (XCBWindow *window in [[connection windowsMap] allValues]) {
+        if (![window isKindOfClass:[XCBFrame class]])
+            continue;
+        XCBFrame *frame = (XCBFrame *)window;
+        if ([frame childWindowForKey:ClientWindow] == nil)
+            continue;
+        XCBRect r = [frame windowRect];
+        if ([scales updateFrame:frame forRect:NSMakeRect(r.position.x, r.position.y,
+                                                         r.size.width, r.size.height)
+                            force:YES])
+            [frame decorationScaleChanged];
+        else
+            [frame updateCursorScale];
     }
 }
 
@@ -1725,35 +1788,9 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
     [screen setWidth:newW];
     [screen setHeight:newH];
 
-    xcb_connection_t *conn = [connection connection];
-
-    // Reposition windows that extend beyond the new screen bounds
-    for (NSNumber *key in [connection windowsMap]) {
-        XCBWindow *w = [connection windowForXCBId:[key unsignedIntValue]];
-        if (!w) continue;
-        if ([w isKindOfClass:[XCBFrame class]] || ![w decorated]) {
-            XCBRect r = [w windowRect];
-            BOOL moved = NO;
-            if (r.position.x + (int16_t)r.size.width > (int16_t)newW) {
-                r.position.x = (int16_t)newW - (int16_t)r.size.width - 10;
-                moved = YES;
-            }
-            if (r.position.y + (int16_t)r.size.height > (int16_t)newH) {
-                r.position.y = (int16_t)newH - (int16_t)r.size.height - 10;
-                moved = YES;
-            }
-            if (r.position.x < 0) { r.position.x = 0; moved = YES; }
-            if (r.position.y < 0) { r.position.y = 0; moved = YES; }
-            if (moved) {
-                uint32_t vals[2] = {(uint32_t)r.position.x, (uint32_t)r.position.y};
-                xcb_configure_window(conn, [w window],
-                                     XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y, vals);
-                [w setWindowRect:r];
-            }
-        }
-    }
-
-    [connection flush];
+    // Windows left where no monitor is any more are brought back by the
+    // display controller once the layout has settled, onto a monitor that
+    // is lit rather than just inside the new screen size.
 
     // Invalidate workarea cache so it is recalculated on next query
     connection.workareaValid = NO;
@@ -1791,9 +1828,28 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
             xcb_randr_screen_change_notify_event_t *rEvent =
                 (xcb_randr_screen_change_notify_event_t *)event;
             [self handleRandrGeometryChange:rEvent->width height:rEvent->height];
+            [self.displayController screenChanged];
+            [self outputScalesChanged];
             return;
         }
         if (responseType == _randrEventBase + XCB_RANDR_NOTIFY) {
+            xcb_randr_notify_event_t *notify = (xcb_randr_notify_event_t *)event;
+            /* Output properties are watched only for a monitor's scale; any
+               other property (EDID, backlight, ...) is no layout change. */
+            if (notify->subCode == XCB_RANDR_NOTIFY_OUTPUT_PROPERTY) {
+                if (notify->u.op.atom == [[URSOutputScales sharedScales] scaleAtom] ||
+                    [[URSOutputScales sharedScales] scaleAtom] == XCB_NONE)
+                    [self outputScalesChanged];
+                return;
+            }
+            [self outputScalesChanged];
+            if (notify->subCode == XCB_RANDR_NOTIFY_OUTPUT_CHANGE) {
+                [self.displayController output:notify->u.oc.output
+                                     connected:notify->u.oc.connection ==
+                                               XCB_RANDR_CONNECTION_CONNECTED];
+            } else {
+                [self.displayController screenChanged];
+            }
             xcb_connection_t *conn = [connection connection];
             XCBScreen *screen = [[connection screens] firstObject];
             if (screen && conn) {
@@ -2301,8 +2357,9 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
         uint16_t screenWidth = [screen width];
         uint16_t screenHeight = [screen height];
         
-        // Get the current workarea (respects struts from dock windows like menu bar)
-        NSRect workarea = [self.workareaManager currentWorkarea];
+        // New windows open on the primary monitor, where the menu bar is,
+        // within its usable area (struts of the menu bar and dock).
+        NSRect workarea = [self.workareaManager usableRectOfPrimaryMonitor];
         
         // Golden ratio positioning (0.618) within the workarea
         // Position window at (1 - φ) ≈ 0.382 to lean left and top

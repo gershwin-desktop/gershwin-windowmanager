@@ -52,6 +52,26 @@ extern NSString *URSWindowTitleContentChangedNotification;
 @property (strong, nonatomic) XCBConnection *connection;
 // clientBorder: pixels inset around the client area (1 = thin border, 0 = flush in compositor mode)
 @property (nonatomic, assign) int clientBorder;
+// The scale factor this frame is decorated at: that of the RandR output
+// (decorationOutput) it belongs to while the monitors' factors are mixed,
+// 0 while the global GSScaleFactor applies (one factor everywhere).
+@property (nonatomic, assign) CGFloat decorationScaleFactor;
+@property (nonatomic, assign) uint32_t decorationOutput;
+// Bookkeeping of URSOutputScales: the factor the client was last laid out
+// at, its size when the frame switched (until it resizes itself to follow),
+// and where the frame was when its monitor was last decided.
+@property (nonatomic, assign) CGFloat decorationContentFactor;
+@property (nonatomic, assign) NSSize decorationPendingClientSize;
+@property (nonatomic, assign) NSPoint decorationCheckedOrigin;
+// decorationScaleFactor, or the global factor when it is 0.
+- (CGFloat) effectiveScaleFactor;
+// decorationScaleFactor changed: resize the title bar and border to it,
+// tell the client, redraw.
+- (void) decorationScaleChanged;
+// Load the frame's cursors at the size its monitor wants now and give them
+// to the frame, its resize zones and grow box (URSOutputScales
+// -cursorSizeForFrame:); nothing happens when the size is the same.
+- (void) updateCursorScale;
 @property (nonatomic, assign) BOOL rightBorderClicked;
 @property (nonatomic, assign) BOOL bottomBorderClicked;
 @property (nonatomic, assign) BOOL leftBorderClicked;

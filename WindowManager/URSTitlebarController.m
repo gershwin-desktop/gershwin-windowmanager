@@ -320,7 +320,11 @@ static const NSTimeInterval URSZoomAnimationDuration = 0.22;
         [clientWindow setOldRect:[clientWindow windowRect]];
     }
 
-    NSRect workarea = [self.workareaManager currentWorkarea];
+    /* Maximized fills the monitor the window is on, not the whole screen
+     * across every monitor. */
+    NSRect workarea = [self.workareaManager usableRectForRect:
+        NSMakeRect(startRect.position.x, startRect.position.y,
+                   startRect.size.width, startRect.size.height)];
     XCBRect targetRect = XCBMakeRect(
         XCBMakePoint((int32_t)workarea.origin.x,
                      (int32_t)workarea.origin.y),
@@ -365,6 +369,17 @@ static const NSTimeInterval URSZoomAnimationDuration = 0.22;
 
     [frame updateAllResizeZonePositions];
     [frame applyRoundedCornersShapeMask];
+}
+
+- (void)applyFrameRect:(XCBRect)rect toFrame:(XCBFrame *)frame
+{
+    XCBWindow *titlebarWindow = [frame childWindowForKey:TitleBar];
+    if (![titlebarWindow isKindOfClass:[XCBTitleBar class]]) return;
+    [self applyZoomRect:rect
+                toFrame:frame
+               titlebar:(XCBTitleBar *)titlebarWindow
+           clientWindow:[frame childWindowForKey:ClientWindow]
+              maximized:[frame isMaximized]];
 }
 
 - (BOOL)titlebarIsActiveForFrame:(XCBFrame *)frame clientWindow:(XCBWindow *)clientWindow

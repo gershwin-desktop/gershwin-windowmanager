@@ -13,6 +13,9 @@
     uint16_t height;
     uint16_t defaultHeight;
     CGFloat _scaleFactor;
+    // Normal title bar height per scale factor other than the global one
+    // (NSNumber factor -> NSNumber height), asked of the theme once.
+    NSMutableDictionary *heightsByFactor;
 }
 
 @property (nonatomic, assign) BOOL heightDefined;
@@ -34,5 +37,10 @@
 // theme-configured) height, or a fixed 16px (scaled by GSScaleFactor,
 // never below 1px) for a utility panel - see XCBWindow's isUtilityPanel.
 - (uint16_t) heightForUtility:(BOOL)isUtility;
+
+// The same for a window decorated at `factor`, the factor of the monitor it
+// is on when the monitors' factors are mixed.  A factor of 0 is the global
+// one and answers exactly what -heightForUtility: answers.
+- (uint16_t) heightForUtility:(BOOL)isUtility scaleFactor:(CGFloat)factor;
 
 @end

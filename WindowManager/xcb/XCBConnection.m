@@ -17,6 +17,8 @@
 #import "XCBRegion.h"
 #import <xcb/xcb_aux.h>
 #import <enums/EIcccm.h>
+#import "URSOutputScales.h"
+#import "URSPointerCursor.h"
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
@@ -2373,12 +2375,22 @@ static XCBConnection *sharedInstance;
     }
 
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHeight = [settings heightForUtility:[window isUtilityPanel]];
 
     int16_t reqX = [window windowRect].position.x;
     int16_t reqY = [window windowRect].position.y;
     uint16_t reqW = [window windowRect].size.width;
     uint16_t reqH = [window windowRect].size.height;
+
+    /* With mixed monitor factors the frame is decorated for the monitor it
+       is requested on; 0 (the global factor) otherwise.  Placement below may
+       still move it to another one, which is checked once it is framed. */
+    uint32_t decorationOutput = XCB_NONE;
+    CGFloat decorationFactor =
+        [[URSOutputScales sharedScales] factorForNewFrameRect:NSMakeRect(reqX, reqY, reqW, reqH)
+                                                      utility:[window isUtilityPanel]
+                                                       output:&decorationOutput];
+    uint16_t titleHeight = [settings heightForUtility:[window isUtilityPanel]
+                                          scaleFactor:decorationFactor];
 
     /* The server never reports a zero size, so a zero rect means the geometry
      * query failed: the client destroyed its window while its MapRequest was
@@ -2391,7 +2403,8 @@ static XCBConnection *sharedInstance;
     // In compositor mode (drop shadows), the client sits flush inside the frame
     // with no pixel-wide border strips, so cb=0.  Non-compositor uses cb=1.
     // Scale cb by GSScaleFactor for HiDPI displays.
-    CGFloat cbScaleFactor = [[TitleBarSettingsService sharedInstance] scaleFactor];
+    CGFloat cbScaleFactor = decorationFactor > 0 ? decorationFactor
+                                                 : [[TitleBarSettingsService sharedInstance] scaleFactor];
     int cb = compositorActive ? 0 : (int)cbScaleFactor;
 
     // Determine if we should reposition the window.
@@ -2563,6 +2576,13 @@ static XCBConnection *sharedInstance;
 
     XCBFrame *frame = [response frame];
 
+    if (decorationFactor > 0) {
+        [frame setDecorationOutput:decorationOutput];
+        [frame setDecorationScaleFactor:decorationFactor];
+        [frame setTitleHeight:titleHeight];
+        [frame updateClientBorder];
+    }
+
     // Prevent X server from clearing the frame to background_pixel (white) on
     // every resize.  Default ForgetGravity discards all pixels; NorthWestGravity
     // preserves existing content and only exposes truly new areas.
@@ -2600,7 +2620,8 @@ static XCBConnection *sharedInstance;
     [self registerWindow:window];*/
 
     //NSLog(@"Client window decorated with id %u at %d,%d", [window window], xPos, yPos);
-    [frame initCursor];  // Must init cursor BEFORE decorateClientWindow - resize zones need it
+    // Must init cursor BEFORE decorateClientWindow - resize zones need it
+    [frame initCursorWithPixelSize:[[URSOutputScales sharedScales] cursorSizeForFrame:frame]];
     // Map the frame BEFORE decorating so that a pre-existing mapped client is reparented into
     // an already-mapped parent. Reparenting a mapped window into an *unmapped* frame causes the
     // X server to enqueue an XCB_UNMAP_NOTIFY for the client (frame has SubstructureNotify);
@@ -2614,6 +2635,14 @@ static XCBConnection *sharedInstance;
     [frame setScreen:[window screen]];
     [window setNormalState];
     [frame setNormalState];
+
+    {
+        XCBRect placed = [frame windowRect];
+        NSRect placedRect = NSMakeRect(placed.position.x, placed.position.y,
+                                       placed.size.width, placed.size.height);
+        if ([[URSOutputScales sharedScales] updateFrame:frame forRect:placedRect force:YES])
+            [frame decorationScaleChanged];
+    }
 
     if ([[window windowType] isEqualToString:[ewmhService EWMHWMWindowTypeDesktop]]) {
         [window setSkipTaskBar:YES];
@@ -2997,8 +3026,17 @@ static XCBConnection *sharedInstance;
 
 - (void)handleConfigureNotify:(xcb_configure_notify_event_t *)anEvent
 {
-    // NSLog(@"In configure notify for window %u: %d, %d", anEvent->window, anEvent->x, anEvent->y);
-
+    /* Every move or resize of a frame - a drag, a client request, a snap, a
+     * rescue - may take it onto a monitor with another scale factor. */
+    XCBWindow *window = [self windowForXCBId:anEvent->window];
+    if (![window isKindOfClass:[XCBFrame class]])
+        return;
+    XCBFrame *frame = (XCBFrame *)window;
+    if ([frame childWindowForKey:ClientWindow] == nil)
+        return;
+    NSRect rect = NSMakeRect(anEvent->x, anEvent->y, anEvent->width, anEvent->height);
+    if ([[URSOutputScales sharedScales] updateFrame:frame forRect:rect])
+        [frame decorationScaleChanged];
 }
 
 - (void)handleMotionNotify:(xcb_motion_notify_event_t *)anEvent
@@ -3331,22 +3369,11 @@ static XCBConnection *sharedInstance;
             return;
         }
 
-        XCBScreen *screen = [frame onScreen];
-
-        // Read workarea from root window to respect struts (e.g., menu bar)
-        EWMHService *ewmhService = [EWMHService sharedInstanceWithConnection:self];
-        int32_t workareaX = 0, workareaY = 0;
-        uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
-        
-        XCBWindow *rootWindow = [screen rootWindow];
-        if ([ewmhService readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight]) {
-            //NSLog(@"[Maximize] Using workarea: x=%d, y=%d, width=%u, height=%u", 
-            //      workareaX, workareaY, workareaWidth, workareaHeight);
-        } else {
-            //NSLog(@"[Maximize] No workarea set, using full screen: %u x %u", workareaWidth, workareaHeight);
-        }
-
         XCBRect startRect = [frame windowRect];
+        // The monitor the window is on, below its menu bar and above its Dock.
+        XCBRect area = [self maximizedAreaForRect:startRect];
+        int32_t workareaX = area.position.x, workareaY = area.position.y;
+        uint32_t workareaWidth = area.size.width, workareaHeight = area.size.height;
         /*** Save pre-maximize rect for restore ***/
         [frame setOldRect:startRect];
         [titleBar setOldRect:[titleBar windowRect]];
@@ -3437,9 +3464,6 @@ static XCBConnection *sharedInstance;
         [frame applyRoundedCornersShapeMask];
         //NSLog(@"[Maximize] applied rounded corners for frame %u", [frame window]);
 
-        ewmhService = nil;
-        rootWindow = nil;
-        screen = nil;
         window = nil;
         frame = nil;
         clientWindow = nil;
@@ -4386,6 +4410,9 @@ static XCBConnection *sharedInstance;
 {
     XCBWindow *window = [self windowForXCBId:anEvent->event];
 
+    if (anEvent->event == anEvent->root)
+        [[URSPointerCursor sharedPointerCursor] pointerAtRootX:anEvent->root_x y:anEvent->root_y];
+
     if ([window isKindOfClass:[XCBWindow class]] &&
         [[window parentWindow] isKindOfClass:[XCBFrame class]])
     {
@@ -5258,17 +5285,16 @@ static XCBConnection *sharedInstance;
     if ([[frame childWindowForKey:ClientWindow] isUtilityPanel])
         return;
 
-    [self ensureWorkareaCache:frame];
-
-    // Keep current X and width, expand Y and height to workarea
+    // Keep current X and width, expand Y and height to the monitor's area
     XCBRect current = [frame windowRect];
+    XCBRect area = [self maximizedAreaForRect:current];
 
     // Save pre-maximize rect for restore
     [frame setOldRect:current];
 
     XCBRect target = XCBMakeRect(
-        XCBMakePoint(current.position.x, _cachedWorkareaY),
-        XCBMakeSize(current.size.width, _cachedWorkareaHeight));
+        XCBMakePoint(current.position.x, area.position.y),
+        XCBMakeSize(current.size.width, area.size.height));
 
     [frame programmaticResizeToRect:target];
     [frame setMaximizedVertically:YES];
@@ -5284,17 +5310,16 @@ static XCBConnection *sharedInstance;
     if ([[frame childWindowForKey:ClientWindow] isUtilityPanel])
         return;
 
-    [self ensureWorkareaCache:frame];
-
-    // Keep current Y and height, expand X and width to workarea
+    // Keep current Y and height, expand X and width to the monitor's area
     XCBRect current = [frame windowRect];
+    XCBRect area = [self maximizedAreaForRect:current];
 
     // Save pre-maximize rect for restore
     [frame setOldRect:current];
 
     XCBRect target = XCBMakeRect(
-        XCBMakePoint(_cachedWorkareaX, current.position.y),
-        XCBMakeSize(_cachedWorkareaWidth, current.size.height));
+        XCBMakePoint(area.position.x, current.position.y),
+        XCBMakeSize(area.size.width, current.size.height));
 
     [frame programmaticResizeToRect:target];
     [frame setMaximizedHorizontally:YES];
@@ -5305,6 +5330,39 @@ static XCBConnection *sharedInstance;
 }
 
 #pragma mark - Struts / Workarea
+
+static NSRect nsRectFromXCB(XCBRect r)
+{
+    return NSMakeRect(r.position.x, r.position.y, r.size.width, r.size.height);
+}
+
+static XCBRect xcbRectFromNS(NSRect r)
+{
+    return XCBMakeRect(XCBMakePoint((int32_t)NSMinX(r), (int32_t)NSMinY(r)),
+                       XCBMakeSize((uint32_t)NSWidth(r), (uint32_t)NSHeight(r)));
+}
+
+- (XCBRect)maximizedAreaForRect:(XCBRect)rect
+{
+    if (self.monitorAreas) {
+        return xcbRectFromNS([self.monitorAreas usableRectForRect:nsRectFromXCB(rect)]);
+    }
+    XCBScreen *screen = [screens firstObject];
+    int32_t x = 0, y = 0;
+    uint32_t w = [screen width], h = [screen height];
+    [[EWMHService sharedInstanceWithConnection:self]
+        readWorkareaForRootWindow:[screen rootWindow] x:&x y:&y width:&w height:&h];
+    return XCBMakeRect(XCBMakePoint(x, y), XCBMakeSize(w, h));
+}
+
+- (XCBRect)fullscreenAreaForRect:(XCBRect)rect
+{
+    if (self.monitorAreas) {
+        return xcbRectFromNS([self.monitorAreas monitorRectForRect:nsRectFromXCB(rect)]);
+    }
+    XCBScreen *screen = [screens firstObject];
+    return XCBMakeRect(XCBMakePoint(0, 0), XCBMakeSize([screen width], [screen height]));
+}
 
 - (XCBPoint)clampFramePosition:(XCBPoint)pos size:(XCBSize)size
 {
@@ -5410,9 +5468,11 @@ static XCBConnection *sharedInstance;
     }
 
     [self ensureWorkareaCache:frame];
+    // The monitor the window is on, not the whole screen across monitors.
+    XCBRect wa = [self maximizedAreaForRect:[frame windowRect]];
     //NSLog(@"[Snap] executeSnapForZone: zone=%ld workarea=(%d,%d,%u,%u) valid=%d",
-    //      (long)zone, _cachedWorkareaX, _cachedWorkareaY,
-    //      _cachedWorkareaWidth, _cachedWorkareaHeight, self.workareaValid);
+    //      (long)zone, wa.position.x, wa.position.y,
+    //      wa.size.width, wa.size.height, self.workareaValid);
 
     // Dragged away again, the window gets back the size it had before its
     // first snap; snapping it on to another edge, or snapping a maximized
@@ -5425,8 +5485,8 @@ static XCBConnection *sharedInstance;
         case SnapZoneTop:
             // Full maximize
             targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth, _cachedWorkareaHeight));
+                XCBMakePoint(wa.position.x, wa.position.y),
+                XCBMakeSize(wa.size.width, wa.size.height));
             [frame setIsMaximized:YES];
             //NSLog(@"[Snap] Maximizing window to workarea");
             break;
@@ -5434,48 +5494,48 @@ static XCBConnection *sharedInstance;
         case SnapZoneLeft:
             // Left half of screen
             targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight));
+                XCBMakePoint(wa.position.x, wa.position.y),
+                XCBMakeSize(wa.size.width / 2, wa.size.height));
             //NSLog(@"[Snap] Tiling window to left half");
             break;
 
         case SnapZoneRight:
             // Right half of screen
             targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX + _cachedWorkareaWidth / 2, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight));
+                XCBMakePoint(wa.position.x + wa.size.width / 2, wa.position.y),
+                XCBMakeSize(wa.size.width / 2, wa.size.height));
             //NSLog(@"[Snap] Tiling window to right half");
             break;
 
         case SnapZoneTopLeft:
             // Top-left quarter
             targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
+                XCBMakePoint(wa.position.x, wa.position.y),
+                XCBMakeSize(wa.size.width / 2, wa.size.height / 2));
             //NSLog(@"[Snap] Tiling window to top-left quarter");
             break;
 
         case SnapZoneTopRight:
             // Top-right quarter
             targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX + _cachedWorkareaWidth / 2, _cachedWorkareaY),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
+                XCBMakePoint(wa.position.x + wa.size.width / 2, wa.position.y),
+                XCBMakeSize(wa.size.width / 2, wa.size.height / 2));
             //NSLog(@"[Snap] Tiling window to top-right quarter");
             break;
 
         case SnapZoneBottomLeft:
             // Bottom-left quarter
             targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX, _cachedWorkareaY + _cachedWorkareaHeight / 2),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
+                XCBMakePoint(wa.position.x, wa.position.y + wa.size.height / 2),
+                XCBMakeSize(wa.size.width / 2, wa.size.height / 2));
             //NSLog(@"[Snap] Tiling window to bottom-left quarter");
             break;
 
         case SnapZoneBottomRight:
             // Bottom-right quarter
             targetRect = XCBMakeRect(
-                XCBMakePoint(_cachedWorkareaX + _cachedWorkareaWidth / 2, _cachedWorkareaY + _cachedWorkareaHeight / 2),
-                XCBMakeSize(_cachedWorkareaWidth / 2, _cachedWorkareaHeight / 2));
+                XCBMakePoint(wa.position.x + wa.size.width / 2, wa.position.y + wa.size.height / 2),
+                XCBMakeSize(wa.size.width / 2, wa.size.height / 2));
             //NSLog(@"[Snap] Tiling window to bottom-right quarter");
             break;
 
@@ -5543,6 +5603,8 @@ static XCBConnection *sharedInstance;
 
         // Calculate preview rect based on snap zone
         [self ensureWorkareaCache:frame];
+        // The monitor the window is on, not the whole screen across monitors.
+        XCBRect wa = [self maximizedAreaForRect:[frame windowRect]];
 
         // Get screen height for X11 to GNUstep coordinate conversion
         // X11: Y=0 at top, GNUstep/NSWindow: Y=0 at bottom
@@ -5554,63 +5616,63 @@ static XCBConnection *sharedInstance;
 
         switch (zone) {
             case SnapZoneTop:
-                previewWidth = _cachedWorkareaWidth;
-                previewHeight = _cachedWorkareaHeight;
-                previewX = _cachedWorkareaX;
+                previewWidth = wa.size.width;
+                previewHeight = wa.size.height;
+                previewX = wa.position.x;
                 previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         screenHeight - wa.position.y - previewHeight,
                                          previewWidth, previewHeight);
                 break;
             case SnapZoneLeft:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight;
-                previewX = _cachedWorkareaX;
+                previewWidth = wa.size.width / 2;
+                previewHeight = wa.size.height;
+                previewX = wa.position.x;
                 previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         screenHeight - wa.position.y - previewHeight,
                                          previewWidth, previewHeight);
                 break;
             case SnapZoneRight:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight;
-                previewX = _cachedWorkareaX + _cachedWorkareaWidth / 2;
+                previewWidth = wa.size.width / 2;
+                previewHeight = wa.size.height;
+                previewX = wa.position.x + wa.size.width / 2;
                 previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         screenHeight - wa.position.y - previewHeight,
                                          previewWidth, previewHeight);
                 break;
             case SnapZoneTopLeft:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight / 2;
-                previewX = _cachedWorkareaX;
+                previewWidth = wa.size.width / 2;
+                previewHeight = wa.size.height / 2;
+                previewX = wa.position.x;
                 // Top quarter: X11 Y is at workarea top
                 previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         screenHeight - wa.position.y - previewHeight,
                                          previewWidth, previewHeight);
                 break;
             case SnapZoneTopRight:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight / 2;
-                previewX = _cachedWorkareaX + _cachedWorkareaWidth / 2;
+                previewWidth = wa.size.width / 2;
+                previewHeight = wa.size.height / 2;
+                previewX = wa.position.x + wa.size.width / 2;
                 // Top quarter: X11 Y is at workarea top
                 previewRect = NSMakeRect(previewX,
-                                         screenHeight - _cachedWorkareaY - previewHeight,
+                                         screenHeight - wa.position.y - previewHeight,
                                          previewWidth, previewHeight);
                 break;
             case SnapZoneBottomLeft:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight / 2;
-                previewX = _cachedWorkareaX;
+                previewWidth = wa.size.width / 2;
+                previewHeight = wa.size.height / 2;
+                previewX = wa.position.x;
                 // Bottom quarter: X11 Y is at workarea midpoint
                 previewRect = NSMakeRect(previewX,
-                                         screenHeight - (_cachedWorkareaY + _cachedWorkareaHeight / 2) - previewHeight,
+                                         screenHeight - (wa.position.y + wa.size.height / 2) - previewHeight,
                                          previewWidth, previewHeight);
                 break;
             case SnapZoneBottomRight:
-                previewWidth = _cachedWorkareaWidth / 2;
-                previewHeight = _cachedWorkareaHeight / 2;
-                previewX = _cachedWorkareaX + _cachedWorkareaWidth / 2;
+                previewWidth = wa.size.width / 2;
+                previewHeight = wa.size.height / 2;
+                previewX = wa.position.x + wa.size.width / 2;
                 // Bottom quarter: X11 Y is at workarea midpoint
                 previewRect = NSMakeRect(previewX,
-                                         screenHeight - (_cachedWorkareaY + _cachedWorkareaHeight / 2) - previewHeight,
+                                         screenHeight - (wa.position.y + wa.size.height / 2) - previewHeight,
                                          previewWidth, previewHeight);
                 break;
             default:
@@ -5734,6 +5796,8 @@ static XCBConnection *sharedInstance;
     }
 
     [self ensureWorkareaCache:frame];
+    // The monitor the window is on, not the whole screen across monitors.
+    XCBRect wa = [self maximizedAreaForRect:[frame windowRect]];
 
     // Get current window size
     XCBRect currentRect = [frame windowRect];
@@ -5741,12 +5805,12 @@ static XCBConnection *sharedInstance;
     uint32_t windowHeight = currentRect.size.height;
 
     // Calculate centered position
-    int32_t centerX = _cachedWorkareaX + (_cachedWorkareaWidth - windowWidth) / 2;
-    int32_t centerY = _cachedWorkareaY + (_cachedWorkareaHeight - windowHeight) / 2;
+    int32_t centerX = wa.position.x + (wa.size.width - windowWidth) / 2;
+    int32_t centerY = wa.position.y + (wa.size.height - windowHeight) / 2;
 
     // Ensure window stays within workarea
-    if (centerX < _cachedWorkareaX) centerX = _cachedWorkareaX;
-    if (centerY < _cachedWorkareaY) centerY = _cachedWorkareaY;
+    if (centerX < wa.position.x) centerX = wa.position.x;
+    if (centerY < wa.position.y) centerY = wa.position.y;
 
     XCBRect targetRect = XCBMakeRect(
         XCBMakePoint(centerX, centerY),
@@ -5771,16 +5835,18 @@ static XCBConnection *sharedInstance;
     }
 
     [self ensureWorkareaCache:frame];
+    // The monitor the window is on, not the whole screen across monitors.
+    XCBRect wa = [self maximizedAreaForRect:[frame windowRect]];
 
     XCBRect currentRect = [frame windowRect];
     uint32_t windowWidth = currentRect.size.width;
     uint32_t windowHeight = currentRect.size.height;
 
-    int32_t centerX = _cachedWorkareaX + (_cachedWorkareaWidth - windowWidth) / 2;
-    int32_t centerY = _cachedWorkareaY + (_cachedWorkareaHeight - windowHeight) / 2;
+    int32_t centerX = wa.position.x + (wa.size.width - windowWidth) / 2;
+    int32_t centerY = wa.position.y + (wa.size.height - windowHeight) / 2;
 
-    if (centerX < _cachedWorkareaX) centerX = _cachedWorkareaX;
-    if (centerY < _cachedWorkareaY) centerY = _cachedWorkareaY;
+    if (centerX < wa.position.x) centerX = wa.position.x;
+    if (centerY < wa.position.y) centerY = wa.position.y;
 
     XCBRect targetRect = XCBMakeRect(
         XCBMakePoint(centerX, centerY),

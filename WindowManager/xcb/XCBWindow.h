@@ -228,11 +228,17 @@ typedef NS_ENUM(NSInteger, WindowState)
 - (void) refreshCachedWMHints;
 - (void) setInputFocus:(uint8_t)revertTo time:(xcb_timestamp_t)timestamp;
 - (void) initCursor;
+// The same with the cursors at `pixelSize` (0 = the theme's default size).
+- (void) initCursorWithPixelSize:(uint32_t)pixelSize;
 - (void) showLeftPointerCursor;
 - (void) showResizeCursorForPosition:(MousePosition)position;
 - (void) putWindowBackgroundWithPixmap:(xcb_pixmap_t)aPixmap;
 - (void) refreshBorder;
 - (void) reframeForDecorationChange;
+// Title bar height of this window as decorated now: at the scale factor of
+// its frame's monitor when the monitors' factors are mixed, else the global
+// height.  Also right for a window that is not framed (yet).
+- (uint16_t) decorationTitleHeight;
 - (BOOL) updatePid;
 - (BOOL) updateLeaderWindow;
 

@@ -11,10 +11,13 @@
 #import <AppKit/AppKit.h>
 #import <math.h>
 
-// Scale factor mirroring the eau theme's GSWScaleFactor(): reads the
-// GSScaleFraction user default, falls back to the screen's backing scale.
+// Scale factor mirroring the eau theme's GSWScaleFactor(): the factor of the
+// frame being laid out while the monitors' factors are mixed, else the
+// GSScaleFactor user default, falling back to the screen's backing scale.
 static inline CGFloat ShadeScaleFactor(void)
 {
+    if ([URSThemeIntegration decorationScaleFactor] > 0)
+        return [URSThemeIntegration decorationScaleFactor];
     CGFloat s = [[NSUserDefaults standardUserDefaults] floatForKey:@"GSScaleFactor"];
     if (s <= 0.0)
         s = [[NSScreen mainScreen] backingScaleFactor];
@@ -366,6 +369,17 @@ static const int SPINNER_DIR[8][2] = {
 // centered-title layout so the glyph hugs the text end without the theme
 // needing to know about us.
 - (CGFloat)spinnerTargetX
+{
+    XCBWindow *parent = [self parentWindow];
+    CGFloat factor = [parent isKindOfClass:[XCBFrame class]]
+        ? [(XCBFrame *)parent decorationScaleFactor] : 0;
+    CGFloat previous = [URSThemeIntegration beginDecorationScale:factor];
+    CGFloat x = [self spinnerTargetXAtFrameScale];
+    [URSThemeIntegration endDecorationScale:previous];
+    return x;
+}
+
+- (CGFloat)spinnerTargetXAtFrameScale
 {
     CGFloat scale = ShadeScaleFactor();
     CGFloat tbW = [self windowRect].size.width;
