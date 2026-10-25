@@ -339,6 +339,11 @@ static CGFloat WMLastScaleFactor = 1.0;
                                                  name: GSThemeDidActivateNotification
                                                object: nil];
 
+    /* Windows already on screen are framed for the monitor they are on, so
+     * the monitors' factors must be known before; setupRANDR below reads
+     * them again once it watches for changes. */
+    [[URSOutputScales sharedScales] reloadWithConnection:connection];
+
     // Decorate any existing windows already on screen
     [self decorateExistingWindowsOnStartup];
     [self.compositingManager releasePaintingWhenSettled];
@@ -1728,12 +1733,6 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
         }
         [[URSOutputScales sharedScales] reloadWithConnection:connection];
         [[URSPointerCursor sharedPointerCursor] startWithConnection:connection];
-        /* Windows adopted at startup were framed before the monitors were
-         * known, at the global factor's cursor size. */
-        for (XCBWindow *window in [[connection windowsMap] allValues]) {
-            if ([window isKindOfClass:[XCBFrame class]])
-                [(XCBFrame *)window updateCursorScale];
-        }
     }
 
     self.displayController =
