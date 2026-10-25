@@ -54,31 +54,48 @@ static NSUInteger LargestOverlap(NSRect frame, NSArray *outputs)
     return best;
 }
 
-NSUInteger URSOutputForFrame(NSRect frame, NSArray *outputs,
-                             NSArray *titleHeights, NSUInteger current,
-                             CGFloat currentTitleHeight)
+NSUInteger URSOutputForFrame(NSRect frame, NSArray *outputs, const CGFloat *factors,
+                             NSUInteger current, URSDecoration now, NSSize content)
 {
-    NSUInteger best = current;
-    CGFloat bestLead = 0;
+    NSUInteger count = [outputs count];
+    NSUInteger home = NSNotFound;
+    CGFloat here = 0;
     NSUInteger i;
 
-    if (current >= [outputs count] ||
-        OverlapArea(frame, [[outputs objectAtIndex:current] rectValue]) <= 0)
+    if (current >= count || now.factor <= 0)
         return LargestOverlap(frame, outputs);
 
-    for (i = 0; i < [outputs count]; i++) {
-        if (i == current)
+    for (i = 0; i < count; i++) {
+        if (factors[i] != now.factor)
             continue;
-        /* Judged on the frame as the candidate would decorate it: a switch
-         * that changes the title bar height must still hold afterwards, or
-         * the taller or shorter frame hands the window straight back. */
-        NSRect there = frame;
-        there.size.height += [[titleHeights objectAtIndex:i] doubleValue] - currentTitleHeight;
-        if (there.size.height <= 0)
+        CGFloat area = OverlapArea(frame, [[outputs objectAtIndex:i] rectValue]);
+        if (area > here || (area == here && i == current && area > 0)) {
+            here = area;
+            home = i;
+        }
+    }
+    if (here <= 0)
+        return LargestOverlap(frame, outputs);
+
+    /* libs-gui looks at another factor only once -screen, the screen
+     * holding the largest part of the frame as it is, has changed; that
+     * screen is the one candidate. */
+    NSUInteger largest = LargestOverlap(frame, outputs);
+    NSUInteger best = home;
+    CGFloat bestLead = 0;
+
+    for (i = 0; i < count; i++) {
+        if (i != largest || factors[i] <= 0 || factors[i] == now.factor)
             continue;
-        CGFloat lead = OverlapArea(there, [[outputs objectAtIndex:i] rectValue]) -
-                       OverlapArea(there, [[outputs objectAtIndex:current] rectValue]);
-        CGFloat margin = URSOutputHysteresis * MIN(there.size.width, there.size.height);
+        /* The frame libs-gui gives the window there: its content at that
+         * factor in whole pixels plus the extents it knows now, top-left
+         * corner kept. */
+        NSRect there = NSMakeRect(NSMinX(frame), NSMinY(frame),
+                                  rint(content.width * factors[i]) + 2 * now.border,
+                                  rint(content.height * factors[i]) + now.titleHeight + now.border);
+        CGFloat candidate = OverlapArea(there, [[outputs objectAtIndex:i] rectValue]);
+        CGFloat margin = URSOutputHysteresis * MIN(NSWidth(there), NSHeight(there));
+        CGFloat lead = candidate - here;
         if (lead > margin && lead > bestLead) {
             bestLead = lead;
             best = i;

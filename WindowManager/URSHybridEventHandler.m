@@ -1751,7 +1751,8 @@ static URSSequenceWatch URSWindowManagerSequenceWatch;
             continue;
         XCBRect r = [frame windowRect];
         if ([scales updateFrame:frame forRect:NSMakeRect(r.position.x, r.position.y,
-                                                         r.size.width, r.size.height)])
+                                                         r.size.width, r.size.height)
+                            force:YES])
             [frame decorationScaleChanged];
     }
 }

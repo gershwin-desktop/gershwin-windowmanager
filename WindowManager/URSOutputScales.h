@@ -43,4 +43,9 @@
 // has to follow.
 - (BOOL)updateFrame:(XCBFrame *)frame forRect:(NSRect)rect;
 
+// The same, also when the frame has not moved since it was last decided
+// (map time, a monitor or DPI change); -updateFrame:forRect: decides only
+// after a move.
+- (BOOL)updateFrame:(XCBFrame *)frame forRect:(NSRect)rect force:(BOOL)force;
+
 @end
