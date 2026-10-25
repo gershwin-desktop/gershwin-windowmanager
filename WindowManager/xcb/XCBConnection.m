@@ -2638,7 +2638,7 @@ static XCBConnection *sharedInstance;
         XCBRect placed = [frame windowRect];
         NSRect placedRect = NSMakeRect(placed.position.x, placed.position.y,
                                        placed.size.width, placed.size.height);
-        if ([[URSOutputScales sharedScales] updateFrame:frame forRect:placedRect])
+        if ([[URSOutputScales sharedScales] updateFrame:frame forRect:placedRect force:YES])
             [frame decorationScaleChanged];
     }
 

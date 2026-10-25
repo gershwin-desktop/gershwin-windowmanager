@@ -28,19 +28,31 @@ CGFloat URSScaleFactorForDPI(long dpi);
 // everywhere the global GSScaleFactor stays in force as before.
 BOOL URSOutputScalesAreMixed(NSArray *factors);
 
+// How a frame is decorated at some factor: the title bar height and the
+// client border it gets there.
+typedef struct {
+    CGFloat factor;
+    CGFloat titleHeight;
+    CGFloat border;
+} URSDecoration;
+
 // The index into `outputs` (NSValue rects) of the monitor `frame` belongs
-// to.  `titleHeights` holds the title bar height a frame gets on each
-// output, `current` the output the frame is decorated for now (or
-// NSNotFound) and `currentTitleHeight` the title bar height it has there.
-// Without a current output, or when the frame left it entirely, the output
-// with the largest overlap wins; NSNotFound when it overlaps none.
-// Otherwise another output takes the frame only when, with the frame
-// resized to that output's title bar height (top edge fixed), it holds more
-// than URSOutputHysteresis * min(width, height) pixels more of it than the
-// current one.
-NSUInteger URSOutputForFrame(NSRect frame, NSArray *outputs,
-                             NSArray *titleHeights, NSUInteger current,
-                             CGFloat currentTitleHeight);
+// to.  `factors` holds the factor of each output, `now` how the frame is
+// decorated at present, `current` the output it is decorated for (or
+// NSNotFound) and `content` the client's size in points, as laid out at the
+// factor it last followed.  This is the rule libs-gui applies to the window
+// inside, so that both switch at the same place.  Only the output holding
+// the largest part of the frame as it is (libs-gui's -screen) can take it,
+// and only when it holds more of the frame as libs-gui would make it there
+// - the content at that output's factor in whole pixels plus the present
+// title bar and border (the extents the client knows), top-left corner kept
+// - than the outputs of the present factor hold of the frame now, by
+// URSOutputHysteresis * the shorter side of that frame.  When the frame lies
+// on no output of its present factor, the output with the largest overlap
+// wins; NSNotFound when it overlaps none.  Without a switch the output of
+// the present factor holding most of the frame is answered.
+NSUInteger URSOutputForFrame(NSRect frame, NSArray *outputs, const CGFloat *factors,
+                             NSUInteger current, URSDecoration now, NSSize content);
 
 // _NET_FRAME_EXTENTS of a framed client: left, right, top, bottom.
 typedef struct {

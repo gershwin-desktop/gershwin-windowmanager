@@ -57,6 +57,12 @@ extern NSString *URSWindowTitleContentChangedNotification;
 // 0 while the global GSScaleFactor applies (one factor everywhere).
 @property (nonatomic, assign) CGFloat decorationScaleFactor;
 @property (nonatomic, assign) uint32_t decorationOutput;
+// Bookkeeping of URSOutputScales: the factor the client was last laid out
+// at, its size when the frame switched (until it resizes itself to follow),
+// and where the frame was when its monitor was last decided.
+@property (nonatomic, assign) CGFloat decorationContentFactor;
+@property (nonatomic, assign) NSSize decorationPendingClientSize;
+@property (nonatomic, assign) NSPoint decorationCheckedOrigin;
 // decorationScaleFactor, or the global factor when it is 0.
 - (CGFloat) effectiveScaleFactor;
 // decorationScaleFactor changed: resize the title bar and border to it,

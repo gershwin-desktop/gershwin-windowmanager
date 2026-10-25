@@ -129,15 +129,15 @@ static long ReadDPI(xcb_connection_t *conn, xcb_randr_output_t output, xcb_atom_
            [[GSTheme theme] respondsToSelector:@selector(setDecorationScaleFactor:)];
 }
 
-- (NSArray *)titleHeightsForUtility:(BOOL)utility
+/* The factor of each output as a C array; the caller frees it. */
+- (CGFloat *)factorArray
 {
-    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    NSMutableArray *heights = [NSMutableArray arrayWithCapacity:[_factors count]];
+    NSUInteger count = [_factors count];
+    CGFloat *factors = calloc(count > 0 ? count : 1, sizeof(CGFloat));
 
-    for (NSNumber *factor in _factors)
-        [heights addObject:[NSNumber numberWithUnsignedShort:
-                            [settings heightForUtility:utility scaleFactor:[factor doubleValue]]]];
-    return heights;
+    for (NSUInteger i = 0; i < count; i++)
+        factors[i] = [[_factors objectAtIndex:i] doubleValue];
+    return factors;
 }
 
 - (CGFloat)factorForNewFrameRect:(NSRect)rect utility:(BOOL)utility
@@ -146,8 +146,10 @@ static long ReadDPI(xcb_connection_t *conn, xcb_randr_output_t output, xcb_atom_
     *output = XCB_NONE;
     if (![self mixed])
         return 0;
-    NSUInteger i = URSOutputForFrame(rect, _rects, [self titleHeightsForUtility:utility],
-                                     NSNotFound, 0);
+    CGFloat *factors = [self factorArray];
+    URSDecoration none = { 0, 0, 0 };
+    NSUInteger i = URSOutputForFrame(rect, _rects, factors, NSNotFound, none, NSZeroSize);
+    free(factors);
     if (i == NSNotFound)
         return 0;
     *output = [[_outputIds objectAtIndex:i] unsignedIntValue];
@@ -156,27 +158,63 @@ static long ReadDPI(xcb_connection_t *conn, xcb_randr_output_t output, xcb_atom_
 
 - (BOOL)updateFrame:(XCBFrame *)frame forRect:(NSRect)rect
 {
+    return [self updateFrame:frame forRect:rect force:NO];
+}
+
+- (BOOL)updateFrame:(XCBFrame *)frame forRect:(NSRect)rect force:(BOOL)force
+{
     CGFloat old = [frame decorationScaleFactor];
 
     if (![self mixed]) {
         [frame setDecorationOutput:XCB_NONE];
         [frame setDecorationScaleFactor:0];
+        [frame setDecorationContentFactor:0];
+        [frame setDecorationPendingClientSize:NSZeroSize];
         return old != 0;
     }
 
-    BOOL utility = [[frame childWindowForKey:ClientWindow] isUtilityPanel];
+    /* The client is laid out at the factor it last followed: after a switch
+     * it is still at the old one until it resizes itself. */
+    NSSize client = NSMakeSize(NSWidth(rect) - 2 * [frame clientBorder],
+                               NSHeight(rect) - [frame decorationTitleHeight] - [frame clientBorder]);
+    NSSize pending = [frame decorationPendingClientSize];
+    if ([frame decorationContentFactor] <= 0 ||
+        (!NSEqualSizes(pending, NSZeroSize) && !NSEqualSizes(pending, client))) {
+        [frame setDecorationContentFactor:old];
+        [frame setDecorationPendingClientSize:NSZeroSize];
+    }
+
+    /* Only a move can take a frame to another monitor.  A ConfigureNotify
+     * for a size change alone (the window manager's own title bar change,
+     * the client following it) is left alone, or a window resting where
+     * the rule of libs-gui flips both ways would be re-framed for ever. */
+    if (!force && NSEqualPoints(rect.origin, [frame decorationCheckedOrigin]) && old > 0)
+        return NO;
+    [frame setDecorationCheckedOrigin:rect.origin];
+
     NSUInteger current = [_outputIds indexOfObject:
                           [NSNumber numberWithUnsignedInt:[frame decorationOutput]]];
-    NSUInteger i = URSOutputForFrame(rect, _rects, [self titleHeightsForUtility:utility],
-                                     current, [frame decorationTitleHeight]);
+    URSDecoration now = { old, [frame decorationTitleHeight], [frame clientBorder] };
+    CGFloat contentFactor = [frame decorationContentFactor];
+    NSSize points = contentFactor > 0
+        ? NSMakeSize(client.width / contentFactor, client.height / contentFactor) : client;
+    CGFloat *factors = [self factorArray];
+    NSUInteger i = URSOutputForFrame(rect, _rects, factors, current, now, points);
+    free(factors);
     /* A frame on no monitor keeps the factor it has. */
     if (i == NSNotFound)
         return NO;
 
     CGFloat factor = [[_factors objectAtIndex:i] doubleValue];
     [frame setDecorationOutput:[[_outputIds objectAtIndex:i] unsignedIntValue]];
+    if (factor == old)
+        return NO;
     [frame setDecorationScaleFactor:factor];
-    return factor != old;
+    if (old > 0)
+        [frame setDecorationPendingClientSize:client];
+    else
+        [frame setDecorationContentFactor:factor];
+    return YES;
 }
 
 @end
