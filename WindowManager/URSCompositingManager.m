@@ -15,6 +15,7 @@
 #import "URSShadowSize.h"
 #import "URSImageUpload.h"
 #import "URSShapePath.h"
+#import "URSTransparencyProbe.h"
 #import "URSShadowOverrides.h"
 #import "URSProfiler.h"
 #import "URSHoldLastFrameEffect.h"
@@ -330,6 +331,7 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
 // OPTIMIZATION: MIT-SHM shared memory support for zero-copy transfers
 @property (assign, nonatomic) BOOL shmAvailable;
 @property (assign, nonatomic) xcb_shm_seg_t shmSeg;
+@property (strong, nonatomic) URSTransparencyProbe *transparencyProbe;
 @property (assign, nonatomic) int shmId;
 @property (assign, nonatomic) void *shmAddr;
 @property (assign, nonatomic) size_t shmSize;
@@ -1730,56 +1732,10 @@ static const NSTimeInterval URSStartupHoldLimit = 1.0;
         return 0;
     cw.transparentProbeAttempts++;
 
-    const int T = 4;   // strip thickness
-    const int I = 2;   // sample inset within strip == inset from edge
-    int opaque = 0, total = 0;
-
-    struct { int16_t x, y; uint16_t sw, sh; } strips[4] = {
-        { 0,          0,          w, T },   // top
-        { 0, (int16_t)(h - T),    w, T },   // bottom
-        { 0,          0,          T, h },   // left
-        { (int16_t)(w - T), 0,    T, h },   // right
-    };
-
-    for (int s = 0; s < 4; s++) {
-        xcb_get_image_cookie_t cookie =
-            xcb_get_image(conn, XCB_IMAGE_FORMAT_Z_PIXMAP, cw.windowId,
-                          strips[s].x, strips[s].y, strips[s].sw, strips[s].sh,
-                          (uint32_t)~0);
-        xcb_get_image_reply_t *img = xcb_get_image_reply(conn, cookie, NULL);
-        if (!img || img->depth != 32) {
-            free(img);
-            return -1;
-        }
-        uint32_t *data = (uint32_t *)xcb_get_image_data(img);
-        uint32_t stride = strips[s].sw;
-        uint32_t len = img->length * 4 / 4; /* bytes */
-        (void)len;
-        if (s < 2) {
-            uint32_t row = I;
-            for (uint32_t x = 0; x < strips[s].sw; x += (strips[s].sw > 64 ? strips[s].sw / 64 : 1)) {
-                uint32_t px = data[row * stride + x];
-                total++;
-                if (((px >> 24) & 0xFF) >= 16)
-                    opaque++;
-            }
-        } else {
-            uint32_t col = I;
-            for (uint32_t y = 0; y < strips[s].sh; y += (strips[s].sh > 64 ? strips[s].sh / 64 : 1)) {
-                uint32_t px = data[y * stride + col];
-                total++;
-                if (((px >> 24) & 0xFF) >= 16)
-                    opaque++;
-            }
-        }
-        free(img);
+    if (!self.transparencyProbe) {
+        self.transparencyProbe = [[URSTransparencyProbe alloc] initWithConnection:conn];
     }
-
-    if (total == 0)
-        return -1;
-    // Rounded corners etc. leave a few transparent samples on normal windows,
-    // so require an overwhelming translucent majority to skip the shadow.
-    return (opaque * 100 < total * 12) ? 1 : 0;
+    return [self.transparencyProbe classifyWindow:cw.windowId width:w height:h];
 }
 
 #pragma mark - No-Shadow Window Registration
@@ -6869,6 +6825,9 @@ static double URSShapeCoverage(const uint8_t *shape, int width, int height,
         }
         [self.cwindows removeAllObjects];
         [self.inputOnlyWindows removeAllObjects];
+
+        [self.transparencyProbe invalidate];
+        self.transparencyProbe = nil;
         
         // Free damage regions
         if (self.allDamage != XCB_NONE) {
