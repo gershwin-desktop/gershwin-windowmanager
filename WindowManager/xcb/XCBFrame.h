@@ -18,8 +18,8 @@
 
 // Absolute minimum client area — prevents windows from collapsing to just the titlebar.
 // These are enforced even when the client doesn't set WM_NORMAL_HINTS.
-#define WM_MIN_CLIENT_HEIGHT 100
-#define WM_MIN_CLIENT_WIDTH  100
+#define WM_MIN_CLIENT_HEIGHT 32
+#define WM_MIN_CLIENT_WIDTH  32
 
 typedef NS_ENUM(NSInteger, childrenMask)
 {
@@ -52,6 +52,26 @@ extern NSString *URSWindowTitleContentChangedNotification;
 @property (strong, nonatomic) XCBConnection *connection;
 // clientBorder: pixels inset around the client area (1 = thin border, 0 = flush in compositor mode)
 @property (nonatomic, assign) int clientBorder;
+// The scale factor this frame is decorated at: that of the RandR output
+// (decorationOutput) it belongs to while the monitors' factors are mixed,
+// 0 while the global GSScaleFactor applies (one factor everywhere).
+@property (nonatomic, assign) CGFloat decorationScaleFactor;
+@property (nonatomic, assign) uint32_t decorationOutput;
+// Bookkeeping of URSOutputScales: the factor the client was last laid out
+// at, its size when the frame switched (until it resizes itself to follow),
+// and where the frame was when its monitor was last decided.
+@property (nonatomic, assign) CGFloat decorationContentFactor;
+@property (nonatomic, assign) NSSize decorationPendingClientSize;
+@property (nonatomic, assign) NSPoint decorationCheckedOrigin;
+// decorationScaleFactor, or the global factor when it is 0.
+- (CGFloat) effectiveScaleFactor;
+// decorationScaleFactor changed: resize the title bar and border to it,
+// tell the client, redraw.
+- (void) decorationScaleChanged;
+// Load the frame's cursors at the size its monitor wants now and give them
+// to the frame, its resize zones and grow box (URSOutputScales
+// -cursorSizeForFrame:); nothing happens when the size is the same.
+- (void) updateCursorScale;
 @property (nonatomic, assign) BOOL rightBorderClicked;
 @property (nonatomic, assign) BOOL bottomBorderClicked;
 @property (nonatomic, assign) BOOL leftBorderClicked;
@@ -89,6 +109,9 @@ extern NSString *URSWindowTitleContentChangedNotification;
 - (void) raiseResizeHandle;
 - (void) applyRoundedCornersShapeMask;
 - (void) clearShapeMasks;
+/// The client window's _WM_SHAPE_PATH outline changed (or is looked at for
+/// the first time); the frame follows it.
+- (void) clientShapePathChanged;
 - (void) programmaticResizeToRect:(XCBRect)targetRect;
 
 // WindowShade: roll the window up into its titlebar (double-click or
@@ -105,6 +128,12 @@ extern NSString *URSWindowTitleContentChangedNotification;
 // which holds the pre-maximize geometry: sharing it made shading a maximized
 // window destroy the rect the maximize button restores to.
 @property (nonatomic, assign) uint16_t unshadedHeight;
+// Set by an edge snap and cleared when the user resizes or maximizes the
+// window; the size to go back to is in oldRect.
+@property (nonatomic, assign) BOOL isSnapped;
+// A snapped window being dragged away: give it back the size it had before
+// the snap, keeping the grab point under the pointer.  NO if not snapped.
+- (BOOL) leaveSnapForDragAtPointerX:(int16_t)pointerX;
 // Whether the activity spinner was already running when a hover-peek began.
 // A peek must never start the spinner from cold - it only keeps a spinner
 // that was already spinning (as if the window stayed rolled up).
@@ -148,5 +177,8 @@ extern NSString *URSWindowTitleContentChangedNotification;
 - (void) setChildren:(NSMutableDictionary*) aChildrenSet;
 - (NSMutableDictionary*) getChildren;
 - (void) decorateClientWindow;
+
+// Re-read the frame inset the theme and the compositor ask for.
+- (void) updateClientBorder;
 
 @end

@@ -5,6 +5,8 @@
 //
 
 #import <AppKit/AppKit.h>
+#import "URSBackgroundRender.h"
+#import "URSCommandLine.h"
 #import "URSHybridEventHandler.h"
 #import "UROSWMApplication.h"
 #import "URSThemeIntegration.h"
@@ -12,20 +14,23 @@
 #import "TitleBarSettingsService.h"
 #import "URSProfiler.h"
 #import <signal.h>
+#import <unistd.h>
 #import <string.h>
 
-// Global reference to the event handler for signal handlers
-static URSHybridEventHandler *globalEventHandler = nil;
+// Write end of the pipe the run loop shuts the window manager down from.
+static volatile sig_atomic_t terminationWriteFD = -1;
 
-// Signal handler for clean shutdown
+/* Only a byte down the pipe: the shutdown itself needs the X connection,
+ * whose lock the interrupted code still holds, so doing it here left the
+ * process hanging with the desktop unmanaged.  write() is one of the few
+ * calls a signal handler may make. */
 static void signalHandler(int sig)
 {
-    if (globalEventHandler) {
-        [globalEventHandler cleanupBeforeExit];
+    if (terminationWriteFD >= 0) {
+        char wake = (char)sig;
+        ssize_t written = write(terminationWriteFD, &wake, 1);
+        (void)written;
     }
-    
-    // Terminate the application
-    [NSApp terminate:nil];
 }
 
 // Setup signal handlers for clean termination
@@ -55,6 +60,20 @@ static void setupSignalHandlers(void)
 
 int main(int argc, const char * argv[])
 {
+    // Helper mode, started by the compositor: decode the wallpaper, write the
+    // pixels to standard output and exit, so the decoding never grows the long-lived
+    // window manager process.
+    if (argc == 5 && strcmp(argv[1], [URSRenderBackgroundFlag UTF8String]) == 0) {
+        @autoreleasepool {
+            // Same as below: no application icon window, no user bundles
+            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GSSuppressAppIcon"];
+            [[NSUserDefaults standardUserDefaults] setObject:@[] forKey:@"GSAppKitUserBundles"];
+            return URSRenderBackgroundMain([NSString stringWithUTF8String:argv[2]],
+                                           (NSUInteger)strtoul(argv[3], NULL, 10),
+                                           (NSUInteger)strtoul(argv[4], NULL, 10));
+        }
+    }
+
     @autoreleasepool {
 
         // Suppress the GNUstep application icon window (NSIconWindow) so the
@@ -62,25 +81,22 @@ int main(int argc, const char * argv[])
         // Must be set before any AppKit initialization.
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"GSSuppressAppIcon"];
 
-        // Parse command-line arguments for compositing mode
-        BOOL enableCompositing = YES;
-        for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "-dc") == 0 || strcmp(argv[i], "--disable-compositing") == 0) {
-                enableCompositing = NO;
-                //NSLog(@"[WindowManager] Compositing mode disabled via command-line flag");
-                break;
-            } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-                printf("WindowManager - Objective-C Window Manager\n");
-                printf("Usage: %s [options]\n\n", argv[0]);
-                printf("Options:\n");
-                printf("  -dc, --disable-compositing  Disable XRender compositing\n");
-                printf("  -h, --help          Show this help message\n\n");
-                printf("By default, windows use XRender compositing for transparency effects.\n");
-                printf("Use -dc to force traditional direct rendering mode.\n");
-                return 0;
-            }
+        URSCommandLine *commandLine = [URSCommandLine commandLineWithArguments:argv count:argc];
+        if (commandLine.helpRequested) {
+            printf("WindowManager - Objective-C Window Manager\n");
+            printf("Usage: %s [options]\n\n", argv[0]);
+            printf("Options:\n");
+            printf("  -dc, --disable-compositing  Disable XRender compositing\n");
+            printf("  --replace           Replace the running window manager\n");
+            printf("  -h, --help          Show this help message\n\n");
+            printf("By default, windows use XRender compositing for transparency effects.\n");
+            printf("Use -dc to force traditional direct rendering mode.\n");
+            printf("Without --replace, a running window manager is only replaced after asking\n");
+            printf("(from a terminal the program exits with an error instead).\n");
+            return 0;
         }
-        
+        BOOL enableCompositing = commandLine.compositingEnabled;
+
         // Prevent GNUstep from loading user-defined AppKit bundles (DriveUI, OnDemand)
         // into the WM process - they spin on idle sockets and waste CPU.
         // Must be set before +sharedApplication triggers bundle loading.
@@ -91,6 +107,7 @@ int main(int argc, const char * argv[])
         UROSWMApplication *app = [UROSWMApplication sharedApplication];
         URSHybridEventHandler *hybridHandler = [[URSHybridEventHandler alloc] init];
         hybridHandler.compositingRequested = enableCompositing;
+        hybridHandler.replaceRequested = commandLine.replaceRequested;
 
         // Initialize TitleBar settings - height will be queried from GSTheme below (source: AppearanceMetrics.h)
         TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
@@ -129,10 +146,8 @@ int main(int argc, const char * argv[])
         // Create custom NSApplication and set the prepared hybrid event handler
         [app setDelegate:hybridHandler];
         
-        // Store global reference for signal handlers
-        globalEventHandler = hybridHandler;
-        
-        // Setup signal handlers for clean shutdown
+        // The run loop carries out the shutdown; the handlers only wake it.
+        terminationWriteFD = [hybridHandler installTerminationPipe];
         setupSignalHandlers();
 
         // Install profiling signal handler (SIGUSR1 dumps stats)

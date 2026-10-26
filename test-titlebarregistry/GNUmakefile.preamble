@@ -1,0 +1,5 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+# Built with ARC like the window manager: its ownership is what is tested
+titlebarregistry_OBJC_FILES += ../WindowManager/URSTitlebarRegistry.m
+../WindowManager/URSTitlebarRegistry.m_FILE_FLAGS += -fobjc-arc

@@ -1,0 +1,6 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+# Which window sizes a shadow may be made for is pure logic, built with ARC
+# like the window manager
+shadowsize_OBJC_FILES += ../WindowManager/URSShadowSize.m
+../WindowManager/URSShadowSize.m_FILE_FLAGS += -fobjc-arc

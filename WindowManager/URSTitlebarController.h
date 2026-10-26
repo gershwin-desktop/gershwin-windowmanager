@@ -59,5 +59,8 @@
 
 // Focus-change rendering
 - (void)rerenderTitlebarForFrame:(XCBFrame *)frame active:(BOOL)isActive;
+// Moves and resizes `frame` to `rect` (root coordinates, frame size) with
+// its titlebar drawn for the new width, keeping its maximized state.
+- (void)applyFrameRect:(XCBRect)rect toFrame:(XCBFrame *)frame;
 
 @end

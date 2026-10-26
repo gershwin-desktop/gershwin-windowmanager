@@ -1,0 +1,6 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+# Drawer placement, the slide and the attached mesh are pure geometry, so
+# they are compiled into the tests directly.
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+# The slide asks the sheet layout for its curve.
+drawerslide_OBJC_FILES += ../WindowManager/URSSheetLayout.m

@@ -12,6 +12,7 @@
 #import "XCBCreateWindowTypeRequest.h"
 #import "XCBWindowTypeResponse.h"
 #import "XCBReply.h"
+#import "URSSnapZone.h"
 #include <xcb/xcb.h>
 
 #define FRAMEMASK   XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_BUTTON_PRESS | \
@@ -24,27 +25,33 @@
 #define CLIENTLISTSIZE 1000
 #define WINDOWSMAPUPDATED @"windowsMapUpdated"
 
-// Edge snap detection constants
-#define SNAP_EDGE_THRESHOLD 5    // Pixels from screen edge to trigger snap detection
-#define SNAP_CORNER_THRESHOLD 50 // Pixels from corner to trigger quarter snap
-#define SNAP_LINGER_TIME 300     // Milliseconds to linger before snap activates
-
-// Snap zone types for drag-to-edge window snapping
-typedef NS_ENUM(NSInteger, SnapZone) {
-    SnapZoneNone = 0,
-    SnapZoneTop,         // Maximize window
-    SnapZoneLeft,        // Snap to left half
-    SnapZoneRight,       // Snap to right half
-    SnapZoneTopLeft,     // Snap to top-left quarter
-    SnapZoneTopRight,    // Snap to top-right quarter
-    SnapZoneBottomLeft,  // Snap to bottom-left quarter
-    SnapZoneBottomRight  // Snap to bottom-right quarter
-};
-
 @class XCBWindow;
 @class EWMHService;
 @class XCBAtomService;
 @class XCBRegion;
+@class URSLiveMiniatureController;
+
+// What only the window manager above XCBKit knows about closing a client:
+// whether another window stands in for it, and whether it shows a sheet.
+@protocol XCBCloseRequestRouting <NSObject>
+// YES when the request was dealt with by closing another window shown in
+// the client's place (the terminal on the back of a turned window).
+- (BOOL)closeRequestTakenOverForClient:(XCBWindow *)client;
+// YES when the client shows a sheet, which is the client asking the user.
+- (BOOL)clientShowsSheet:(XCBWindow *)client;
+@end
+
+// Per-monitor areas, provided by the window manager layer above, which
+// knows the lit monitors and the panels' struts.
+@protocol XCBMonitorAreas <NSObject>
+// The usable rect (struts removed) of the monitor `rect` belongs to.
+- (NSRect)usableRectForRect:(NSRect)rect;
+// The whole monitor `rect` belongs to.
+- (NSRect)monitorRectForRect:(NSRect)rect;
+// The RandR primary monitor, whole and with the struts removed.
+- (NSRect)primaryMonitorRect;
+- (NSRect)usableRectOfPrimaryMonitor;
+@end
 
 @interface XCBConnection : NSObject
 {
@@ -67,6 +74,13 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 
 // Cached workarea for drag performance
 @property (nonatomic, assign) BOOL workareaValid;
+@property (nonatomic, weak) id<XCBMonitorAreas> monitorAreas;
+// What maximize fills for a frame at `rect`: its monitor's usable area, or
+// _NET_WORKAREA (else the screen) while no monitor areas are known.
+- (XCBRect)maximizedAreaForRect:(XCBRect)rect;
+// What fullscreen fills for a frame at `rect`: its whole monitor, or the
+// screen while no monitor areas are known.
+- (XCBRect)fullscreenAreaForRect:(XCBRect)rect;
 @property (nonatomic, assign) int32_t cachedWorkareaX;
 @property (nonatomic, assign) int32_t cachedWorkareaY;
 @property (nonatomic, assign) uint32_t cachedWorkareaWidth;
@@ -78,9 +92,12 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 
 // Edge snap detection state
 @property (nonatomic, assign) SnapZone pendingSnapZone;
-@property (nonatomic, assign) xcb_timestamp_t snapZoneEntryTime;
+// Frame being moved by its titlebar while dragState is set
+@property (nonatomic, strong) XCBFrame *draggedFrame;
 @property (nonatomic, assign) BOOL snapPreviewShown;
 @property (nonatomic, assign) BOOL adoptingExistingWindows;
+@property (nonatomic, weak) id<XCBCloseRequestRouting> closeRequestRouter;
+@property (nonatomic, strong) URSLiveMiniatureController *liveMiniatures;
 
 + (XCBConnection *) sharedConnectionAsWindowManager:(BOOL)asWindowManager;
 - (xcb_connection_t *) connection;
@@ -93,6 +110,7 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void) registerWindow:(XCBWindow*) aWindow;
 - (void) unregisterWindow:(XCBWindow *) aWindow;
 - (void) restackDockWindowsAbove;
+- (void) reassertAboveFramesForPid:(uint32_t)pid;
 - (void) lowerNormalWindowBeneathAllPeers:(XCBWindow *)aWindow;
 - (void) lowerNormalWindowAboveDesktop:(XCBWindow *)aWindow;
 - (void) noteClientContentDamage:(xcb_window_t)windowId
@@ -155,6 +173,17 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 /*** DEAL WITH WINDOW STUFFS ***/
 
 - (void) reparentWindow: (XCBWindow*) aWindow toWindow:(XCBWindow*)parentWindow position:(XCBPoint)position;
+- (void) releaseClientWindow:(XCBWindow*)aClient toRootAt:(XCBPoint)position;
+/* Takes a framed client out of its frame onto the root window, where it is
+ * on the screen now, destroys the frame and forgets the client, frame and
+ * titlebar. */
+- (void) unframeClientWindow:(XCBWindow *)aClient root:(XCBWindow *)rootWindow;
+/* The next map request for this window (real or synthesized) frames it as
+ * an ordinary window although its hints ask for none, with its client area
+ * left where it is on the screen (XCBWindow framedAsOrdinary), and closing
+ * it runs closeHandler: a client whose window has no decoration offers no
+ * close of its own. */
+- (void) frameNextMapOfWindow:(xcb_window_t)aWindow asOrdinaryClosedBy:(void (^)(void))closeHandler;
 - (void) mapWindow: (XCBWindow*) aWindow;
 - (void) unmapWindow:(XCBWindow*)aWindow;
 - (void) addDamagedRegion:(XCBRegion*) damagedRegion;
@@ -182,5 +211,18 @@ typedef NS_ENUM(NSInteger, SnapZone) {
 - (void)showSnapPreviewForZone:(SnapZone)zone frame:(XCBFrame *)frame;
 - (void)hideSnapPreview;
 - (void)executeSnapForZone:(SnapZone)zone frame:(XCBFrame *)frame;
+
+/*** STRUTS / WORKAREA ***/
+
+// Clamps a proposed frame position (root coords) so the frame stays inside
+// the cached _NET_WORKAREA - keeps x, only pushes y down when it would sit
+// inside a top strut (menu bar), and keeps at least a sliver on every edge.
+// A no-op when the workarea cache is not valid (no struts known yet).
+- (XCBPoint)clampFramePosition:(XCBPoint)pos size:(XCBSize)size;
+
+// Re-clamps every currently mapped frame against the (just refreshed)
+// workarea - called after _NET_WORKAREA changes, so windows already
+// sitting under a strut (or a strut that grew) get pushed back into view.
+- (void)reclampAllFramesToWorkarea;
 
 @end
