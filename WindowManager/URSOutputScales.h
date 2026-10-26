@@ -56,5 +56,8 @@
 - (uint32_t)cursorSizeForFrame:(XCBFrame *)frame;
 - (uint32_t)cursorSizeAtPoint:(NSPoint)point;
 - (uint32_t)primaryCursorSize;
+// The factor things the window manager draws on the primary monitor are
+// sized at: its own while the monitors are mixed, else the global one.
+- (CGFloat)primaryScaleFactor;
 
 @end

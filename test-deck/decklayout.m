@@ -175,6 +175,24 @@ int main(void)
   /* The index helper of the flow serves the deck unchanged. */
   PASS([URSDeckLayout indexFrom: 0 step: -1 count: 4] == 3, "the choice goes round at the ends");
 
+  /* At rest the deck keeps to the primary's usable area, also with many
+     windows and a primary smaller than the other monitor. */
+  {
+    NSRect usable = NSMakeRect(2560, 22, 1366, 746);
+    BOOL allInside = YES;
+    for (NSUInteger position = 0; position < 40; position++) {
+      for (NSUInteger i = 0; i < 40; i++) {
+        NSSize w = (i % 2) ? NSMakeSize(2500, 1400) : NSMakeSize(500, 1300);
+        NSRect r = [URSDeckLayout slotForWindowSize: w atIndex: i count: 40
+                                           position: (double)position inArea: usable];
+        if (!NSContainsRect(NSInsetRect(usable, -0.5, -0.5), r)) {
+          allInside = NO;
+        }
+      }
+    }
+    PASS(allInside, "the deck at rest stays inside the primary's usable area");
+  }
+
   DESTROY(arp);
   return 0;
 }

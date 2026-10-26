@@ -22,8 +22,9 @@
                    position:(double)position
                      inArea:(NSRect)area;
 
-// The same for a row of count items.  A layout that goes round (the deck)
-// needs the count; this one does not, and ignores it.
+// The same for a row of count items, which stays inside the area at every
+// position: with many items the side windows close up instead of reaching
+// past its edges.  A layout that goes round (the deck) needs the count too.
 + (NSRect)slotForWindowSize:(NSSize)windowSize
                     atIndex:(NSUInteger)index
                       count:(NSUInteger)count

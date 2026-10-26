@@ -35,6 +35,7 @@
 // The usable rect of the monitor `rect` overlaps most, else of the primary.
 - (NSRect)usableRectForRect:(NSRect)rect;
 - (NSRect)usableRectOfPrimaryMonitor;
+- (NSRect)primaryMonitorRect;
 // The whole monitor `rect` overlaps most, else the primary.
 - (NSRect)monitorRectForRect:(NSRect)rect;
 // A normal framed window the WM may move: not fullscreen, not a dock, menu,

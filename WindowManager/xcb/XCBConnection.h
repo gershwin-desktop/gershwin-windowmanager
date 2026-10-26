@@ -48,6 +48,9 @@
 - (NSRect)usableRectForRect:(NSRect)rect;
 // The whole monitor `rect` belongs to.
 - (NSRect)monitorRectForRect:(NSRect)rect;
+// The RandR primary monitor, whole and with the struts removed.
+- (NSRect)primaryMonitorRect;
+- (NSRect)usableRectOfPrimaryMonitor;
 @end
 
 @interface XCBConnection : NSObject

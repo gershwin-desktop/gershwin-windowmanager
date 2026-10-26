@@ -40,5 +40,11 @@
 // same ids in the order to paint them, for a presentation that shows a
 // window in front of others stacked above it.
 - (NSArray *)paintOrderForWindows:(NSArray *)windowIds;
+// The part of the screen the presentation shows itself in (root pixels, y
+// down), for one that belongs on a single monitor.  Inside it the veil and
+// the windows at their paint rects are drawn; outside it nothing changes,
+// so the windows there stay where they are, also while they are shown
+// inside it.  Without it the presentation has the whole screen.
+- (NSRect)presentationArea;
 
 @end

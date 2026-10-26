@@ -1074,8 +1074,14 @@ NSString * const URSWindowSwitcherStyleKey = @"URSWindowSwitcherStyle";
         }
     }
     
-    // Show the overlay centered on screen
-    [self.overlay showCenteredOnScreen];
+    // Like the flow, the panel belongs on the primary monitor.
+    XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
+    NSRect usable = self.connection.monitorAreas
+        ? [self.connection.monitorAreas usableRectOfPrimaryMonitor]
+        : NSMakeRect(0, 0, [screen width], [screen height]);
+    [self.overlay showCenteredInScreenFrame:NSMakeRect(NSMinX(usable),
+                                                       [screen height] - NSMaxY(usable),
+                                                       NSWidth(usable), NSHeight(usable))];
     [self.overlay updateWithTitles:titles icons:icons currentIndex:self.currentIndex];
     self.overlayVisible = YES;
     

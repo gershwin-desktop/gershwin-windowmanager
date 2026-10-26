@@ -304,6 +304,13 @@
     return [[usable objectAtIndex:i] rectValue];
 }
 
+- (NSRect)primaryMonitorRect
+{
+    NSArray *monitors = [self effectiveMonitors];
+    NSUInteger i = self.primaryMonitorIndex < [monitors count] ? self.primaryMonitorIndex : 0;
+    return [[monitors objectAtIndex:i] rectValue];
+}
+
 - (NSRect)usableRectForRect:(NSRect)rect
 {
     return URSMaximizedRect(rect, [self effectiveMonitors], [self usableMonitorRects],

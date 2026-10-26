@@ -227,6 +227,58 @@ int main(void)
          "the chosen window leaves room for its title below");
   }
 
+  /* The switcher keeps to the primary monitor: a small primary next to a
+     larger monitor, with many windows, at every position of the row. */
+  {
+    NSRect other = NSMakeRect(0, 0, 2560, 1440);
+    NSRect primary = NSMakeRect(2560, 0, 1366, 768);
+    NSRect usable = NSMakeRect(2560, 22, 1366, 746);
+    NSUInteger counts[] = { 3, 5, 8, 30, 100 };
+    BOOL allInside = YES;
+    BOOL noneOnOther = YES;
+    for (NSUInteger c = 0; c < sizeof(counts) / sizeof(counts[0]); c++) {
+      NSUInteger n = counts[c];
+      for (double position = 0; position <= (double)(n - 1); position += 0.25) {
+        for (NSUInteger i = 0; i < n; i++) {
+          /* Windows as large as the other monitor, wide and tall ones. */
+          NSSize w = (i % 3 == 0) ? NSMakeSize(2500, 1400)
+            : (i % 3 == 1) ? NSMakeSize(1900, 400) : NSMakeSize(500, 1300);
+          NSRect r = [URSFlowLayout slotForWindowSize: w atIndex: i count: n
+                                              position: position inArea: usable];
+          if (!inside(r, usable)) {
+            allInside = NO;
+          }
+          if (NSIntersectsRect(NSInsetRect(r, 0.5, 0.5), other)) {
+            noneOnOther = NO;
+          }
+        }
+      }
+    }
+    PASS(allInside, "with many windows the row stays inside the primary's usable area");
+    PASS(noneOnOther, "no window of the row reaches onto the other monitor");
+    PASS(NSContainsRect(primary, usable), "the usable area is part of the primary");
+
+    /* Few windows keep the spacing they always had. */
+    NSRect few = [URSFlowLayout slotForWindowSize: NSMakeSize(640, 480) atIndex: 3 count: 4
+                                         position: 0 inArea: usable];
+    NSRect free = [URSFlowLayout slotForWindowSize: NSMakeSize(640, 480) atIndex: 3
+                                          position: 0 inArea: usable];
+    PASS(rectDistance(few, free) < 0.5, "a row that fits keeps its spacing");
+
+    /* Many windows close up but stay in row order. */
+    BOOL ordered = YES;
+    for (NSUInteger i = 1; i < 30; i++) {
+      NSRect a = [URSFlowLayout slotForWindowSize: NSMakeSize(640, 480) atIndex: i - 1
+                                            count: 30 position: 0 inArea: usable];
+      NSRect b = [URSFlowLayout slotForWindowSize: NSMakeSize(640, 480) atIndex: i
+                                            count: 30 position: 0 inArea: usable];
+      if (!(NSMidX(a) < NSMidX(b))) {
+        ordered = NO;
+      }
+    }
+    PASS(ordered, "a closed up row still runs left to right in list order");
+  }
+
   /* Next and previous go round. */
   PASS([URSFlowLayout indexFrom: 4 step: 1 count: 5] == 0, "next after the last is the first");
   PASS([URSFlowLayout indexFrom: 0 step: -1 count: 5] == 4, "previous before the first is the last");

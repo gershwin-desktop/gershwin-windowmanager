@@ -4487,18 +4487,73 @@ static const double URSProjectiveEdgeMargin = 0.25;
     [self startAnimationTimerIfNeeded];
 }
 
+// A new region: the part of `region` inside the presentation's area, or the
+// part outside it; XCB_NONE when the presentation has the whole screen.
+- (xcb_xfixes_region_t)newRegion:(xcb_xfixes_region_t)region
+          inPresentationArea:(BOOL)inside {
+    if (region == XCB_NONE ||
+        ![self.presentation respondsToSelector:@selector(presentationArea)]) {
+        return XCB_NONE;
+    }
+    NSRect area = NSIntersectionRect([self.presentation presentationArea],
+                                     NSMakeRect(0, 0, self.screenWidth, self.screenHeight));
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_rectangle_t areaRect = { (int16_t)NSMinX(area), (int16_t)NSMinY(area),
+                                 (uint16_t)NSWidth(area), (uint16_t)NSHeight(area) };
+    xcb_xfixes_region_t areaRegion = xcb_generate_id(conn);
+    xcb_xfixes_create_region(conn, areaRegion, NSIsEmptyRect(area) ? 0 : 1, &areaRect);
+    xcb_xfixes_region_t result = xcb_generate_id(conn);
+    xcb_xfixes_create_region(conn, result, 0, NULL);
+    if (inside) {
+        xcb_xfixes_intersect_region(conn, region, areaRegion, result);
+    } else {
+        xcb_xfixes_subtract_region(conn, region, areaRegion, result);
+    }
+    xcb_xfixes_destroy_region(conn, areaRegion);
+    return result;
+}
+
 - (void)paintPresentationVeilInRegion:(xcb_xfixes_region_t)region {
     double dimming = [self.presentation backdropDimming];
     if (dimming <= 0.0) {
         return;
     }
     xcb_connection_t *conn = [self.connection connection];
+    xcb_xfixes_region_t inArea = [self newRegion:region inPresentationArea:YES];
     xcb_render_picture_t veil = [self createSolidPicture:0.0 g:0.0 b:0.0 a:dimming];
-    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, region, 0, 0);
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer,
+                                       inArea != XCB_NONE ? inArea : region, 0, 0);
     xcb_render_composite(conn, XCB_RENDER_PICT_OP_OVER, veil, XCB_NONE,
                          self.rootBuffer, 0, 0, 0, 0, 0, 0,
                          self.screenWidth, self.screenHeight);
     xcb_render_free_picture(conn, veil);
+    if (inArea != XCB_NONE) {
+        xcb_xfixes_destroy_region(conn, inArea);
+    }
+}
+
+// Where a presentation keeps to its area, the window still shows at its own
+// place outside it, in its own place of the stack.
+- (void)paintPresentedWindowInPlace:(URSCompositeWindow *)cw
+                          freshRegion:(xcb_xfixes_region_t)freshRegion {
+    NSRect presentedRect;
+    if (self.presentation == nil || !cw.viewable ||
+        ![self.presentation getPaintRect:&presentedRect
+                               forWindow:cw.windowId
+                              windowRect:NSMakeRect(cw.x, cw.y,
+                                                    (double)cw.width + 2.0 * cw.borderWidth,
+                                                    (double)cw.height + 2.0 * cw.borderWidth)]) {
+        return;
+    }
+    xcb_xfixes_region_t outside = [self newRegion:freshRegion inPresentationArea:NO];
+    if (outside == XCB_NONE) {
+        return;
+    }
+    xcb_connection_t *conn = [self.connection connection];
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, outside, 0, 0);
+    [self paintWindow:cw atX:cw.x atY:cw.y withClipRegion:outside presentedRect:NULL];
+    xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, freshRegion, 0, 0);
+    xcb_xfixes_destroy_region(conn, outside);
 }
 
 - (void)finishAnimationForWindow:(URSCompositeWindow *)cw {
@@ -4775,6 +4830,14 @@ static const double URSProjectiveEdgeMargin = 0.25;
     if (!self.presentation) {
         return 1.0;
     }
+    // Outside its area a presentation leaves the windows as they are.
+    if ([self.presentation respondsToSelector:@selector(presentationArea)] &&
+        !NSIntersectsRect([self.presentation presentationArea],
+                          NSMakeRect(cw.x, cw.y,
+                                     (double)cw.width + 2.0 * cw.borderWidth,
+                                     (double)cw.height + 2.0 * cw.borderWidth))) {
+        return 1.0;
+    }
     // A live miniature is part of its Dock on the screen, so it fades with
     // the Dock (Alt-Tab, the overview), not as the minimized window it is.
     xcb_window_t shownAs = cw.liveMiniature ? cw.miniatureDock : cw.windowId;
@@ -4943,6 +5006,8 @@ static const double URSProjectiveEdgeMargin = 0.25;
         }
         [paintList addObject:cw];
     }
+    // The windows' own stacking, for those a presentation also shows in place.
+    NSArray<URSCompositeWindow *> *stackedList = [paintList copy];
     if ([self.presentation respondsToSelector:@selector(paintOrderForWindows:)]) {
         paintList = [self paintListInPresentationOrder:paintList];
     }
@@ -4969,7 +5034,16 @@ static const double URSProjectiveEdgeMargin = 0.25;
     // top of the next pass through the loop, since the Dock's own pass may
     // end early with nothing to repaint.
     NSArray<URSCompositeWindow *> *miniaturesDue = nil;
+    NSUInteger stackIndex = 0;
     for (URSCompositeWindow *cw in paintList) {
+        // The presentation order only swaps the presented windows among their
+        // places, so at each place the stacking's own window is the one to
+        // show in place, under whatever is painted there now.
+        if (self.presentation != nil && stackIndex < [stackedList count]) {
+            [self paintPresentedWindowInPlace:[stackedList objectAtIndex:stackIndex]
+                                  freshRegion:freshRegion];
+        }
+        stackIndex++;
         if (miniaturesDue) {
             [self paintLiveMiniatures:miniaturesDue clip:freshRegion paintedBBox:paintedBBox];
             miniaturesDue = nil;
@@ -5120,7 +5194,8 @@ static const double URSProjectiveEdgeMargin = 0.25;
             if (!URSRectIntersects(animBBox, paintedBBox)) {
                 continue;
             }
-            xcb_xfixes_region_t effectClip = presented ? XCB_NONE
+            xcb_xfixes_region_t effectClip = presented
+                ? [self newRegion:freshRegion inPresentationArea:YES]
                 : [self newEffectClipForWindow:cw within:freshRegion];
             xcb_xfixes_region_t clip = effectClip != XCB_NONE ? effectClip : freshRegion;
             xcb_xfixes_set_picture_clip_region(conn, self.rootBuffer, clip, 0, 0);

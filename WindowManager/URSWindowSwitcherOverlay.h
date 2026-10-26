@@ -15,7 +15,9 @@
 + (instancetype)sharedOverlay;
 
 // Display management
-- (void)showCenteredOnScreen;
+// screenFrame: the usable part of the primary monitor, in the device pixels
+// and y-up coordinates window frames use; the panel stays inside it.
+- (void)showCenteredInScreenFrame:(NSRect)screenFrame;
 - (void)hide;
 
 // Update display with current titles, icons, and selection

@@ -169,6 +169,11 @@ static const CGFloat kSelectionPadding = 6.0;
 #pragma mark - URSWindowSwitcherOverlay
 
 @implementation URSWindowSwitcherOverlay
+{
+    // Where the panel belongs: the usable part of the primary monitor, in the
+    // device pixels and y-up coordinates window frames use.
+    NSRect _screenFrame;
+}
 
 + (instancetype)sharedOverlay {
     static URSWindowSwitcherOverlay *sharedOverlay = nil;
@@ -219,15 +224,7 @@ static const CGFloat kSelectionPadding = 6.0;
 // the next one would let the offset accumulate and walk the panel across the
 // screen.
 - (NSRect)frameForSize:(NSSize)size {
-    NSScreen *mainScreen = [NSScreen mainScreen];
-    if (!mainScreen) {
-        mainScreen = [[NSScreen screens] firstObject];
-    }
-    if (!mainScreen) {
-        return NSMakeRect(0, 0, size.width, size.height);
-    }
-
-    NSRect screenFrame = [mainScreen frame];
+    NSRect screenFrame = _screenFrame;
 
     // Center horizontally
     CGFloat x = screenFrame.origin.x + (screenFrame.size.width - size.width) / 2;
@@ -240,7 +237,8 @@ static const CGFloat kSelectionPadding = 6.0;
     return NSMakeRect(x, goldenRatioY, size.width, size.height);
 }
 
-- (void)showCenteredOnScreen {
+- (void)showCenteredInScreenFrame:(NSRect)screenFrame {
+    _screenFrame = screenFrame;
     [self setFrame:[self frameForSize:[self frame].size] display:NO];
     
     // Force the window to the absolute front, above all other windows
@@ -276,12 +274,7 @@ static const CGFloat kSelectionPadding = 6.0;
     
     // Limit to reasonable max width.  The screen frame is in device pixels, so
     // it has to be brought back to points before it can bound this layout.
-    NSScreen *screen = [NSScreen mainScreen] ?: [[NSScreen screens] firstObject];
-    CGFloat maxWidth = 800;
-    if (screen) {
-        CGFloat screenWidthInPoints = [screen frame].size.width / scale;
-        maxWidth = MIN(maxWidth, screenWidthInPoints - 2 * kPadding);
-    }
+    CGFloat maxWidth = MIN(800, NSWidth(_screenFrame) / scale - 2 * kPadding);
     if (windowWidth > maxWidth) {
         windowWidth = maxWidth;
     }

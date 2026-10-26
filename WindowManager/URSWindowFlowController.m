@@ -12,6 +12,7 @@
 #import "URSScreenWindow.h"
 #import "URSCompositingManager.h"
 #import "URSWindowSwitcher.h"
+#import "URSOutputScales.h"
 #import "XCBConnection.h"
 #import "XCBScreen.h"
 #import "XCBFrame.h"
@@ -22,7 +23,7 @@ static const NSTimeInterval URSFlowSlideDuration = 0.25;
 // The deck's step is the one of the reference animation.
 static const NSTimeInterval URSDeckSlideDuration = 0.55;
 static const double URSFlowBackdropDimming = 0.6;
-// The room the title label needs under the bottom edge of a slot.
+// The room the title label needs under the bottom edge of a slot, in points.
 static const CGFloat URSFlowTitleBottomMargin = 24.0;
 
 @interface URSFlowItem : URSScreenWindow
@@ -77,7 +78,24 @@ static const CGFloat URSFlowTitleBottomMargin = 24.0;
     self.slide.compositingManager = compositingManager;
 }
 
+// The switcher belongs on the primary monitor, where the Menu bar and new
+// windows are: its row fits the usable part of it, so it never reaches onto
+// another monitor, and the windows of the other monitors come into the row
+// while they stay where they are.  Without known monitors the screen is one.
 - (NSRect)screenArea {
+    id<XCBMonitorAreas> areas = self.connection.monitorAreas;
+    if (areas) {
+        return [areas usableRectOfPrimaryMonitor];
+    }
+    XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
+    return NSMakeRect(0, 0, [screen width], [screen height]);
+}
+
+- (NSRect)presentationArea {
+    id<XCBMonitorAreas> areas = self.connection.monitorAreas;
+    if (areas) {
+        return [areas primaryMonitorRect];
+    }
     XCBScreen *screen = [[self.connection screens] objectAtIndex:0];
     return NSMakeRect(0, 0, [screen width], [screen height]);
 }
@@ -198,7 +216,8 @@ static const CGFloat URSFlowTitleBottomMargin = 24.0;
     // taken up to where the whole label shows.
     NSRect area = [self screenArea];
     slot = NSIntersectionRect(slot, area);
-    CGFloat lowest = NSMaxY(area) - URSFlowTitleBottomMargin;
+    CGFloat lowest = NSMaxY(area) -
+        URSFlowTitleBottomMargin * [[URSOutputScales sharedScales] primaryScaleFactor];
     if (NSMaxY(slot) > lowest) {
         slot.size.height = MAX(0.0, lowest - NSMinY(slot));
     }
@@ -248,7 +267,8 @@ static const CGFloat URSFlowTitleBottomMargin = 24.0;
 }
 
 - (double)opacityForWindow:(xcb_window_t)windowId {
-    // The Menu bar, the Dock and palettes give the row the whole screen.
+    // The Menu bar, the Dock and palettes of the primary monitor make way for
+    // the row (the compositor leaves those of the other monitors alone).
     return [self.fadedWindows containsObject:@(windowId)] ? 1.0 - [self.transition progress] : 1.0;
 }
 

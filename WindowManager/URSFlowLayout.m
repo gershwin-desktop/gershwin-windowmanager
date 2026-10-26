@@ -42,12 +42,30 @@ static const double URSFlowSideAngle = 60.0;
 static const double URSFlowCenterSpacing = 1.12;
 static const double URSFlowCoverSpacing = 0.40;
 
-@implementation URSFlowLayout
+// The scale of a window one item or more away from the middle, as a share of
+// the scale of the chosen one.
+static double URSFlowSideScale(double distance) {
+    double depthScale = URSFlowCameraDistance /
+        (URSFlowCameraDistance + URSFlowSideDepth * distance);
+    return depthScale * cos(URSFlowSideAngle * distance * M_PI / 180.0);
+}
 
-+ (NSRect)slotForWindowSize:(NSSize)windowSize
-                    atIndex:(NSUInteger)index
-                   position:(double)position
-                     inArea:(NSRect)area {
+// The cover spacing for a row of count items: the default, or less when the
+// row would otherwise reach past the area.  The row has to stay inside its
+// area at every position, and the farthest a window can be from the middle
+// is count - 1 items, with the selection at one end.  A side window is at
+// most URSFlowSideScale(1) half boxes wide, and the area is
+// 1 / URSFlowCoverWidth half boxes from its middle to either edge.
+static double URSFlowCoverSpacingForCount(NSUInteger count) {
+    if (count < 3) {
+        return URSFlowCoverSpacing;
+    }
+    double reach = 1.0 / URSFlowCoverWidth - URSFlowSideScale(1.0) - URSFlowCenterSpacing;
+    return MIN(URSFlowCoverSpacing, MAX(0.0, reach) / (double)(count - 2));
+}
+
+static NSRect URSFlowSlot(NSSize windowSize, NSUInteger index, double position,
+                          NSRect area, double coverSpacing) {
     double boxWidth = NSWidth(area) * URSFlowCoverWidth;
     double boxHeight = NSHeight(area) * URSFlowCoverHeight;
     double halfBox = boxWidth * 0.5;
@@ -63,12 +81,8 @@ static const double URSFlowCoverSpacing = 0.40;
     double side = offset < 0 ? -1.0 : 1.0;
     double across = fabs(offset) < 1.0
         ? URSFlowCenterSpacing * offset
-        : side * (URSFlowCenterSpacing + URSFlowCoverSpacing * (fabs(offset) - 1.0));
-    double depthScale = URSFlowCameraDistance /
-        (URSFlowCameraDistance + URSFlowSideDepth * distance);
-    double turn = cos(URSFlowSideAngle * distance * M_PI / 180.0);
-
-    double scale = fit * depthScale * turn;
+        : side * (URSFlowCenterSpacing + coverSpacing * (fabs(offset) - 1.0));
+    double scale = fit * URSFlowSideScale(distance);
     double width = windowSize.width * scale;
     double height = windowSize.height * scale;
     double midX = NSMidX(area) + across * halfBox;
@@ -76,12 +90,21 @@ static const double URSFlowCoverSpacing = 0.40;
     return NSMakeRect(midX - width * 0.5, midY - height * 0.5, width, height);
 }
 
+@implementation URSFlowLayout
+
++ (NSRect)slotForWindowSize:(NSSize)windowSize
+                    atIndex:(NSUInteger)index
+                   position:(double)position
+                     inArea:(NSRect)area {
+    return URSFlowSlot(windowSize, index, position, area, URSFlowCoverSpacing);
+}
+
 + (NSRect)slotForWindowSize:(NSSize)windowSize
                     atIndex:(NSUInteger)index
                       count:(NSUInteger)count
                    position:(double)position
                      inArea:(NSRect)area {
-    return [self slotForWindowSize:windowSize atIndex:index position:position inArea:area];
+    return URSFlowSlot(windowSize, index, position, area, URSFlowCoverSpacingForCount(count));
 }
 
 + (NSArray *)slotsForWindowSizes:(NSArray *)windowSizes

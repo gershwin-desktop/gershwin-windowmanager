@@ -251,6 +251,16 @@ static long ReadDPI(xcb_connection_t *conn, xcb_randr_output_t output, xcb_atom_
                                                r.position.y + r.size.height / 2)];
 }
 
+- (CGFloat)primaryScaleFactor
+{
+    CGFloat global = [[TitleBarSettingsService sharedInstance] scaleFactor];
+
+    if ([_rects count] == 0)
+        return global > 0 ? global : 1.0;
+    NSRect primary = [[_rects objectAtIndex:_primaryIndex] rectValue];
+    return URSCursorFactorAtPoint(primary.origin, _rects, _factors, global);
+}
+
 - (uint32_t)primaryCursorSize
 {
     CGFloat global = [[TitleBarSettingsService sharedInstance] scaleFactor];
@@ -258,9 +268,7 @@ static long ReadDPI(xcb_connection_t *conn, xcb_randr_output_t output, xcb_atom_
 
     if ([_rects count] == 0)
         return URSCursorPixelSize(global, allOne);
-    NSRect primary = [[_rects objectAtIndex:_primaryIndex] rectValue];
-    return URSCursorPixelSize(URSCursorFactorAtPoint(primary.origin, _rects, _factors, global),
-                              allOne);
+    return URSCursorPixelSize([self primaryScaleFactor], allOne);
 }
 
 @end
