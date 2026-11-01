@@ -54,6 +54,27 @@
                                     active:(BOOL)active;
 @end
 
+// Implemented by themes whose bottom corners are not a plain miter: a color for
+// the pixel x from the side and y from the bottom edge, nil to leave it alone.
+@interface GSTheme (URSThemeWindowFrameCorner)
+- (NSColor *)windowFrameBorderCornerColorAtX:(NSInteger)x
+                                           y:(NSInteger)y
+                                        edge:(NSInteger)edge
+                                      active:(BOOL)active;
+@end
+
+// The frame is an ARGB window when the compositor is running, so the border has
+// to be painted opaque or it composites away.
+static uint32_t URSOpaqueBorderPixel(NSColor *themeColor)
+{
+    NSColor *color = [themeColor colorUsingColorSpaceName:NSDeviceRGBColorSpace];
+
+    return 0xFF000000u
+         | ((uint32_t)([color redComponent] * 255.0) << 16)
+         | ((uint32_t)([color greenComponent] * 255.0) << 8)
+         | (uint32_t)([color blueComponent] * 255.0);
+}
+
 // What the border of one frame needs between paints: the state it was last
 // painted with, so an expose can repeat it without asking who has focus, and
 // the graphics context it is painted through, which belongs to the frame
@@ -435,34 +456,55 @@ static xcb_window_t primaryActiveFrameId = XCB_NONE;
     }
     for (depth = 0; depth < (NSInteger)border; depth++) {
         for (edge = 0; edge <= 2; edge++) {
-            NSColor *color = [[theme windowFrameBorderColorAtDepth:depth
-                                                              edge:edge
-                                                            active:active]
-                               colorUsingColorSpaceName:NSDeviceRGBColorSpace];
-            // The frame is an ARGB window when the compositor is running, so
-            // the border has to be painted opaque or it composites away.
-            uint32_t pixel = 0xFF000000u
-                           | ((uint32_t)([color redComponent] * 255.0) << 16)
-                           | ((uint32_t)([color greenComponent] * 255.0) << 8)
-                           | (uint32_t)([color blueComponent] * 255.0);
+            uint32_t pixel = URSOpaqueBorderPixel([theme windowFrameBorderColorAtDepth:depth
+                                                                                  edge:edge
+                                                                                active:active]);
             xcb_rectangle_t rect;
 
             xcb_change_gc(conn, gc, XCB_GC_FOREGROUND, &pixel);
+            // Each line stops where the next one in begins: drawn across the
+            // whole frame, an inner line would cut through the outer ones and
+            // leave a cross in both bottom corners.
             switch (edge) {
                 case 0:   // left
                     rect = (xcb_rectangle_t){(int16_t)depth, (int16_t)top,
-                                             1, (uint16_t)(height - top)};
+                                             1, (uint16_t)(height - top - depth)};
                     break;
                 case 1:   // right
                     rect = (xcb_rectangle_t){(int16_t)(width - 1 - depth), (int16_t)top,
-                                             1, (uint16_t)(height - top)};
+                                             1, (uint16_t)(height - top - depth)};
                     break;
                 default:  // bottom
-                    rect = (xcb_rectangle_t){0, (int16_t)(height - 1 - depth),
-                                             width, 1};
+                    rect = (xcb_rectangle_t){(int16_t)depth, (int16_t)(height - 1 - depth),
+                                             (uint16_t)(width - 2 * depth), 1};
                     break;
             }
             xcb_poly_fill_rectangle(conn, [frame window], gc, 1, &rect);
+        }
+    }
+    if ([theme respondsToSelector:@selector(windowFrameBorderCornerColorAtX:y:edge:active:)]) {
+        NSInteger y;
+
+        for (edge = 0; edge <= 1; edge++) {
+            for (y = 0; y < (NSInteger)border; y++) {
+                for (depth = 0; depth < (NSInteger)border; depth++) {
+                    NSColor *color = [theme windowFrameBorderCornerColorAtX:depth
+                                                                          y:y
+                                                                       edge:edge
+                                                                     active:active];
+                    uint32_t pixel;
+                    xcb_rectangle_t rect;
+
+                    if (color == nil) {
+                        continue;
+                    }
+                    pixel = URSOpaqueBorderPixel(color);
+                    rect = (xcb_rectangle_t){(int16_t)(edge == 0 ? depth : width - 1 - depth),
+                                             (int16_t)(height - 1 - y), 1, 1};
+                    xcb_change_gc(conn, gc, XCB_GC_FOREGROUND, &pixel);
+                    xcb_poly_fill_rectangle(conn, [frame window], gc, 1, &rect);
+                }
+            }
         }
     }
     xcb_flush(conn);

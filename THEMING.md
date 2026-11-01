@@ -166,6 +166,21 @@ it:
 - `edge` is `0` left, `1` right, `2` bottom.
 - `active` is the focus state of the window.
 
+Each line stops where the next one in begins, so the lines of two edges meet on
+the diagonal of a bottom corner. A theme whose corner is not a plain miter also
+answers:
+
+```objc
+- (NSColor *)windowFrameBorderCornerColorAtX:(NSInteger)x
+                                           y:(NSInteger)y
+                                        edge:(NSInteger)edge
+                                      active:(BOOL)active;
+```
+
+`x` counts from the side and `y` from the bottom edge, `edge` is `0` for the
+bottom left corner and `1` for the bottom right one, and `nil` leaves the pixel
+as the lines painted it.
+
 The window manager paints the border whenever it renders the titlebar, and
 repaints it with the state it last used when X clears the frame (an expose, a
 resize). The graphics context and that state are kept per frame and let go of
