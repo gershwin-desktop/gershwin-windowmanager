@@ -63,6 +63,7 @@ $(APP_NAME)_OBJC_FILES = \
 		URSWobblyWindowsController.m \
 		URSRenderingContext.m \
 		URSWindowSwitcher.m \
+		URSWorkspaceIsolation.m \
 		URSWindowSwitcherOverlay.m \
 		URSFlowLayout.m \
 		URSDeckLayout.m \
@@ -129,6 +130,7 @@ $(APP_NAME)_HEADER_FILES = \
 		URSCompositingManager.h \
 		URSRenderingContext.h \
 		URSWindowSwitcher.h \
+		URSWorkspaceIsolation.h \
 		URSWindowSwitcherOverlay.h \
 		URSSnapPreviewOverlay.h \
 		URSSnapPreviewFrame.h \

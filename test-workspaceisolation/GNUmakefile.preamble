@@ -1,0 +1,5 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+workspaceisolation_OBJC_FILES += ../WindowManager/URSWorkspaceIsolation.m
+../WindowManager/URSWorkspaceIsolation.m_FILE_FLAGS += -fobjc-arc
+workspaceisolation_TOOL_LIBS += -lgnustep-gui

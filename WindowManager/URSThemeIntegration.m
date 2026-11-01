@@ -2219,7 +2219,6 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     URSThemeIntegration *integration = [URSThemeIntegration sharedInstance];
     XCBFrame *focusedFrame = nil;
     XCBConnection *connection = nil;
-    NSSet *activeIds = nil;
 
     if (!integration.enabled) {
         return;
@@ -2246,24 +2245,28 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
     if (connection == nil) {
         return;
     }
-    activeIds = [self activeFrameIdsForFocusedFrame:focusedFrame
-                                          connection:connection];
 
-    for (XCBTitleBar *titlebar in [integration.managedTitlebars titlebars]) {
-        XCBFrame *frame = (XCBFrame *)[titlebar parentWindow];
-        BOOL isActive = [activeIds containsObject:
-                         [NSNumber numberWithUnsignedInt:[frame window]]];
-
-        [self renderGSThemeTitlebar:titlebar
-                              title:titlebar.windowTitle
-                             active:isActive];
-    }
+    // A refresh has to reach the screen the way a focus change does: a title
+    // bar shows pixmap or dPixmap by its isAbove, so rendering into pixmap alone
+    // left the frames that were not above with the chrome of the last theme or
+    // the wrong active state.
+    [self showTitlebarsWithActiveFrame:focusedFrame
+                            connection:connection
+                         redrawUnchanged:YES];
 
     //NSLog(@"Refreshed %lu titlebars with GSTheme decorations", (unsigned long)[integration.managedTitlebars count]);
 }
 
 + (void)showTitlebarsWithActiveFrame:(XCBFrame *)activeFrame
                           connection:(XCBConnection *)connection {
+    [self showTitlebarsWithActiveFrame:activeFrame
+                            connection:connection
+                         redrawUnchanged:NO];
+}
+
++ (void)showTitlebarsWithActiveFrame:(XCBFrame *)activeFrame
+                          connection:(XCBConnection *)connection
+                     redrawUnchanged:(BOOL)redrawUnchanged {
     NSDictionary *allWindows = [connection windowsMap];
     NSMutableArray *redrawn = [NSMutableArray array];
     // Focus moved to activeFrame; which frames that leaves active also depends
@@ -2290,7 +2293,7 @@ typedef NS_ENUM(NSInteger, TitleBarButtonPosition) {
         // however many windows are open.
         NSNumber *drawn = [drawnActiveStates objectForKey:
                               [NSNumber numberWithUnsignedInt:[frame window]]];
-        if (drawn != nil && [drawn boolValue] == active) {
+        if (!redrawUnchanged && drawn != nil && [drawn boolValue] == active) {
             continue;
         }
         [self renderGSThemeToWindow:frame

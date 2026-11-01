@@ -68,6 +68,8 @@ extern NSString *URSWindowTitleContentChangedNotification;
 // decorationScaleFactor changed: resize the title bar and border to it,
 // tell the client, redraw.
 - (void) decorationScaleChanged;
+// The client was re-framed: tell it, and fit what hangs on the frame's size.
+- (void) decorationGeometryChanged;
 // Load the frame's cursors at the size its monitor wants now and give them
 // to the frame, its resize zones and grow box (URSOutputScales
 // -cursorSizeForFrame:); nothing happens when the size is the same.

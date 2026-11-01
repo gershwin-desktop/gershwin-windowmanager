@@ -54,6 +54,8 @@
 #import "ICCCMService.h"
 #import "XCBFrame.h"
 #import "URSThemeIntegration.h"
+#import "URSWorkspaceIsolation.h"
+#import <GNUstepGUI/GSServicesManager.h>
 #import "GSThemeTitleBar.h"
 #import "URSWindowSwitcher.h"
 #import "URSWindowFlowController.h"
@@ -181,6 +183,17 @@ static CGFloat WMLastScaleFactor = 1.0;
    * one that can turns them on. */
   [self updateFramesForOutputScales];
 
+  /* Only a frame whose factor changed went through the whole of it above; all
+   * the others changed size just the same, and the clients place themselves
+   * by the extents. */
+  for (XCBWindow *win in [[self.connection windowsMap] allValues])
+    {
+      if ([win isKindOfClass: [XCBFrame class]])
+        {
+          [(XCBFrame *)win decorationGeometryChanged];
+        }
+    }
+
   /* Re-render all titlebars with the new metrics. */
   xcb_window_t focusedId = self.focusManager.lastFocusedWindowId;
   [URSThemeIntegration refreshAllTitlebarsWithFocusedWindow:focusedId];
@@ -292,6 +305,10 @@ static CGFloat WMLastScaleFactor = 1.0;
 {
     // Mark NSRunLoop as active
     self.nsRunLoopActive = YES;
+
+    // The services port exists from here on, and nothing in the event handler
+    // may ever block on the desktop.
+    URSStopContactingWorkspaceApplication([[GSServicesManager manager] port]);
 
     // React live to GSScaleFactor changes like Menu.app does.
     [self startScaleFactorMonitoring];

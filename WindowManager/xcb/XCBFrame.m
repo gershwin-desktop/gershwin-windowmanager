@@ -308,13 +308,22 @@ static xcb_visualid_t findARGBVisual(xcb_screen_t *screen, xcb_visualtype_t **ou
      * and has to be told where it is now, and libs-back re-reads the frame
      * extents of the window to place its content. */
     [client reframeForDecorationChange];
+    [self decorationGeometryChanged];
+    [URSThemeIntegration redrawTitlebarOfFrame:self];
+    [self updateCursorScale];
+    [connection flush];
+}
+
+- (void) decorationGeometryChanged
+{
+    XCBWindow *client = [self childWindowForKey:ClientWindow];
+    if (client == nil || ![client decorated])
+        return;
+
     [[EWMHService sharedInstanceWithConnection:connection] updateNetFrameExtentsForWindow:client];
     [self configureClient];
     [self updateAllResizeZonePositions];
     [self applyRoundedCornersShapeMask];
-    [URSThemeIntegration redrawTitlebarOfFrame:self];
-    [self updateCursorScale];
-    [connection flush];
 }
 
 - (void) updateCursorScale

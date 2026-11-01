@@ -22,6 +22,7 @@
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
 #import "URSThemeIntegration.h"
+#import "URSOutputScale.h"
 #import "URSUtilityRestackOrder.h"
 #import "URSWindowOutline.h"
 #import "URSLiveMiniatureController.h"
@@ -2405,7 +2406,10 @@ static XCBConnection *sharedInstance;
     // Scale cb by GSScaleFactor for HiDPI displays.
     CGFloat cbScaleFactor = decorationFactor > 0 ? decorationFactor
                                                  : [[TitleBarSettingsService sharedInstance] scaleFactor];
-    int cb = compositorActive ? 0 : (int)cbScaleFactor;
+    // The frame reads the same thing when it is built; a different answer here
+    // would take the width of the theme's window frame out of the client.
+    int cb = (int)URSClientBorderFor(cbScaleFactor, compositorActive,
+                                     [URSThemeIntegration frameBorderWidth]);
 
     // Determine if we should reposition the window.
     // When adopting pre-existing windows at startup, never reposition them.
