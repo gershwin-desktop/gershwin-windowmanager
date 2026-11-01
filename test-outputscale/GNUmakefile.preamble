@@ -1,0 +1,5 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+# The scale arithmetic is plain Foundation, built with ARC like the window manager
+outputscale_OBJC_FILES += ../WindowManager/URSOutputScale.m
+../WindowManager/URSOutputScale.m_FILE_FLAGS += -fobjc-arc

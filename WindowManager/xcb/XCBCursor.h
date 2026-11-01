@@ -40,8 +40,16 @@
 @property (assign, nonatomic) BOOL resizeTopRightCornerSelected;
 @property (assign, nonatomic) BOOL resizeBottomLeftCornerSelected;
 @property (assign, nonatomic) BOOL resizeTopSelected;
+// The pixel size the cursors are loaded at, 0 for the theme's default size
+// (libxcb-cursor, as always); see URSCursorSize.h.
+@property (assign, nonatomic) uint32_t pixelSize;
 
 - (instancetype)initWithConnection:(XCBConnection *)aConnection screen:(XCBScreen*)aScreen;
+- (instancetype)initWithConnection:(XCBConnection *)aConnection screen:(XCBScreen*)aScreen
+                         pixelSize:(uint32_t)aPixelSize;
+// Load every cursor again at another size; a window showing one of them
+// must be given the new id (cursorIdForPosition:, selectLeftPointerCursor).
+- (void) changePixelSize:(uint32_t)aPixelSize;
 - (BOOL) createContext;
 - (void) destroyContext;
 - (void) destroyCursor;

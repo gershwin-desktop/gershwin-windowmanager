@@ -9,6 +9,12 @@
 #import "XCBAtomService.h"
 
 @implementation XCBAtomService
+{
+    // Atom ids to names.  An atom never changes or goes away while the
+    // server runs, and every PropertyNotify is looked up by name, several
+    // times over: asking the server each time cost a round trip apiece.
+    NSMutableDictionary *cachedAtomNames;
+}
 
 @synthesize connection;
 @synthesize cachedAtoms;
@@ -25,6 +31,7 @@
     
     connection = aConnection;
     cachedAtoms = [[NSMutableDictionary alloc] init];
+    cachedAtomNames = [[NSMutableDictionary alloc] init];
     
     return self;
 }
@@ -60,6 +67,7 @@
     xcb_atom_t atom = reply->atom;
     atomValue = [NSNumber numberWithUnsignedInt:atom];
     [cachedAtoms setObject:atomValue forKey:atomName];
+    [cachedAtomNames setObject:atomName forKey:atomValue];
     
     free(reply);
     atomValue = nil;
@@ -96,6 +104,11 @@
         return @"NONE";
     }
 
+    NSString *cachedName = [cachedAtomNames objectForKey:@(anAtom)];
+    if (cachedName != nil) {
+        return cachedName;
+    }
+
     xcb_get_atom_name_cookie_t cookie = xcb_get_atom_name([connection connection], anAtom);
     xcb_get_atom_name_reply_t *reply = xcb_get_atom_name_reply([connection connection], cookie, NULL);
 
@@ -120,6 +133,9 @@
     NSString *name = [NSString stringWithUTF8String:nameCopy];
     free(nameCopy);
     free(reply);
+    if (name != nil) {
+        [cachedAtomNames setObject:name forKey:@(anAtom)];
+    }
     return name;
 }
 
@@ -127,6 +143,7 @@
 {
     connection = nil;
     cachedAtoms = nil;
+    cachedAtomNames = nil;
 }
 
 @end

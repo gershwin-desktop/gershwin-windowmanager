@@ -23,16 +23,36 @@
 @property (strong, nonatomic) NSImage *icon;
 @end
 
+// Defaults key (BOOL, default NO): the window switched to hops in place.
+extern NSString * const URSHopOnWindowSwitchKey;
+// Defaults key (string, default "flow"): how Alt-Tab shows the windows -
+// "flow" flies the windows themselves into a row (it needs compositing and
+// two windows on the screen; otherwise, and with "list", a strip of icons
+// and names is shown).  "deck" is the same flight into a deck: the windows
+// stand one behind the other, the chosen one in front, and the front window
+// falls out at the bottom as the choice moves on.  It is off unless set.
+extern NSString * const URSWindowSwitcherStyleKey;
+
+@class URSFocusManager;
+@class URSWindowFlowController;
+
 @interface URSWindowSwitcher : NSObject
 
 @property (strong, nonatomic) XCBConnection *connection;
+@property (weak, nonatomic) URSFocusManager *focusManager;
 @property (strong, nonatomic) NSMutableArray *windowEntries;   // Array of URSWindowEntry
 @property (assign, nonatomic) NSInteger currentIndex;          // Current position during switching
 @property (assign, nonatomic) BOOL isSwitching;               // Whether we're in the middle of switching
 @property (strong, nonatomic) URSWindowSwitcherOverlay *overlay;  // Visual overlay
+@property (strong, nonatomic) URSWindowFlowController *flowController;
 
 // Singleton access
 + (instancetype)sharedSwitcherWithConnection:(XCBConnection *)connection;
+
+// The style defaults (URSWindowSwitcherStyleKey) say that Alt-Tab shows the
+// windows themselves in a deck, or in a deck or a flow.
++ (BOOL)deckStyleSelected;
++ (BOOL)windowsFlyStyleSelected;
 
 // Window stack management
 - (void)updateWindowStack;

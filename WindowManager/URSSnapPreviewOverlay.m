@@ -13,6 +13,9 @@
 
 #import "URSSnapPreviewOverlay.h"
 #import "URSCompositingManager.h"
+#import "URSSnapPreviewFrame.h"
+#import "XCBConnection.h"
+#import <xcb/shape.h>
 #import <GNUstepGUI/GSDisplayServer.h>
 
 // Constants for the snap preview appearance
@@ -53,8 +56,10 @@ static const CGFloat kBorderWidth = 3.0;
         previewPath = [NSBezierPath bezierPathWithRect:insetBounds];
     }
 
-    // Blue border outline only (no fill)
-    [[NSColor colorWithCalibratedRed:0.2 green:0.5 blue:0.9 alpha:0.9] set];
+    // Blue border outline only (no fill). Without a compositor the alpha is
+    // not blended, so the frame must be fully opaque to keep its colour.
+    [[NSColor colorWithCalibratedRed:0.2 green:0.5 blue:0.9
+                               alpha:self.useRoundedCorners ? 0.9 : 1.0] set];
     [previewPath setLineWidth:kBorderWidth];
     [previewPath stroke];
 }
@@ -96,6 +101,9 @@ static const CGFloat kBorderWidth = 3.0;
                                     NSWindowCollectionBehaviorStationary |
                                     NSWindowCollectionBehaviorFullScreenAuxiliary];
         [self setReleasedWhenClosed:NO];  // Keep window alive for reuse
+        // A name lets tests and diagnostic tools find the preview among the
+        // window manager's otherwise anonymous windows.
+        [self setTitle:@"Snap Preview"];
 
         // Create the content view
         URSSnapPreviewOverlayView *contentView =
@@ -117,6 +125,32 @@ static const CGFloat kBorderWidth = 3.0;
     return self;
 }
 
+// Without a compositor the ARGB window is shown with its undrawn interior as
+// opaque black, so the window is shaped down to its outline instead.
+- (void)applyFrameShapeForSize:(NSSize)size scale:(CGFloat)scale
+                   compositing:(BOOL)compositing {
+    xcb_connection_t *conn =
+        [[XCBConnection sharedConnectionAsWindowManager:YES] connection];
+    if (compositing) {
+        // The shape of an earlier non-compositing preview must not linger
+        xcb_shape_mask(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                       _overlayX11Window, 0, 0, XCB_NONE);
+        return;
+    }
+    URSSnapPreviewRect rects[4];
+    int count = URSSnapPreviewFrameRects((uint32_t)size.width, (uint32_t)size.height,
+                                         (uint32_t)ceil(kBorderWidth * scale), rects);
+    xcb_rectangle_t xrects[4];
+    for (int i = 0; i < count; i++) {
+        xrects[i] = (xcb_rectangle_t){(int16_t)rects[i].x, (int16_t)rects[i].y,
+                                      (uint16_t)rects[i].width,
+                                      (uint16_t)rects[i].height};
+    }
+    xcb_shape_rectangles(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING,
+                         XCB_CLIP_ORDERING_UNSORTED, _overlayX11Window, 0, 0,
+                         count, xrects);
+}
+
 - (void)showPreviewForRect:(NSValue *)rectValue {
     if (!rectValue) {
         [self hide];
@@ -128,15 +162,22 @@ static const CGFloat kBorderWidth = 3.0;
     // Update window frame to match target snap area
     [self setFrame:targetRect display:NO];
 
-    // Update content view frame
+    // The window frame is in device pixels but the view is laid out in
+    // points; at a GSScaleFactor other than 1 a view sized in pixels overhangs
+    // the window, cutting off the right and bottom edges of the outline.
+    CGFloat scale = [self userSpaceScaleFactor];
     URSSnapPreviewOverlayView *view = (URSSnapPreviewOverlayView *)[self contentView];
-    [view setFrame:NSMakeRect(0, 0, targetRect.size.width, targetRect.size.height)];
+    [view setFrame:NSMakeRect(0, 0, targetRect.size.width / scale,
+                              targetRect.size.height / scale)];
 
     // Check if compositing is active to determine whether to use rounded corners
     URSCompositingManager *compositor = [URSCompositingManager sharedManager];
     view.useRoundedCorners = [compositor compositingActive];
 
     [view setNeedsDisplay:YES];
+
+    [self applyFrameShapeForSize:targetRect.size scale:scale
+                      compositing:view.useRoundedCorners];
 
     // Ensure compositor skips shadows for this overlay window
     [compositor setSkipShadowForWindow:_overlayX11Window];

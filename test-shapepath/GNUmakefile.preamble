@@ -1,0 +1,5 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+# The shape path is pure geometry, built with ARC like the window manager
+shapepath_OBJC_FILES += ../WindowManager/URSShapePath.m
+../WindowManager/URSShapePath.m_FILE_FLAGS += -fobjc-arc

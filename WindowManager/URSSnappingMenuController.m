@@ -9,6 +9,8 @@
 #import "URSSnappingMenuController.h"
 #import "XCBScreen.h"
 #import "XCBWindow.h"
+#import "URSCompositingManager+WindowFlip.h"
+#import "URSFlipSideController.h"
 
 @implementation URSSnappingMenuController
 
@@ -107,26 +109,40 @@
 {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Window"];
 
-    struct { NSString *title; SEL action; } items[] = {
-        { @"Center",                   @selector(snapMenuCenter:) },
-        { @"Maximize Vertically",      @selector(snapMenuMaximizeVertically:) },
-        { @"Maximize Horizontally",    @selector(snapMenuMaximizeHorizontally:) },
-        { nil, nil },  // separator
-        { @"Snap Left",                @selector(snapMenuSnapLeft:) },
-        { @"Snap Right",               @selector(snapMenuSnapRight:) },
-        { nil, nil },  // separator
-        { @"Snap Top Left",            @selector(snapMenuSnapTopLeft:) },
-        { @"Snap Top Right",           @selector(snapMenuSnapTopRight:) },
-        { @"Snap Bottom Left",         @selector(snapMenuSnapBottomLeft:) },
-        { @"Snap Bottom Right",        @selector(snapMenuSnapBottomRight:) },
-        { nil, nil },  // separator
-        { @"Window Properties",        @selector(snapMenuInformation:) },
-        { @"Close",                    @selector(snapMenuClose:) },
+    // Utility panels (palettes) are never maximized - matches the missing
+    // titlebar zoom button, so the menu offers no way to do it either.
+    XCBWindow *client = [frame childWindowForKey:ClientWindow];
+    BOOL isUtility = [client isUtilityPanel];
+    // Every maximize and snap resizes the window, which a window whose size
+    // is fixed refuses, so the menu does not offer them either.
+    BOOL isFixedSize = ![client canResize];
+
+    struct { NSString *title; SEL action; BOOL skipForUtility; BOOL resizes; } items[] = {
+        { @"Center",                   @selector(snapMenuCenter:),                NO,  NO },
+        { @"Maximize Vertically",      @selector(snapMenuMaximizeVertically:),    YES, YES },
+        { @"Maximize Horizontally",    @selector(snapMenuMaximizeHorizontally:),  YES, YES },
+        { nil, nil, NO, YES },  // separator
+        { @"Snap Left",                @selector(snapMenuSnapLeft:),              NO,  YES },
+        { @"Snap Right",               @selector(snapMenuSnapRight:),             NO,  YES },
+        { nil, nil, NO, YES },  // separator
+        { @"Snap Top Left",            @selector(snapMenuSnapTopLeft:),           NO,  YES },
+        { @"Snap Top Right",           @selector(snapMenuSnapTopRight:),          NO,  YES },
+        { @"Snap Bottom Left",         @selector(snapMenuSnapBottomLeft:),        NO,  YES },
+        { @"Snap Bottom Right",        @selector(snapMenuSnapBottomRight:),       NO,  YES },
+        { nil, nil, NO, NO },  // separator
+        { @"Window Properties",        @selector(snapMenuInformation:),           NO,  NO },
+        { @"Close",                    @selector(snapMenuClose:),                 NO,  NO },
     };
 
     for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
+        if (isFixedSize && items[i].resizes) {
+            continue;
+        }
         if (!items[i].title) {
             [menu addItem:[NSMenuItem separatorItem]];
+            continue;
+        }
+        if (isUtility && items[i].skipForUtility) {
             continue;
         }
         NSMenuItem *item =
@@ -138,7 +154,31 @@
         [menu addItem:item];
     }
 
+    // Only the composited picture turns, so without compositing (or with
+    // the effect turned off) there is nothing to offer.
+    if ([[URSCompositingManager sharedManager] canFlipWindows]) {
+        NSInteger index = [menu indexOfItemWithTarget:self
+                                            andAction:@selector(snapMenuInformation:)];
+        NSMenuItem *flip = [[NSMenuItem alloc] initWithTitle:@"Flip Window"
+                                                      action:@selector(snapMenuFlipWindow:)
+                                               keyEquivalent:@""];
+        [flip setTarget:self];
+        [flip setRepresentedObject:frame];
+        [menu insertItem:flip atIndex:index];
+        [menu insertItem:[NSMenuItem separatorItem] atIndex:index + 1];
+    }
+
     return menu;
+}
+
+// Greyed out when the window's application has no source directory to show
+// on its back.
+- (BOOL)validateMenuItem:(NSMenuItem *)item
+{
+    if ([item action] == @selector(snapMenuFlipWindow:)) {
+        return [self.flipSideController canFlipFrame:[item representedObject]];
+    }
+    return YES;
 }
 
 #pragma mark - Button Watchdog
@@ -247,6 +287,14 @@
     XCBFrame *frame = [sender representedObject];
     if (frame && [self.connection windowForXCBId:[frame window]]) {
         [self.connection executeSnapForZone:SnapZoneBottomRight frame:frame];
+    }
+}
+
+- (void)snapMenuFlipWindow:(NSMenuItem *)sender
+{
+    XCBFrame *frame = [sender representedObject];
+    if (frame && [self.connection windowForXCBId:[frame window]]) {
+        [self.flipSideController flipFrame:frame];
     }
 }
 

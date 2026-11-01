@@ -1,0 +1,5 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+# The probe is compiled into the test directly; it reads real windows.
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+ADDITIONAL_OBJCFLAGS += -D_GNU_SOURCE
+ADDITIONAL_LDFLAGS += -lxcb -lxcb-shm -lxcb-composite -ldl

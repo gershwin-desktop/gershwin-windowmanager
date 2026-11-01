@@ -5,6 +5,7 @@
 // Created by slex on 26/03/21.
 
 #import "XCBShape.h"
+#import "URSWindowOutline.h"
 #import "XCBConnection.h"
 
 @implementation XCBShape
@@ -130,18 +131,34 @@
 
 }
 
+/* The top corners are filled row by row from URSCornerCut instead of with
+ * X arcs: the server's arc rasterization keeps a different set of pixels on
+ * the left than on the right, and the outline the titlebar draws without a
+ * compositor (URSTitlebarOutlineRects) has to lie exactly on the outermost
+ * pixels the shape keeps. */
+- (void) fillTopCornersWithRadius:(int)aRadius
+{
+    int r = MIN(aRadius, MIN(orWidth / 2, orHeight));
+    xcb_rectangle_t rows[r > 0 ? r : 1];
+    int row;
+
+    for (row = 0; row < r; row++) {
+        int cut = URSCornerCut(r, row);
+        rows[row] = (xcb_rectangle_t){ (int16_t)cut, (int16_t)row,
+                                       (uint16_t)(orWidth - 2 * cut), 1 };
+    }
+    if (r > 0) {
+        xcb_poly_fill_rectangle([connection connection], borderPixmap, white, r, rows);
+    }
+}
+
 - (void) createTopArcsWithRadius:(int)aRadius
 {
     xcb_connection_t *conn = [connection connection];
     radius = aRadius;
     int diameter = radius * 2;
 
-    // Only top corners get arcs, bottom stays rectangular
-    xcb_arc_t bArcs[] = {
-        { 0, 0, diameter, diameter, 0, 360 << 6 },                // top-left
-        { orWidth - diameter, 0, diameter, diameter, 0, 360 << 6 }, // top-right
-    };
-
+    // Only top corners are rounded, bottom stays rectangular
     xcb_rectangle_t brects[] = {
         { radius, 0, orWidth - diameter, orHeight },  // center vertical strip
         { 0, radius, orWidth, orHeight - radius },    // below top corners
@@ -151,7 +168,7 @@
     xcb_rectangle_t bounding = {0, 0, orWidth, orHeight};
     xcb_poly_fill_rectangle(conn, borderPixmap, black, 1, &bounding);
     xcb_poly_fill_rectangle(conn, borderPixmap, white, 2, brects);
-    xcb_poly_fill_arc(conn, borderPixmap, white, 2, bArcs);
+    [self fillTopCornersWithRadius:radius];
 
     // Apply shape mask
     xcb_shape_mask(conn, XCB_SHAPE_SO_SET, XCB_SHAPE_SK_BOUNDING, winId, -borderWidth, -borderWidth, borderPixmap);
@@ -166,8 +183,6 @@
     xcb_poly_fill_rectangle(conn, borderPixmap, black, 1, &bounding);
 
     // Build rectangles for the straight edges
-    // Note: diameter is (radius * 2) to match createTopArcsWithRadius
-    int topDiameter = (topRadius > 0) ? (topRadius * 2) : 0;
     int bottomDiameter = (bottomRadius > 0) ? (bottomRadius * 2) : 0;
 
     // Center strip (between left and right corners)
@@ -200,11 +215,7 @@
 
     // Draw corner arcs
     if (topRadius > 0) {
-        xcb_arc_t topArcs[] = {
-            { 0, 0, topDiameter, topDiameter, 0, 360 << 6 },                    // top-left
-            { orWidth - topDiameter, 0, topDiameter, topDiameter, 0, 360 << 6 }, // top-right
-        };
-        xcb_poly_fill_arc(conn, borderPixmap, white, 2, topArcs);
+        [self fillTopCornersWithRadius:topRadius];
     }
 
     if (bottomRadius > 0) {

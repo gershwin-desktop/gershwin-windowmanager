@@ -71,6 +71,10 @@ jobs:
             ln -sfn "$BASE/gershwin-windowmanager" Library/Sources/gershwin-windowmanager
             make corelibs
             make windowmanager
+            # Multi-monitor checks on a private Xorg with the dummy driver
+            # (16 RandR outputs); the script picks a free display from :200.
+            pkg install -y xorg-server xf86-video-dummy xrandr xdotool xmessage xwininfo xprop
+            MULTIHEAD_REQUIRE=1 sh "$BASE/gershwin-windowmanager/Tests/run-multihead.sh"
 
   build-archlinux-x86_64:
     name: Arch x86_64
@@ -114,6 +118,22 @@ jobs:
         working-directory: gershwin-developer
         run: make windowmanager
 
+      - name: Multi-monitor tests (Xorg dummy driver)
+        # Unit suites, then a live hotplug check on a private Xorg with 16
+        # RandR outputs; see gershwin-windowmanager/Tests/run-multihead.sh.
+        run: |
+          pacman -S --noconfirm xorg-server xf86-video-dummy xorg-xrandr xdotool xorg-xmessage xorg-xwininfo xorg-xprop
+          MULTIHEAD_REQUIRE=1 MULTIHEAD_KEEP="$GITHUB_WORKSPACE/multihead-logs" \
+            sh gershwin-windowmanager/Tests/run-multihead.sh
+
+      - name: Upload multi-monitor logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multihead-logs-archlinux-x86_64
+          path: multihead-logs
+          if-no-files-found: ignore
+
   build-debian-x86_64:
     name: Debian x86_64
     runs-on: ubuntu-latest
@@ -155,6 +175,22 @@ jobs:
       - name: Build windowmanager
         working-directory: gershwin-developer
         run: make windowmanager
+
+      - name: Multi-monitor tests (Xorg dummy driver)
+        # Unit suites, then a live hotplug check on a private Xorg with 16
+        # RandR outputs; see gershwin-windowmanager/Tests/run-multihead.sh.
+        run: |
+          apt-get -y install xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils x11-utils xdotool
+          MULTIHEAD_REQUIRE=1 MULTIHEAD_KEEP="$GITHUB_WORKSPACE/multihead-logs" \
+            sh gershwin-windowmanager/Tests/run-multihead.sh
+
+      - name: Upload multi-monitor logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multihead-logs-debian-x86_64
+          path: multihead-logs
+          if-no-files-found: ignore
 
   build-openbsd-78-amd64:
     name: OpenBSD x86_64
@@ -209,3 +245,7 @@ jobs:
             ln -sfn "$BASE/gershwin-windowmanager" Library/Sources/gershwin-windowmanager
             make corelibs
             make windowmanager
+            # Multi-monitor tests are not run here: they need a private Xorg
+            # with the dummy video driver, and it is not known to be installed
+            # in this image.  Run Tests/run-multihead.sh once it is.
+            echo "SKIP multi-monitor tests: no Xorg dummy video driver verified on OpenBSD"

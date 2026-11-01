@@ -9,8 +9,12 @@
 #import "EWMHService.h"
 #import "Transformers.h"
 #import "EEwmh.h"
+#import "URSOutputScale.h"
+#import "XCBFrame.h"
 #import "TitleBarSettingsService.h"
 #import "XCBTypes.h"
+#import "URSThemeIntegration.h"
+#import "URSActiveApplicationPolicy.h"
 #import <unistd.h>
 
 @protocol URSCompositingManaging <NSObject>
@@ -132,6 +136,7 @@
 @synthesize MANAGER;
 @synthesize KdeNetWFrameStrut;
 @synthesize MotifWMHints;
+@synthesize GershwinActiveApp;
 
 //GNUstep properties
 @synthesize GNUStepMiniaturizeWindow;
@@ -264,6 +269,7 @@
     MANAGER = @"MANAGER";
     KdeNetWFrameStrut = @"_KDE_NET_WM_FRAME_STRUT";
     MotifWMHints = @"_MOTIF_WM_HINTS";
+    GershwinActiveApp = @"_ACTIVE_APPLICATION";
 
     //GNUStep properties
 
@@ -380,7 +386,8 @@
         UTF8_STRING,
         MANAGER,
         KdeNetWFrameStrut,
-        MotifWMHints
+        MotifWMHints,
+        GershwinActiveApp
     };
 
     atoms = [NSArray arrayWithObjects:atomStrings count:sizeof(atomStrings)/sizeof(NSString*)];
@@ -403,6 +410,64 @@
     return sharedInstance;
 }
 
+
+static BOOL atomInList(xcb_atom_t atom, const xcb_atom_t *list, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        if (list[i] == atom) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+/* Other clients add their own atoms to _NET_SUPPORTED (Menu advertises its
+   global-menu atoms there, which apps check before exporting their menus).
+   Replacing the list on every reassertion would wipe those, so keep foreign
+   entries and write only when one of ours is missing: an unconditional write
+   also wakes every client watching the root window each time. */
+- (void) mergeSupportedAtoms:(const xcb_atom_t *)ownAtoms
+                       count:(uint32_t)count
+                onRootWindow:(xcb_window_t)root
+{
+    xcb_connection_t *conn = [connection connection];
+    xcb_atom_t supportedAtom = [[[atomService cachedAtoms] objectForKey:EWMHSupported] unsignedIntValue];
+
+    xcb_get_property_cookie_t cookie = xcb_get_property(conn, 0, root, supportedAtom,
+                                                        XCB_ATOM_ATOM, 0, UINT32_MAX / 4);
+    xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, cookie, NULL);
+
+    const xcb_atom_t *existing = NULL;
+    uint32_t existingCount = 0;
+    if (reply && reply->format == 32 && reply->type == XCB_ATOM_ATOM) {
+        existing = (const xcb_atom_t *)xcb_get_property_value(reply);
+        existingCount = (uint32_t)xcb_get_property_value_length(reply) / sizeof(xcb_atom_t);
+    }
+
+    xcb_atom_t *merged = malloc((count + existingCount) * sizeof(xcb_atom_t));
+    if (!merged) {
+        free(reply);
+        return;
+    }
+    memcpy(merged, ownAtoms, count * sizeof(xcb_atom_t));
+    uint32_t total = count;
+    for (uint32_t i = 0; i < existingCount; i++) {
+        if (!atomInList(existing[i], ownAtoms, count)) {
+            merged[total++] = existing[i];
+        }
+    }
+    BOOL ownMissing = NO;
+    for (uint32_t j = 0; j < count && !ownMissing; j++) {
+        ownMissing = !atomInList(ownAtoms[j], existing, existingCount);
+    }
+    free(reply);
+
+    if (ownMissing) {
+        xcb_change_property(conn, XCB_PROP_MODE_REPLACE, root, supportedAtom,
+                            XCB_ATOM_ATOM, 32, total, merged);
+    }
+    free(merged);
+}
 
 - (void) putPropertiesForRootWindow:(XCBWindow *)rootWindow andWmWindow:(XCBWindow *)wmWindow
 {
@@ -501,6 +566,13 @@
         // _WINDOW_CLOSE_ANIMATION only when the WM actually consumes them.
         @"_WINDOW_BIRTH_ANIMATION",
         @"_WINDOW_CLOSE_ANIMATION",
+
+        // Window outlines: clients check for this before setting
+        // _WM_SHAPE_PATH (see URSShapePath.h)
+        @"_WM_SHAPE_PATH",
+
+        // Live miniatures of minimized windows (see URSLiveMiniatureController.h)
+        @"_WINDOW_LIVE_MINIATURE",
     };
 
     NSArray *rootAtoms = [NSArray arrayWithObjects:rootProperties count:sizeof(rootProperties)/sizeof(NSString*)];
@@ -508,20 +580,15 @@
     // Make sure the window-animation protocol atoms are interned so the
     // _NET_SUPPORTED array below carries real atom ids (FnFromNSArrayAtomsToXcbAtomTArray
     // only reads the cache; uncached names would map to 0).
-    [atomService cacheAtoms: @[ @"_WINDOW_BIRTH_ANIMATION", @"_WINDOW_CLOSE_ANIMATION" ]];
+    [atomService cacheAtoms: @[ @"_WINDOW_BIRTH_ANIMATION", @"_WINDOW_CLOSE_ANIMATION",
+                                @"_WM_SHAPE_PATH", @"_WINDOW_LIVE_MINIATURE" ]];
 
     xcb_atom_t atomsTransformed[[rootAtoms count]];
     FnFromNSArrayAtomsToXcbAtomTArray(rootAtoms, atomsTransformed, atomService);
 
-    // Set _NET_SUPPORTED on root window
-    xcb_change_property([connection connection],
-                        XCB_PROP_MODE_REPLACE,
-                        [rootWindow window],
-                        [[[atomService cachedAtoms] objectForKey:EWMHSupported] unsignedIntValue],
-                        XCB_ATOM_ATOM,
-                        32,
-                        (uint32_t)[rootAtoms count],
-                        &atomsTransformed);
+    [self mergeSupportedAtoms:atomsTransformed
+                        count:(uint32_t)[rootAtoms count]
+                 onRootWindow:[rootWindow window]];
 
     xcb_window_t wmXcbWindow = [wmWindow window];
 
@@ -662,7 +729,17 @@
 - (void) updateNetFrameExtentsForWindow:(XCBWindow *)aWindow
 {
     TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-    uint16_t titleHeight = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+    /* A client asks with _NET_REQUEST_FRAME_EXTENTS before it is mapped,
+       before the window is marked a utility panel at map time; its own
+       declared style answers then, or a utility panel is told the taller
+       title bar of an ordinary window and comes out sized wrong. */
+    BOOL utility = [aWindow isUtilityPanel] || [self clientDeclaresUtilityWindowStyle:aWindow];
+    /* Once framed, the frame's monitor decides the scale of its title bar
+       and border; before, the global factor answers. */
+    XCBWindow *parent = [aWindow parentWindow];
+    CGFloat frameFactor = [parent isKindOfClass:[XCBFrame class]]
+        ? [(XCBFrame *)parent decorationScaleFactor] : 0;
+    uint16_t titleHeight = [settings heightForUtility:utility scaleFactor:frameFactor];
 
     BOOL compositorActive = NO;
     Class compositorClass = NSClassFromString(@"URSCompositingManager");
@@ -676,13 +753,12 @@
         }
     }
 
-    CGFloat sf = [settings scaleFactor];
-    uint32_t cb = compositorActive ? 0 : (uint32_t)sf;
-    uint32_t extents[4];
-    extents[0] = cb;              // left border
-    extents[1] = cb;              // right border
-    extents[2] = titleHeight;     // top (titlebar)
-    extents[3] = cb;              // bottom border
+    CGFloat sf = frameFactor > 0 ? frameFactor : [settings scaleFactor];
+    // A theme with its own window frame (Aaron's Platinum border) sets the
+    // inset, and the client must know about it.
+    URSFrameExtents e = URSFrameExtentsFor(titleHeight, sf, compositorActive,
+                                           [URSThemeIntegration frameBorderWidth]);
+    uint32_t extents[4] = { e.left, e.right, e.top, e.bottom };
 
     [self changePropertiesForWindow:aWindow
                            withMode:XCB_PROP_MODE_REPLACE
@@ -702,6 +778,98 @@
                          withFormat:32
                      withDataLength:4
                            withData:extents];
+}
+
+- (BOOL) clientDeclaresUtilityWindowStyle:(XCBWindow*)aWindow
+{
+    if (!aWindow)
+        return NO;
+
+    // GNUstepWMAttributes (XGServerWindow.h): flags, window_style,
+    // window_level, ...  Every field is stored as one XA_CARDINAL/format-32
+    // unit regardless of the compiler's native 'long' width, so word index 1
+    // is always window_style.  NSUtilityWindowMask == 16 (NSPanel.h).
+    void *reply = [self getProperty:GNUStepWmAttr
+                        propertyType:XCB_GET_PROPERTY_TYPE_ANY
+                           forWindow:aWindow
+                              delete:NO
+                              length:4];
+    if (!reply)
+        return NO;
+
+    BOOL isUtility = NO;
+    int len = xcb_get_property_value_length((xcb_get_property_reply_t *)reply);
+    if (len >= (int)(2 * sizeof(uint32_t)))
+    {
+        uint32_t *words = (uint32_t *)xcb_get_property_value(reply);
+        isUtility = (words[1] & 16) != 0;
+    }
+    free(reply);
+    return isUtility;
+}
+
+- (BOOL) clientWindowLevel:(int32_t *)level forWindow:(XCBWindow*)aWindow
+{
+    if (!aWindow || !level)
+        return NO;
+
+    // GNUstepWMAttributes: flags, window_style, window_level, ...  Word
+    // index 2 is window_level (see clientDeclaresUtilityWindowStyle:).
+    void *reply = [self getProperty:GNUStepWmAttr
+                        propertyType:XCB_GET_PROPERTY_TYPE_ANY
+                           forWindow:aWindow
+                              delete:NO
+                              length:4];
+    if (!reply)
+        return NO;
+
+    BOOL found = NO;
+    int len = xcb_get_property_value_length((xcb_get_property_reply_t *)reply);
+    if (len >= (int)(3 * sizeof(uint32_t)))
+    {
+        uint32_t *words = (uint32_t *)xcb_get_property_value(reply);
+        *level = (int32_t)words[2];
+        found = YES;
+    }
+    free(reply);
+    return found;
+}
+
+- (BOOL) clientDeclaresFloatingOrAboveLevel:(XCBWindow*)aWindow
+{
+    // NSFloatingWindowLevel == 2 (NSWindow.h) - any window the client asked
+    // to float above normal ones (whether or not it also set
+    // NSUtilityWindowMask) must keep-above so a document raise never
+    // buries it, matching what a real floating panel does on screen.
+    int32_t level = 0;
+    return [self clientWindowLevel:&level forWindow:aWindow] && level >= 2;
+}
+
+- (BOOL)windowDeclaresModalState:(XCBWindow *)aWindow
+{
+    if (!aWindow)
+        return NO;
+
+    void *reply = [self getProperty:EWMHWMState
+                        propertyType:XCB_ATOM_ATOM
+                           forWindow:aWindow
+                              delete:NO
+                              length:UINT32_MAX];
+    if (!reply)
+        return NO;
+
+    xcb_atom_t modalAtom = [atomService atomFromCachedAtomsWithKey:EWMHWMStateModal];
+
+    BOOL isModal = NO;
+    int count = xcb_get_property_value_length((xcb_get_property_reply_t *)reply) / sizeof(xcb_atom_t);
+    xcb_atom_t *stateAtoms = (xcb_atom_t *)xcb_get_property_value(reply);
+    for (int i = 0; i < count && !isModal; i++)
+    {
+        if (stateAtoms[i] == modalAtom)
+            isModal = YES;
+    }
+    free(reply);
+    return isModal;
 }
 
 - (void)updateNetWmWindowTypeDockForWindow:(XCBWindow *)aWindow
@@ -894,7 +1062,8 @@
         // Menu.app tracks _NET_ACTIVE_WINDOW to show the frontmost app's menu,
         // and without this an automation request for an already-topmost window
         // would leave the property pointing at a stale window.
-        [self updateNetActiveWindow:aWindow];
+        [self updateNetActiveWindow:aWindow
+                   requestedByPager:someData.data32[0] == URS_ACTIVATION_SOURCE_PAGER];
 
         return;
     }
@@ -1008,19 +1177,21 @@
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateMaximizedHorz])
         {
             BOOL maxHorz = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow maximizedHorizontally]);
-            XCBScreen *screen = [aWindow screen];
             XCBSize size;
             XCBPoint position;
             XCBFrame *frame;
             XCBTitleBar *titleBar;
 
-            // Read workarea to respect struts
-            int32_t workareaX = 0, workareaY = 0;
-            uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
-            XCBWindow *rootWindow = [screen rootWindow];
-            [self readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
+            // The usable area of the monitor the window is on, so a maximized
+            // window neither spans several monitors nor covers their panels.
+            XCBRect windowArea = [connection maximizedAreaForRect:
+                [aWindow decorated] ? [[aWindow parentWindow] windowRect] : [aWindow windowRect]];
+            int32_t workareaX = windowArea.position.x;
+            uint32_t workareaWidth = windowArea.size.width;
 
-            if (maxHorz)
+            // Utility panels (palettes) are never maximized - matches the
+            // titlebar's missing zoom button and the snapping menu's guard.
+            if (maxHorz && ![aWindow isUtilityPanel])
             {
                 if ([aWindow isMinimized])
                     [aWindow restoreFromIconified];
@@ -1068,7 +1239,6 @@
                 }
 
                 [aWindow setMaximizedHorizontally:maxHorz];
-                screen = nil;
             }
 
             [self updateNetWmState:aWindow];
@@ -1078,19 +1248,21 @@
             secondProp == [atomService atomFromCachedAtomsWithKey:EWMHWMStateMaximizedVert])
         {
             BOOL maxVert = (action == _NET_WM_STATE_ADD) || (action == _NET_WM_STATE_TOGGLE && ![aWindow maximizedVertically]);
-            XCBScreen *screen = [aWindow screen];
             XCBSize size;
             XCBPoint position;
             XCBFrame *frame;
             XCBTitleBar *titleBar;
 
-            // Read workarea to respect struts
-            int32_t workareaX = 0, workareaY = 0;
-            uint32_t workareaWidth = [screen width], workareaHeight = [screen height];
-            XCBWindow *rootWindow = [screen rootWindow];
-            [self readWorkareaForRootWindow:rootWindow x:&workareaX y:&workareaY width:&workareaWidth height:&workareaHeight];
+            // The usable area of the monitor the window is on, so a maximized
+            // window neither spans several monitors nor covers their panels.
+            XCBRect windowArea = [connection maximizedAreaForRect:
+                [aWindow decorated] ? [[aWindow parentWindow] windowRect] : [aWindow windowRect]];
+            int32_t workareaY = windowArea.position.y;
+            uint32_t workareaHeight = windowArea.size.height;
 
-            if (maxVert)
+            // Utility panels (palettes) are never maximized - matches the
+            // titlebar's missing zoom button and the snapping menu's guard.
+            if (maxVert && ![aWindow isUtilityPanel])
             {
                 if ([aWindow isMinimized])
                     [aWindow restoreFromIconified];
@@ -1138,7 +1310,6 @@
                 }
 
                 [aWindow setMaximizedVertically:maxVert];
-                screen = nil;
             }
 
             [self updateNetWmState:aWindow];
@@ -1150,8 +1321,12 @@
             BOOL fullscr = (action == _NET_WM_STATE_ADD)
                         || (action == _NET_WM_STATE_TOGGLE && ![aWindow fullScreen]);
 
-            XCBScreen *screen = [aWindow screen];
-            uint32_t scrW = [screen width], scrH = [screen height];
+            // Fullscreen covers the window's whole monitor, panels included,
+            // not the screen across every monitor.
+            XCBRect monitor = [connection fullscreenAreaForRect:
+                [aWindow decorated] ? [[aWindow parentWindow] windowRect] : [aWindow windowRect]];
+            int32_t scrX = monitor.position.x, scrY = monitor.position.y;
+            uint32_t scrW = monitor.size.width, scrH = monitor.size.height;
 
             if (fullscr)
             {
@@ -1187,10 +1362,10 @@
                     }
                     [frame destroyResizeZones];
 
-                    // Resize frame to fill the whole screen
-                    XCBRect targetRect = XCBMakeRect(XCBMakePoint(0, 0),
+                    // Resize frame to fill the monitor
+                    XCBRect targetRect = XCBMakeRect(XCBMakePoint(scrX, scrY),
                                                       XCBMakeSize(scrW, scrH));
-                    uint32_t fvals[4] = {0, 0, scrW, scrH};
+                    uint32_t fvals[4] = {(uint32_t)scrX, (uint32_t)scrY, scrW, scrH};
                     xcb_configure_window([connection connection], [frame window],
                                          XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
                                          | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
@@ -1210,6 +1385,7 @@
 
                     // Raise above panels by bumping stacking
                     [frame stackAbove];
+                    [connection restackDockWindowsAbove];
                     [connection flush];
 
                     frame = nil;
@@ -1218,13 +1394,13 @@
                 }
                 else
                 {
-                    // Undecorated window: resize to fill the whole screen
-                    uint32_t vals[4] = {0, 0, scrW, scrH};
+                    // Undecorated window: resize to fill its whole monitor
+                    uint32_t vals[4] = {(uint32_t)scrX, (uint32_t)scrY, scrW, scrH};
                     xcb_configure_window([connection connection], [aWindow window],
                                          XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y
                                          | XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT,
                                          vals);
-                    [aWindow setWindowRect:XCBMakeRect(XCBMakePoint(0, 0),
+                    [aWindow setWindowRect:XCBMakeRect(XCBMakePoint(scrX, scrY),
                                                         XCBMakeSize(scrW, scrH))];
                     [aWindow setFullScreen:YES];
                     [connection flush];
@@ -1255,8 +1431,7 @@
                     // Resize titlebar back to full width (was set to 0x0 on
                     // fullscreen enter — it was never unmapped).
                     XCBTitleBar *titleBar = (XCBTitleBar *)[frame childWindowForKey:TitleBar];
-                    TitleBarSettingsService *settings = [TitleBarSettingsService sharedInstance];
-                    uint16_t titleHgt = [settings heightDefined] ? [settings height] : [settings defaultHeight];
+                    uint16_t titleHgt = [clientWin decorationTitleHeight];
                     {
                         uint32_t tvals[2] = {frameRect.size.width, titleHgt};
                         xcb_configure_window([connection connection], [titleBar window],
@@ -1311,7 +1486,6 @@
             }
 
             [self updateNetWmState:aWindow];
-            screen = nil;
         }
 
         /*** WindowShade (titlebar double-click uses the same XCBFrame methods) ***/
@@ -1533,10 +1707,19 @@
                 [clientSet addObject:@([connection clientList][i])];
             }
 
+            // The root's children are frames for framed clients, so a frame
+            // stands for the client inside it.
             for (int i = 0; i < num_children; i++) {
-                NSNumber *childNumber = @(children[i]);
+                xcb_window_t child = children[i];
+                XCBWindow *childWindow = [connection windowForXCBId:child];
+                if ([childWindow isKindOfClass:[XCBFrame class]]) {
+                    XCBWindow *client = [(XCBFrame *)childWindow childWindowForKey:ClientWindow];
+                    child = client ? [client window] : XCB_NONE;
+                }
+                NSNumber *childNumber = @(child);
                 if ([clientSet containsObject:childNumber]) {
-                    stackingList[stackingCount++] = children[i];
+                    stackingList[stackingCount++] = child;
+                    [clientSet removeObject:childNumber];
                 }
             }
 
@@ -1584,6 +1767,11 @@
 
 - (void) updateNetActiveWindow:(XCBWindow*)aWindow
 {
+    [self updateNetActiveWindow:aWindow requestedByPager:NO];
+}
+
+- (void) updateNetActiveWindow:(XCBWindow*)aWindow requestedByPager:(BOOL)byPager
+{
     XCBWindow *rootWindow = [[aWindow onScreen] rootWindow];
     xcb_window_t win = [aWindow window];
 
@@ -1595,6 +1783,68 @@
                      withDataLength:1
                            withData:&win];
 
+    /* A click on the desktop itself is reported by Workspace
+       (_ACTIVATE_APPLICATION with its own PID), because the window manager
+       does not see it. */
+    BOOL isDesktop = [[aWindow windowType] isEqualToString:EWMHWMWindowTypeDesktop];
+    if (URSActiveWindowMakesItsApplicationFrontmost(isDesktop, byPager)) {
+        // Windows the WM does not frame have no cached pid
+        u_int32_t pid = [aWindow pid];
+        if (pid == 0 || pid == (u_int32_t)-1)
+            pid = [self netWMPidForWindow:aWindow];
+        if (pid != 0 && pid != (u_int32_t)-1)
+            [self updateGershwinActiveAppForPid:(pid_t)pid];
+    }
+    lastActiveWindowId = win;
+
+    rootWindow = nil;
+}
+
+- (void) updateGershwinActiveAppForPid:(pid_t)pid
+{
+    XCBWindow *rootWindow = [connection rootWindowForScreenNumber:0];
+    uint32_t value = (uint32_t)pid;
+
+    [self changePropertiesForWindow:rootWindow
+                           withMode:XCB_PROP_MODE_REPLACE
+                       withProperty:GershwinActiveApp
+                           withType:XCB_ATOM_CARDINAL
+                         withFormat:32
+                     withDataLength:1
+                           withData:&value];
+    [connection flush];
+    rootWindow = nil;
+}
+
+- (void) activateGershwinAppForPid:(pid_t)pid
+{
+    XCBWindow *rootWindow = [connection rootWindowForScreenNumber:0];
+
+    // The application's own window may have the focus already (Workspace
+    // reporting a click on its desktop); it stays the active window
+    XCBWindow *active = lastActiveWindowId != XCB_NONE
+        ? [connection windowForXCBId:lastActiveWindowId] : nil;
+    if (active && [self netWMPidForWindow:active] == (uint32_t)pid) {
+        [self updateGershwinActiveAppForPid:pid];
+        rootWindow = nil;
+        return;
+    }
+
+    // The application first: a client that reacts to the active window
+    // going away reads the frontmost application right then.  None, as EWMH
+    // has it for no active window; clients read an empty property as
+    // garbage.
+    [self updateGershwinActiveAppForPid:pid];
+    xcb_window_t none = XCB_NONE;
+    [self changePropertiesForWindow:rootWindow
+                           withMode:XCB_PROP_MODE_REPLACE
+                       withProperty:EWMHActiveWindow
+                           withType:XCB_ATOM_WINDOW
+                         withFormat:32
+                     withDataLength:1
+                           withData:&none];
+    [connection flush];
+    lastActiveWindowId = XCB_NONE;
     rootWindow = nil;
 }
 
@@ -1792,6 +2042,17 @@
             @"_NET_WM_SYNC_REQUEST_COUNTER",
             @"_NET_WM_SYNC_REQUEST",
             @"WM_STATE",                   // Window state - client-specific
+            // ICCCM 4.1.2.5: WM_CLASS names the application instance/class
+            // of a top-level client window, for tools that enumerate an
+            // app's windows (session managers, xdotool/wmctrl -class
+            // lookups). The frame is not that application window; copying
+            // WM_CLASS onto it makes every managed window look like two
+            // windows of the same class to such a tool, and the frame's
+            // geometry includes the titlebar the client's own does not -
+            // a query that resolves the frame instead of the client lands
+            // on the titlebar and reports the WM's own arrow cursor as if
+            // it were the client's.
+            @"WM_CLASS",
             @"WM_CLIENT_MACHINE",
             @"WM_WINDOW_ROLE",             // Client window role
             @"WM_NORMAL_HINTS",            // Size hints - client-specific
@@ -1991,8 +2252,11 @@
  * 
  * Also applies atoms to the parent frame window so that interactive xprop clicking
  * on any part of the window (frame or client) will display the EWMH properties.
- * Additionally, copies critical client window properties (WM_CLASS, _NET_WM_NAME, _NET_WM_ICON, etc.)
+ * Additionally, copies critical client window properties (_NET_WM_NAME, _NET_WM_ICON, etc.)
  * from the client to frame window to maintain window property consistency.
+ * WM_CLASS is excluded from this copy (shouldExcludePropertyFromFrameSync): it is
+ * the ICCCM identity of the application's own top-level window, and a tool that
+ * enumerates windows by WM_CLASS must find only the client, not the frame too.
  */
 - (void) initializeClientWindowAtomsForWindow:(XCBWindow*)aWindow
 {
@@ -2306,6 +2570,7 @@
     MANAGER = nil;
     KdeNetWFrameStrut = nil;
     MotifWMHints = nil;
+    GershwinActiveApp = nil;
 
     //GNUStep properties
 

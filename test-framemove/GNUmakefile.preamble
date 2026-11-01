@@ -1,0 +1,6 @@
+GNUSTEP_INSTALLATION_DOMAIN = SYSTEM
+ADDITIONAL_INCLUDE_DIRS += -I../WindowManager
+# Whether a frame may change size is pure logic, built with ARC like the
+# window manager
+framemove_OBJC_FILES += ../WindowManager/URSFrameMove.m
+../WindowManager/URSFrameMove.m_FILE_FLAGS += -fobjc-arc
